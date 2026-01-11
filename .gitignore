@@ -33,3 +33,11 @@
 
 build
 .DS_Store
+
+# vscode files
+.vscode
+.cache
+
+# devcontainer
+.devcontainer/*
+!.devcontainer/*.template

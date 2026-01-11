@@ -1,0 +1,40 @@
+{
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "runArgs": [
+        "--ulimit=core=-1",
+        "--cap-add=SYS_ADMIN",
+        "--cap-add=SYS_PTRACE",
+        "--cap-add=PERFMON",
+        "--cap-add=SYS_NICE",   // allow NUMA page inquiry
+        "--security-opt",
+        "seccomp=unconfined",
+        "--privileged"
+    ],
+    "forwardPorts": [
+        5432
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "eamodio.gitlens",
+                "github.vscode-github-actions",
+                "GitHub.copilot",
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-themes",
+                "ms-vscode.hexeditor",
+                "ms-vscode.makefile-tools",
+                "ms-vsliveshare.vsliveshare",
+                "rioj7.command-variable",
+                "ash-blade.postgresql-hacker-helper"
+            ],
+            "settings": {
+                "files.exclude": {
+                    "**/*.o": true,
+                    "**/.deps/": true
+                },
+            }
+        }
+    },
+}

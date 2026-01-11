@@ -1,0 +1,158 @@
+FROM ubuntu:24.04 AS base
+
+ENV TZ=UTC
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# install build tools(alphabetic order)
+RUN apt update && apt install -y \
+    autoconf2.69 \
+    bash-completion \
+    bison \
+    bzip2 \
+    ccache \
+    cpanminus \
+    cron \
+    curl \
+    flex \
+    fswatch \
+    gcc-14 \
+    g++-14 \
+    gdb \
+    git \
+    htop \
+    iproute2 \
+    libclang-dev \
+    libcurl4-gnutls-dev \
+    libgdal-dev \
+    libgeos-dev \
+    libicu-dev \
+    libkrb5-dev \
+    liblz4-dev \
+    libpam0g-dev \
+    libperl-dev \
+    libproj-dev \
+    libprotobuf-c-dev \
+    libreadline-dev \
+    libselinux1-dev \
+    libssl-dev \
+    libxml2-dev \
+    libxslt-dev \
+    libzstd-dev \
+    locales \
+    lsb-release \
+    lsof \
+    make \
+    man \
+    meson \
+    net-tools \
+    neovim \
+    ninja-build \
+    perl \
+    pkg-config \
+    procps \
+    protobuf-c-compiler \
+    pspg \
+    python3 python3-pip \
+    software-properties-common \
+    stow \
+    strace \
+    sudo \
+    tmux \
+    tree \
+    unzip \
+    uuid-dev \
+    valgrind \
+    wget \
+    zlib1g-dev \
+ # Tools used to process the documentation
+ # https://www.postgresql.org/docs/current/docguide-toolsets.html#DOCGUIDE-TOOLSETS-INST-DEBIAN
+ && apt install -y docbook-xml docbook-xsl libxml2-utils xsltproc \
+ && add-apt-repository ppa:deadsnakes/ppa -y \
+ && apt install -y \
+    python3.12 python3.12-venv \
+ && apt purge -y \
+    software-properties-common \
+ && apt remove -y libpq-dev \
+ && apt autoremove -y \
+ && apt clean
+
+RUN sudo pip3 install --break-system-packages pipenv pipenv-shebang
+
+RUN cpanm install IPC::Run
+RUN cpanm https://cpan.metacpan.org/authors/id/S/SH/SHANCOCK/Perl-Tidy-20230309.tar.gz
+
+RUN locale-gen en_US.UTF-8
+
+# add the iceberg user to sudoers and allow all sudoers to login without a password prompt
+RUN useradd -ms /bin/bash iceberg \
+ && usermod -aG sudo iceberg \
+ && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+
+WORKDIR /home/iceberg
+USER iceberg
+
+# run all make commands with the number of cores available
+RUN echo "export MAKEFLAGS=\"-j \$(nproc)\"" >> "/home/iceberg/.bashrc"
+
+RUN git clone --branch v1.4.3 --depth 1 https://github.com/theory/pgenv.git .pgenv
+COPY --chown=iceberg:iceberg pgenv/config/ .pgenv/config/
+ENV PATH="/home/iceberg/.pgenv/bin:${PATH}"
+ENV PATH="/home/iceberg/.pgenv/pgsql/bin:${PATH}"
+
+# build postgres versions separately for effective parrallelism and caching of already built
+# versions when changing only certain versions
+FROM base AS pg18
+RUN MAKEFLAGS="-j $(nproc)" pgenv build 18.1
+RUN rm .pgenv/src/*.tar*
+RUN make -C .pgenv/src/postgresql-*/ clean
+RUN make -C .pgenv/src/postgresql-*/src/include install
+
+# Stage the pgenv artifacts for PG18
+RUN mkdir .pgenv-staging/
+RUN cp -r .pgenv/src .pgenv/pgsql-* .pgenv/config .pgenv-staging/
+RUN rm .pgenv-staging/config/default.conf
+
+FROM base AS uncrustify-builder
+
+RUN sudo apt update && sudo apt install -y cmake tree
+
+WORKDIR /uncrustify
+RUN curl -L https://github.com/uncrustify/uncrustify/archive/uncrustify-0.82.0.tar.gz | tar xz
+WORKDIR /uncrustify/uncrustify-uncrustify-0.82.0/
+RUN mkdir build
+WORKDIR /uncrustify/uncrustify-uncrustify-0.82.0/build/
+RUN cmake ..
+RUN MAKEFLAGS="-j $(nproc)" make -s
+
+RUN make install DESTDIR=/uncrustify
+
+# assemble the final container by copying over the artifacts from separately build containers
+FROM base AS devcontainer
+
+LABEL org.opencontainers.image.source=https://github.com/pgiceberg/pgiceberg
+LABEL org.opencontainers.image.description="Development container for the pgiceberg project"
+LABEL org.opencontainers.image.licenses=Apache-2.0
+
+RUN yes | sudo unminimize
+
+# for persistent bash history across devcontainers we need to have
+# a) a directory to store the history in
+# b) a prompt command to append the history to the file
+# c) specify the history file to store the history in
+# b and c are done in the .bashrc to make it persistent across shells only
+RUN sudo install -d -o iceberg -g iceberg /commandhistory \
+ && echo "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" >> "/home/iceberg/.bashrc"
+
+COPY --link --from=uncrustify-builder /uncrustify/usr/ /usr/
+COPY --link --from=pg18 /home/iceberg/.pgenv-staging/ /home/iceberg/.pgenv/
+
+VOLUME /data
+RUN sudo mkdir /data \
+ && sudo chown iceberg:iceberg /data
+
+COPY --chown=iceberg:iceberg .psqlrc .psqlrc
+
+# sets default pg version
+RUN pgenv switch 18.1
+
+ENV PGPORT=5432
