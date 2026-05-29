@@ -18,20 +18,93 @@ endmacro()
 # ----------------------------------------------------------------------
 # Apache Iceberg C++
 
-function(resolve_iceberg_dependency)
+set(PGICEBERG_ICEBERG_GIT_TAG
+    "main"
+    CACHE STRING "apache/iceberg-cpp commit or tag to fetch")
+
+function(resolve_iceberg_dependency out_target)
   prepare_fetchcontent()
 
   set(ICEBERG_ARROW
       ON
       CACHE BOOL "" FORCE)
+  set(ICEBERG_BUILD_STATIC
+      ON
+      CACHE BOOL "" FORCE)
+  set(ICEBERG_BUILD_SHARED
+      OFF
+      CACHE BOOL "" FORCE)
+  set(ICEBERG_BUILD_BUNDLE
+      ON
+      CACHE BOOL "" FORCE)
+  set(ICEBERG_BUILD_REST
+      ${PGICEBERG_ENABLE_REST_CATALOG}
+      CACHE BOOL "" FORCE)
+  set(ICEBERG_BUILD_SQL_CATALOG
+      ON
+      CACHE BOOL "" FORCE)
+  set(ICEBERG_SQL_POSTGRESQL
+      ON
+      CACHE BOOL "" FORCE)
+  set(ICEBERG_SQL_SQLITE
+      ON
+      CACHE BOOL "" FORCE)
   set(ICEBERG_BUILD_TESTS
+      OFF
+      CACHE BOOL "" FORCE)
+  set(CPR_USE_SYSTEM_CURL
       OFF
       CACHE BOOL "" FORCE)
 
   fetchcontent_declare(Iceberg
                        GIT_REPOSITORY https://github.com/apache/iceberg-cpp.git
-                       GIT_TAG 9a044687a78bbf9c2c6c29ff6a30f91b645d4cfd)
+                       GIT_TAG ${PGICEBERG_ICEBERG_GIT_TAG})
   fetchcontent_makeavailable(Iceberg)
-endfunction()
 
-resolve_iceberg_dependency()
+  set(iceberg_targets)
+
+  foreach(candidate iceberg_bundle_static iceberg_bundle_shared)
+    if(TARGET ${candidate})
+      list(APPEND iceberg_targets ${candidate})
+      break()
+    endif()
+  endforeach()
+
+  if(NOT iceberg_targets)
+    message(WARNING "iceberg-cpp was fetched, but no known bundle library target was found"
+    )
+    set(${out_target}
+        ""
+        PARENT_SCOPE)
+    return()
+  endif()
+
+  if(PGICEBERG_ENABLE_REST_CATALOG)
+    foreach(candidate iceberg_rest_static iceberg_rest_shared)
+      if(TARGET ${candidate})
+        list(APPEND iceberg_targets ${candidate})
+        break()
+      endif()
+    endforeach()
+
+    list(FIND iceberg_targets iceberg_rest_static rest_static_index)
+    list(FIND iceberg_targets iceberg_rest_shared rest_shared_index)
+    if(rest_static_index EQUAL -1 AND rest_shared_index EQUAL -1)
+      message(FATAL_ERROR "iceberg-cpp REST catalog support is enabled, but no known REST library target was found"
+      )
+    endif()
+  endif()
+
+  foreach(candidate iceberg_sql_catalog_static iceberg_sql_catalog_shared)
+    if(TARGET ${candidate})
+      list(APPEND iceberg_targets ${candidate})
+      set(${out_target}
+          ${iceberg_targets}
+          PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
+
+  message(FATAL_ERROR "iceberg-cpp SQL catalog support is required, but no known SQL catalog library target was found"
+  )
+endfunction()

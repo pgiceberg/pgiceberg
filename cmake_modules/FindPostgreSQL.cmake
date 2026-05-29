@@ -1,91 +1,123 @@
-# - Find PostgreSQL
-# Find the PostgreSQL installation by utilizing pg_config
-# This module defines
-#  POSTGRESQL_FOUND, True if PostgreSQL is found
-#  POSTGRESQL_VERSION_STRING, the version of PostgreSQL found
-#  POSTGRESQL_INCLUDE_DIR, the directory of the PostgreSQL headers
-#  POSTGRESQL_LIBRARY_DIR, the link directory for PostgreSQL libraries
-#  POSTGRESQL_BIN_DIR, the directory of the PostgreSQL binaries
-#  POSTGRESQL_SHARE_DIR, the directory of PostgreSQL share objects
-#  POSTGRESQL_REGRESS, pg_regress executable
+# - Find PostgreSQL for building server extensions.
 #
-# This module defines :prop_tgt:`IMPORTED` target ``PostgreSQL::PostgreSQL``
-# if PostgreSQL has been found.
+# This module intentionally discovers PostgreSQL through pg_config so pgenv can
+# switch versions by changing PATH or by passing -DPG_CONFIG=/path/to/pg_config.
+#
+# Variables:
+#   POSTGRESQL_FOUND
+#   POSTGRESQL_VERSION_STRING
+#   POSTGRESQL_INCLUDE_DIR
+#   POSTGRESQL_SERVER_INCLUDE_DIR
+#   POSTGRESQL_LIBRARY_DIR
+#   POSTGRESQL_PKGLIB_DIR
+#   POSTGRESQL_SHARE_DIR
+#   POSTGRESQL_EXTENSION_DIR
+#   POSTGRESQL_BIN_DIR
+#   POSTGRESQL_REGRESS
+#
+# Imported targets:
+#   PostgreSQL::Server
+#   PostgreSQL::Client
+#   PostgreSQL::PostgreSQL
+
+include(FindPackageHandleStandardArgs)
+
+set(PG_CONFIG
+    ""
+    CACHE FILEPATH "Path to pg_config")
 
 set(POSTGRESQL_BIN_DIR
     ""
-    CACHE STRING "non-standard path to the postgresql program executables")
+    CACHE PATH "Path to PostgreSQL program executables")
 
-if(NOT "${POSTGRESQL_BIN_DIR}" STREQUAL "")
+if(PG_CONFIG)
+  set(POSTGRESQL_PG_CONFIG "${PG_CONFIG}")
+elseif(POSTGRESQL_BIN_DIR)
   find_program(POSTGRESQL_PG_CONFIG
                NAMES pg_config
-               PATHS ${POSTGRESQL_BIN_DIR}
+               PATHS "${POSTGRESQL_BIN_DIR}"
                NO_DEFAULT_PATH)
 else()
   find_program(POSTGRESQL_PG_CONFIG
                NAMES pg_config
-               PATHS /usr/lib/postgresql/*/bin/)
+               PATHS /usr/lib/postgresql/*/bin)
 endif()
-message(STATUS "POSTGRESQL_PG_CONFIG: ${POSTGRESQL_PG_CONFIG}")
 
 if(POSTGRESQL_PG_CONFIG)
-  execute_process(COMMAND ${POSTGRESQL_PG_CONFIG} --version
+  execute_process(COMMAND "${POSTGRESQL_PG_CONFIG}" --version
                   OUTPUT_STRIP_TRAILING_WHITESPACE
                   OUTPUT_VARIABLE POSTGRESQL_VERSION_STRING)
-endif()
-message(STATUS "POSTGRESQL_VERSION_STRING: ${POSTGRESQL_VERSION_STRING}")
-
-if(POSTGRESQL_PG_CONFIG)
-  execute_process(COMMAND ${POSTGRESQL_PG_CONFIG} --includedir-server
+  execute_process(COMMAND "${POSTGRESQL_PG_CONFIG}" --includedir
                   OUTPUT_STRIP_TRAILING_WHITESPACE
                   OUTPUT_VARIABLE POSTGRESQL_INCLUDE_DIR)
-endif()
-message(STATUS "POSTGRESQL_INCLUDE_DIR: ${POSTGRESQL_INCLUDE_DIR}")
-
-if(POSTGRESQL_PG_CONFIG)
-  execute_process(COMMAND ${POSTGRESQL_PG_CONFIG} --libdir
+  execute_process(COMMAND "${POSTGRESQL_PG_CONFIG}" --includedir-server
+                  OUTPUT_STRIP_TRAILING_WHITESPACE
+                  OUTPUT_VARIABLE POSTGRESQL_SERVER_INCLUDE_DIR)
+  execute_process(COMMAND "${POSTGRESQL_PG_CONFIG}" --libdir
                   OUTPUT_STRIP_TRAILING_WHITESPACE
                   OUTPUT_VARIABLE POSTGRESQL_LIBRARY_DIR)
-endif()
-message(STATUS "POSTGRESQL_LIBRARY_DIR: ${POSTGRESQL_LIBRARY_DIR}")
-
-if(POSTGRESQL_PG_CONFIG)
-  execute_process(COMMAND ${POSTGRESQL_PG_CONFIG} --sharedir
+  execute_process(COMMAND "${POSTGRESQL_PG_CONFIG}" --pkglibdir
+                  OUTPUT_STRIP_TRAILING_WHITESPACE
+                  OUTPUT_VARIABLE POSTGRESQL_PKGLIB_DIR)
+  execute_process(COMMAND "${POSTGRESQL_PG_CONFIG}" --sharedir
                   OUTPUT_STRIP_TRAILING_WHITESPACE
                   OUTPUT_VARIABLE POSTGRESQL_SHARE_DIR)
-endif()
-message(STATUS "POSTGRESQL_SHARE_DIR: ${POSTGRESQL_SHARE_DIR}")
-
-if(POSTGRESQL_PG_CONFIG)
-  execute_process(COMMAND ${POSTGRESQL_PG_CONFIG} --pkglibdir
-                  OUTPUT_STRIP_TRAILING_WHITESPACE
-                  OUTPUT_VARIABLE T_POSTGRESQL_PKGLIB_DIR)
-endif()
-
-find_program(POSTGRESQL_REGRESS
-             NAMES pg_regress
-             PATHS ${T_POSTGRESQL_PKGLIB_DIR}/pgxs/src/test/regress
-             NO_DEFAULT_PATH)
-message(STATUS "POSTGRESQL_REGRESS: ${POSTGRESQL_REGRESS}")
-
-if(POSTGRESQL_PG_CONFIG)
-  execute_process(COMMAND ${POSTGRESQL_PG_CONFIG} --bindir
+  execute_process(COMMAND "${POSTGRESQL_PG_CONFIG}" --bindir
                   OUTPUT_STRIP_TRAILING_WHITESPACE
                   OUTPUT_VARIABLE POSTGRESQL_BIN_DIR)
-endif()
-message(STATUS "POSTGRESQL_BIN_DIR: ${POSTGRESQL_BIN_DIR}")
 
-if(POSTGRESQL_INCLUDE_DIR AND POSTGRESQL_LIBRARY_DIR)
-  set(POSTGRESQL_FOUND TRUE)
-  add_library(PostgreSQL::PostgreSQL UNKNOWN IMPORTED)
+  set(POSTGRESQL_EXTENSION_DIR "${POSTGRESQL_SHARE_DIR}/extension")
+
+  find_program(POSTGRESQL_REGRESS
+               NAMES pg_regress
+               PATHS "${POSTGRESQL_PKGLIB_DIR}/pgxs/src/test/regress"
+                     "${POSTGRESQL_BIN_DIR}"
+               NO_DEFAULT_PATH)
+  find_library(POSTGRESQL_LIBPQ_LIBRARY
+               NAMES pq
+               PATHS "${POSTGRESQL_LIBRARY_DIR}"
+               NO_DEFAULT_PATH)
+endif()
+
+find_package_handle_standard_args(
+  PostgreSQL
+  REQUIRED_VARS POSTGRESQL_PG_CONFIG
+                POSTGRESQL_SERVER_INCLUDE_DIR
+                POSTGRESQL_PKGLIB_DIR
+                POSTGRESQL_EXTENSION_DIR
+                POSTGRESQL_LIBPQ_LIBRARY
+  VERSION_VAR POSTGRESQL_VERSION_STRING)
+
+if(POSTGRESQL_FOUND AND NOT TARGET PostgreSQL::Server)
+  add_library(PostgreSQL::Server INTERFACE IMPORTED)
+  set_target_properties(PostgreSQL::Server
+                        PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
+                                   "${POSTGRESQL_INCLUDE_DIR};${POSTGRESQL_SERVER_INCLUDE_DIR}"
+  )
+endif()
+
+if(POSTGRESQL_FOUND AND NOT TARGET PostgreSQL::Client)
+  add_library(PostgreSQL::Client INTERFACE IMPORTED)
+  set_target_properties(PostgreSQL::Client
+                        PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
+                                   "${POSTGRESQL_INCLUDE_DIR}"
+                                   INTERFACE_LINK_LIBRARIES "${POSTGRESQL_LIBPQ_LIBRARY}")
+endif()
+
+if(POSTGRESQL_FOUND AND NOT TARGET PostgreSQL::PostgreSQL)
+  add_library(PostgreSQL::PostgreSQL INTERFACE IMPORTED)
   set_target_properties(PostgreSQL::PostgreSQL
-                        PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${POSTGRESQL_INCLUDE_DIR}
-                                   INTERFACE_INCLUDE_DIRECTORIES
-                                   ${POSTGRESQL_LIBRARY_DIR})
-  message(STATUS "PostgreSQL found.")
-else()
-  set(POSTGRESQL_FOUND FALSE)
-  message(STATUS "PostgreSQL not found.")
+                        PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
+                                   "${POSTGRESQL_INCLUDE_DIR}"
+                                   INTERFACE_LINK_LIBRARIES "${POSTGRESQL_LIBPQ_LIBRARY}")
 endif()
 
-mark_as_advanced(POSTGRESQL_INCLUDE_DIR POSTGRESQL_LIBRARY_DIR)
+mark_as_advanced(POSTGRESQL_PG_CONFIG
+                 POSTGRESQL_INCLUDE_DIR
+                 POSTGRESQL_SERVER_INCLUDE_DIR
+                 POSTGRESQL_LIBRARY_DIR
+                 POSTGRESQL_PKGLIB_DIR
+                 POSTGRESQL_SHARE_DIR
+                 POSTGRESQL_EXTENSION_DIR
+                 POSTGRESQL_REGRESS
+                 POSTGRESQL_LIBPQ_LIBRARY)

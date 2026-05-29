@@ -1,0 +1,71 @@
+name: Sanitizers
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PG_VERSION: "18.4"
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+jobs:
+  sanitizers:
+    name: ASAN and UBSAN
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install CI dependencies
+        run: .github/scripts/install-ci-dependencies.sh
+
+      - name: Cache pgenv PostgreSQL
+        uses: actions/cache@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-v1
+
+      - name: Cache CMake build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ccache
+            build/sanitizers/_deps
+          key: cmake-deps-sanitizers-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-v1
+          restore-keys: |
+            cmake-deps-sanitizers-${{ runner.os }}-
+
+      - name: Install PostgreSQL with pgenv
+        run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
+
+      - name: Configure sanitizer build
+        run: |
+          export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
+          cmake -S . -B build/sanitizers -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPG_CONFIG="$(command -v pg_config)" \
+            -DPGICEBERG_SANITIZERS=address,undefined
+
+      - name: Build sanitizer target
+        run: cmake --build build/sanitizers
+
+      - name: Install sanitizer extension
+        run: cmake --install build/sanitizers --component pgiceberg
+
+      - name: Run sanitizer regression tests
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so)"
+          ctest --test-dir build/sanitizers --output-on-failure

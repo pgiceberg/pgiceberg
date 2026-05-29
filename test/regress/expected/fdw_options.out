@@ -1,0 +1,23 @@
+CREATE EXTENSION pgiceberg;
+\pset format unaligned
+SELECT fdwname
+FROM pg_foreign_data_wrapper
+WHERE fdwname = 'pgiceberg';
+fdwname
+pgiceberg
+(1 row)
+\set VERBOSITY terse
+CREATE SERVER invalid_option
+FOREIGN DATA WRAPPER pgiceberg
+OPTIONS (unknown_option 'value');
+ERROR:  invalid pgiceberg option "unknown_option"
+CREATE SERVER invalid_catalog_type
+FOREIGN DATA WRAPPER pgiceberg
+OPTIONS (catalog_type 'invalid');
+ERROR:  invalid pgiceberg catalog_type "invalid"
+CREATE SERVER rest_catalog
+FOREIGN DATA WRAPPER pgiceberg
+OPTIONS (catalog_type 'rest');
+ERROR:  pgiceberg REST catalog support is not enabled
+\set VERBOSITY default
+DROP EXTENSION pgiceberg;

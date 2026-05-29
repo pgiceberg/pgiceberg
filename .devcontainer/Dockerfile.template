@@ -1,7 +1,9 @@
 FROM ubuntu:24.04 AS base
 
+ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # install build tools(alphabetic order)
 RUN apt update && apt install -y \
@@ -9,14 +11,19 @@ RUN apt update && apt install -y \
     bash-completion \
     bison \
     bzip2 \
+    ca-certificates \
     ccache \
+    clangd \
+    cmake \
     cpanminus \
     cron \
     curl \
+    docbook-xml \
+    docbook-xsl \
     flex \
     fswatch \
-    gcc-14 \
     g++-14 \
+    gcc-14 \
     gdb \
     git \
     htop \
@@ -30,12 +37,14 @@ RUN apt update && apt install -y \
     liblz4-dev \
     libpam0g-dev \
     libperl-dev \
+    libpq-dev \
     libproj-dev \
     libprotobuf-c-dev \
     libreadline-dev \
     libselinux1-dev \
     libssl-dev \
     libxml2-dev \
+    libxml2-utils \
     libxslt-dev \
     libzstd-dev \
     locales \
@@ -52,8 +61,10 @@ RUN apt update && apt install -y \
     procps \
     protobuf-c-compiler \
     pspg \
-    python3 python3-pip \
-    software-properties-common \
+    python3 \
+    python3-pip \
+    python3.12 \
+    python3.12-venv \
     stow \
     strace \
     sudo \
@@ -63,18 +74,16 @@ RUN apt update && apt install -y \
     uuid-dev \
     valgrind \
     wget \
+    xsltproc \
     zlib1g-dev \
- # Tools used to process the documentation
- # https://www.postgresql.org/docs/current/docguide-toolsets.html#DOCGUIDE-TOOLSETS-INST-DEBIAN
- && apt install -y docbook-xml docbook-xsl libxml2-utils xsltproc \
- && add-apt-repository ppa:deadsnakes/ppa -y \
- && apt install -y \
-    python3.12 python3.12-venv \
- && apt purge -y \
-    software-properties-common \
- && apt remove -y libpq-dev \
  && apt autoremove -y \
- && apt clean
+ && apt clean \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 \
+ && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100 \
+ && sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100 \
+ && sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
 RUN sudo pip3 install --break-system-packages pipenv pipenv-shebang
 
@@ -95,14 +104,13 @@ USER iceberg
 RUN echo "export MAKEFLAGS=\"-j \$(nproc)\"" >> "/home/iceberg/.bashrc"
 
 RUN git clone --branch v1.4.3 --depth 1 https://github.com/theory/pgenv.git .pgenv
-COPY --chown=iceberg:iceberg pgenv/config/ .pgenv/config/
 ENV PATH="/home/iceberg/.pgenv/bin:${PATH}"
 ENV PATH="/home/iceberg/.pgenv/pgsql/bin:${PATH}"
 
 # build postgres versions separately for effective parrallelism and caching of already built
 # versions when changing only certain versions
 FROM base AS pg18
-RUN MAKEFLAGS="-j $(nproc)" pgenv build 18.1
+RUN MAKEFLAGS="-j $(nproc)" pgenv build 18.4
 RUN rm .pgenv/src/*.tar*
 RUN make -C .pgenv/src/postgresql-*/ clean
 RUN make -C .pgenv/src/postgresql-*/src/include install
@@ -110,7 +118,7 @@ RUN make -C .pgenv/src/postgresql-*/src/include install
 # Stage the pgenv artifacts for PG18
 RUN mkdir .pgenv-staging/
 RUN cp -r .pgenv/src .pgenv/pgsql-* .pgenv/config .pgenv-staging/
-RUN rm .pgenv-staging/config/default.conf
+RUN rm -f .pgenv-staging/config/default.conf
 
 FROM base AS uncrustify-builder
 
@@ -133,7 +141,7 @@ LABEL org.opencontainers.image.source=https://github.com/pgiceberg/pgiceberg
 LABEL org.opencontainers.image.description="Development container for the pgiceberg project"
 LABEL org.opencontainers.image.licenses=Apache-2.0
 
-RUN yes | sudo unminimize
+RUN yes | sudo unminimize; test "${PIPESTATUS[1]}" -eq 0
 
 # for persistent bash history across devcontainers we need to have
 # a) a directory to store the history in
@@ -150,9 +158,9 @@ VOLUME /data
 RUN sudo mkdir /data \
  && sudo chown iceberg:iceberg /data
 
-COPY --chown=iceberg:iceberg .psqlrc .psqlrc
-
 # sets default pg version
-RUN pgenv switch 18.1
+RUN pgenv switch 18.4
 
+ENV CC=/usr/bin/gcc-14
+ENV CXX=/usr/bin/g++-14
 ENV PGPORT=5432

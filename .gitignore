@@ -29,6 +29,7 @@
 # Executables
 *.exe
 *.out
+!test/regress/expected/*.out
 *.app
 
 build
