@@ -1,8 +1,12 @@
 {
     "build": {
-        "dockerfile": "Dockerfile"
+        "dockerfile": "Dockerfile",
+        "options": [
+            "--network=host"
+        ],
     },
     "runArgs": [
+        "--network=host",
         "--ulimit=core=-1",
         "--cap-add=SYS_ADMIN",
         "--cap-add=SYS_PTRACE",
@@ -15,12 +19,15 @@
     "forwardPorts": [
         5432
     ],
+    "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/post-create.sh",
     "customizations": {
         "vscode": {
             "extensions": [
                 "eamodio.gitlens",
                 "github.vscode-github-actions",
                 "GitHub.copilot",
+                "llvm-vs-code-extensions.vscode-clangd",
+                "ms-vscode.cmake-tools",
                 "ms-vscode.cpptools",
                 "ms-vscode.cpptools-themes",
                 "ms-vscode.hexeditor",
@@ -30,6 +37,14 @@
                 "ash-blade.postgresql-hacker-helper"
             ],
             "settings": {
+                "C_Cpp.intelliSenseEngine": "disabled",
+                "clangd.arguments": [
+                    "--compile-commands-dir=/tmp/pgiceberg-build/pg18.4",
+                    "--background-index",
+                    "--header-insertion=never",
+                    "--completion-style=detailed",
+                    "--query-driver=/usr/bin/g++-14,/usr/bin/gcc-14,/usr/lib/ccache/*,/usr/bin/c++,/usr/bin/g++"
+                ],
                 "files.exclude": {
                     "**/*.o": true,
                     "**/.deps/": true

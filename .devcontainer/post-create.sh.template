@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ensure_local_bin_on_path() {
+    export PATH="${HOME}/.local/bin:${PATH}"
+
+    if ! grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "${HOME}/.bashrc"; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.bashrc"
+    fi
+}
+
+install_codex() {
+    ensure_local_bin_on_path
+
+    if command -v codex >/dev/null 2>&1; then
+        codex --version
+        return
+    fi
+
+    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh
+    ensure_local_bin_on_path
+    codex --version
+}
+
+install_cursor_agent() {
+    if command -v agent >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/agent" ]; then
+        return
+    fi
+
+    curl https://cursor.com/install -fsS | bash
+    ensure_local_bin_on_path
+}
+
+install_codex
+install_cursor_agent

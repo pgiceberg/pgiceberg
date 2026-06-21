@@ -1,0 +1,23 @@
+---
+Checks: |
+  -*,
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  -clang-analyzer-cplusplus.NewDelete,
+  bugprone-*,
+  performance-*,
+  readability-isolate-declaration,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-macro-parentheses,
+  -bugprone-reserved-identifier,
+  -bugprone-unused-return-value,
+  -performance-no-int-to-ptr,
+
+CheckOptions:
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: _
+  - key: readability-identifier-naming.ProtectedMemberSuffix
+    value: _
+
+HeaderFilterRegex: '(^src/|.*/pgiceberg/src/).*'

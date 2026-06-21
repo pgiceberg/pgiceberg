@@ -1,0 +1,72 @@
+name: Build and Test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PG_VERSION: "18.4"
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.os }})
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-14
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install CI dependencies
+        run: .github/scripts/install-ci-dependencies.sh
+
+      - name: Cache pgenv PostgreSQL
+        uses: actions/cache@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-v1
+
+      - name: Cache CMake build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ccache
+            build/tests/_deps
+          key: cmake-deps-tests-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-v1
+          restore-keys: |
+            cmake-deps-tests-${{ runner.os }}-
+
+      - name: Install PostgreSQL with pgenv
+        run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
+
+      - name: Configure
+        run: |
+          export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
+          cmake -S . -B build/tests -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPG_CONFIG="$(command -v pg_config)"
+
+      - name: Build
+        run: cmake --build build/tests
+
+      - name: Install extension
+        run: cmake --install build/tests --component pgiceberg
+
+      - name: Run regression tests
+        run: ctest --test-dir build/tests --output-on-failure

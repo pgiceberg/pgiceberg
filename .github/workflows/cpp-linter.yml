@@ -1,0 +1,97 @@
+name: C++ Linter
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - main
+    paths:
+      - ".clang-format"
+      - ".clang-tidy"
+      - "CMakeLists.txt"
+      - "cmake_modules/**"
+      - "src/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PG_VERSION: "18.4"
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+jobs:
+  cpp-linter:
+    name: C++ Linter
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install CI dependencies
+        run: .github/scripts/install-ci-dependencies.sh
+
+      - name: Cache pgenv PostgreSQL
+        uses: actions/cache@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-v1
+
+      - name: Cache CMake build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ccache
+            build/cpp-linter/_deps
+          key: cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-v1
+          restore-keys: |
+            cmake-deps-cpp-linter-${{ runner.os }}-
+
+      - name: Install PostgreSQL with pgenv
+        run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
+
+      - name: Configure compile database
+        run: |
+          export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
+          cmake -S . -B build/cpp-linter -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DPG_CONFIG="$(command -v pg_config)"
+
+      - name: Build
+        run: cmake --build build/cpp-linter
+
+      - name: Run cpp-linter
+        id: linter
+        uses: cpp-linter/cpp-linter-action@v2.15.1
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          style: file
+          tidy-checks: ""
+          version: 22
+          files-changed-only: true
+          lines-changed-only: true
+          thread-comments: true
+          ignore: "build|cmake_modules"
+          database: build/cpp-linter
+          verbosity: debug
+          extra-args: "-std=c++23 -fno-builtin-std-forward_like"
+
+      - name: Fail on linter findings
+        if: steps.linter.outputs.checks-failed != 0
+        env:
+          CHECKS_FAILED: ${{ steps.linter.outputs.checks-failed }}
+        run: |
+          echo "cpp-linter reported ${CHECKS_FAILED} failed checks"
+          exit 1
