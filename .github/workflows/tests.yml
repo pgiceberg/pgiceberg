@@ -70,3 +70,30 @@ jobs:
 
       - name: Run regression tests
         run: ctest --test-dir build/tests --output-on-failure
+
+      - name: Show regression artifacts
+        if: failure()
+        run: |
+          for file in \
+            build/tests/test/regress/regression.diffs \
+            build/tests/test/regress/regression.out \
+            build/tests/Testing/Temporary/LastTest.log; do
+            if [[ -f "${file}" ]]; then
+              echo "::group::${file}"
+              cat "${file}"
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: Upload regression artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-${{ matrix.os }}
+          path: |
+            build/tests/test/regress/regression.diffs
+            build/tests/test/regress/regression.out
+            build/tests/test/regress/results
+            build/tests/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 7
