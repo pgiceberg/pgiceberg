@@ -10,7 +10,7 @@ data file handling are delegated to apache/iceberg-cpp.
 
 - `src/fdw/`: PostgreSQL Foreign Data Wrapper callbacks and scan state.
 - `src/common/`: PostgreSQL/C++ boundary helpers.
-- `sql/` and `pgiceberg.control.in`: extension install metadata.
+- `sql/` and `pgiceberg.control`: extension install metadata.
 - `test/regress/`: `pg_regress` smoke tests.
 - `scripts/`: pgenv-oriented build helpers.
 

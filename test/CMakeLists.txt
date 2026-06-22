@@ -6,6 +6,8 @@ if(POSTGRESQL_REGRESS)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
        "unix_socket_directories = '${CMAKE_CURRENT_BINARY_DIR}/regress'\n"
        "listen_addresses = '127.0.0.1'\n")
+  file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
+       "dynamic_library_path = '${PROJECT_BINARY_DIR}/src:$libdir'\n")
 
   add_test(NAME regress_fdw
            COMMAND "${POSTGRESQL_REGRESS}" --bindir "${POSTGRESQL_BIN_DIR}" --inputdir
