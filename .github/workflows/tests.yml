@@ -68,40 +68,6 @@ jobs:
       - name: Install extension
         run: cmake --install build/tests --component pgiceberg
 
-      - name: Inspect regression paths
-        run: |
-          export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
-          echo "::group::pg_config"
-          pg_config --version
-          echo "bindir=$(pg_config --bindir)"
-          echo "pkglibdir=$(pg_config --pkglibdir)"
-          echo "sharedir=$(pg_config --sharedir)"
-          echo "::endgroup::"
-
-          echo "::group::built extension files"
-          find build/tests -name 'pgiceberg*' -print -exec ls -l {} \; -exec file {} \;
-          echo "::endgroup::"
-
-          echo "::group::installed extension files"
-          find "$(pg_config --pkglibdir)" -maxdepth 1 -name 'pgiceberg*' -print -exec ls -l {} \; -exec file {} \; || true
-          find "$(pg_config --sharedir)/extension" -maxdepth 1 -name 'pgiceberg*' -print -exec ls -l {} \; -exec cat {} \; || true
-          echo "::endgroup::"
-
-          echo "::group::regression config"
-          for file in \
-            build/tests/test/pg_regress.conf \
-            build/tests/test/extension/pgiceberg.control \
-            build/tests/src/CMakeFiles/pgiceberg.dir/link.txt; do
-            if [[ -f "${file}" ]]; then
-              echo "--- ${file}"
-              cat "${file}"
-            else
-              echo "--- ${file} (not found)"
-            fi
-          done
-          find build/tests/src/CMakeFiles/pgiceberg.dir -maxdepth 3 -type f -print || true
-          echo "::endgroup::"
-
       - name: Run regression tests
         run: ctest --test-dir build/tests --output-on-failure
 
