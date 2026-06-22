@@ -13,6 +13,7 @@
 #   POSTGRESQL_SHARE_DIR
 #   POSTGRESQL_EXTENSION_DIR
 #   POSTGRESQL_BIN_DIR
+#   POSTGRESQL_SERVER_EXECUTABLE
 #   POSTGRESQL_REGRESS
 #
 # Imported targets:
@@ -73,6 +74,10 @@ if(POSTGRESQL_PG_CONFIG)
                PATHS "${POSTGRESQL_PKGLIB_DIR}/pgxs/src/test/regress"
                      "${POSTGRESQL_BIN_DIR}"
                NO_DEFAULT_PATH)
+  find_program(POSTGRESQL_SERVER_EXECUTABLE
+               NAMES postgres
+               PATHS "${POSTGRESQL_BIN_DIR}"
+               NO_DEFAULT_PATH)
   find_library(POSTGRESQL_LIBPQ_LIBRARY
                NAMES pq
                PATHS "${POSTGRESQL_LIBRARY_DIR}"
@@ -119,5 +124,6 @@ mark_as_advanced(POSTGRESQL_PG_CONFIG
                  POSTGRESQL_PKGLIB_DIR
                  POSTGRESQL_SHARE_DIR
                  POSTGRESQL_EXTENSION_DIR
+                 POSTGRESQL_SERVER_EXECUTABLE
                  POSTGRESQL_REGRESS
                  POSTGRESQL_LIBPQ_LIBRARY)
