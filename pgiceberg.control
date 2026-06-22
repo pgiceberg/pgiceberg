@@ -1,5 +1,5 @@
 comment = 'PostgreSQL access methods for Apache Iceberg tables'
 default_version = '0.1.0'
-module_pathname = 'pgiceberg'
+module_pathname = '$libdir/pgiceberg'
 relocatable = false
 superuser = true
