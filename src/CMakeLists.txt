@@ -38,9 +38,12 @@ if(PGICEBERG_ENABLE_REST_CATALOG)
   target_compile_definitions(pgiceberg PRIVATE PGICEBERG_ENABLE_REST_CATALOG=1)
 endif()
 
+configure_file("${PROJECT_SOURCE_DIR}/pgiceberg.control.in"
+               "${PROJECT_BINARY_DIR}/pgiceberg.control" @ONLY)
+
 install(TARGETS pgiceberg LIBRARY DESTINATION "${POSTGRESQL_PKGLIB_DIR}"
                                   COMPONENT pgiceberg)
-install(FILES "${PROJECT_SOURCE_DIR}/pgiceberg.control"
+install(FILES "${PROJECT_BINARY_DIR}/pgiceberg.control"
         DESTINATION "${POSTGRESQL_EXTENSION_DIR}"
         COMPONENT pgiceberg)
 install(FILES "${PROJECT_SOURCE_DIR}/sql/pgiceberg--0.1.0.sql"
