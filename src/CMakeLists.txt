@@ -10,6 +10,13 @@ add_library(pgiceberg MODULE
             udf/create_table.cc)
 target_include_directories(pgiceberg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(pgiceberg PRIVATE PostgreSQL::Server PostgreSQL::Client)
+if(APPLE)
+  if(NOT POSTGRESQL_SERVER_EXECUTABLE)
+    message(FATAL_ERROR "postgres executable is required to link pgiceberg on macOS")
+  endif()
+  target_link_options(pgiceberg PRIVATE
+                      "LINKER:-bundle_loader,${POSTGRESQL_SERVER_EXECUTABLE}")
+endif()
 set_target_properties(pgiceberg PROPERTIES PREFIX "" OUTPUT_NAME pgiceberg)
 set_target_properties(pgiceberg PROPERTIES BUILD_RPATH "${POSTGRESQL_LIBRARY_DIR}"
                                            INSTALL_RPATH "${POSTGRESQL_LIBRARY_DIR}")
