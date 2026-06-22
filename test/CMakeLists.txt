@@ -9,10 +9,11 @@ if(POSTGRESQL_REGRESS)
   file(READ "${PROJECT_SOURCE_DIR}/pgiceberg.control" PGICEBERG_CONTROL)
   string(REGEX
          REPLACE "module_pathname = '[^']+'"
-                 "module_pathname = '${PROJECT_BINARY_DIR}/src/pgiceberg'"
-                 PGICEBERG_REGRESS_CONTROL "${PGICEBERG_CONTROL}")
-  file(WRITE "${PGICEBERG_REGRESS_EXTENSION_DIR}/pgiceberg.control"
-       "${PGICEBERG_REGRESS_CONTROL}")
+                 "module_pathname = '$<TARGET_FILE:pgiceberg>'" PGICEBERG_REGRESS_CONTROL
+                 "${PGICEBERG_CONTROL}")
+  file(GENERATE
+       OUTPUT "${PGICEBERG_REGRESS_EXTENSION_DIR}/pgiceberg.control"
+       CONTENT "${PGICEBERG_REGRESS_CONTROL}")
   configure_file("${PROJECT_SOURCE_DIR}/sql/pgiceberg--0.1.0.sql"
                  "${PGICEBERG_REGRESS_EXTENSION_DIR}/pgiceberg--0.1.0.sql" COPYONLY)
 

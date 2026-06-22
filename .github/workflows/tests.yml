@@ -88,9 +88,18 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::regression config"
-          cat build/tests/test/pg_regress.conf
-          cat build/tests/test/extension/pgiceberg.control
-          cat build/tests/src/CMakeFiles/pgiceberg.dir/link.txt
+          for file in \
+            build/tests/test/pg_regress.conf \
+            build/tests/test/extension/pgiceberg.control \
+            build/tests/src/CMakeFiles/pgiceberg.dir/link.txt; do
+            if [[ -f "${file}" ]]; then
+              echo "--- ${file}"
+              cat "${file}"
+            else
+              echo "--- ${file} (not found)"
+            fi
+          done
+          find build/tests/src/CMakeFiles/pgiceberg.dir -maxdepth 3 -type f -print || true
           echo "::endgroup::"
 
       - name: Run regression tests
@@ -118,6 +127,8 @@ jobs:
         with:
           name: regression-${{ matrix.os }}
           path: |
+            build/tests/test/pg_regress.conf
+            build/tests/test/extension
             build/tests/test/regress/regression.diffs
             build/tests/test/regress/regression.out
             build/tests/test/regress/results
