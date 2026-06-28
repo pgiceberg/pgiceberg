@@ -60,6 +60,12 @@ GitHub Actions runs the PR gate on push and pull request:
 - Build, install, and `pg_regress` on Ubuntu and macOS.
 - Ubuntu ASAN/UBSAN build and regression test.
 
+Install the local hooks with:
+
+```sh
+pre-commit install --install-hooks
+```
+
 Run the same formatting checks locally with:
 
 ```sh

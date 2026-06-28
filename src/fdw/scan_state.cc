@@ -5,17 +5,13 @@
 #include <vector>
 
 #include <arrow/array.h>
-#include <arrow/array/util.h>
-#include <arrow/c/bridge.h>
-#include <arrow/table.h>
-#include <iceberg/data/file_scan_task_reader.h>
-#include <iceberg/schema_internal.h>
+#include <arrow/record_batch.h>
 #include <iceberg/table.h>
-#include <iceberg/table_scan.h>
 
 #include "common/catalog.h"
 #include "common/datum_convert.h"
 #include "common/error.h"
+#include "fdw/iceberg_scan.h"
 
 extern "C" {
 #include "postgres.h"
@@ -30,36 +26,39 @@ extern "C" {
 namespace pgiceberg::fdw {
 namespace {
 
-struct ColumnState {
-  std::shared_ptr<arrow::ChunkedArray> column;
-  int chunk_index = 0;
-  std::int64_t chunk_start = 0;
-};
+bool LoadNextBatch(ScanState* state);
 
-std::shared_ptr<arrow::Array> ArrayForRow(ColumnState& column, std::int64_t row,
-                                          std::int64_t& offset) {
-  while (column.chunk_index < column.column->num_chunks()) {
-    auto chunk = column.column->chunk(column.chunk_index);
-    const auto chunk_end = column.chunk_start + chunk->length();
-    if (row < chunk_end) {
-      offset = row - column.chunk_start;
-      return chunk;
-    }
-    column.chunk_start = chunk_end;
-    column.chunk_index++;
-  }
-  offset = 0;
-  return nullptr;
-}
+struct ColumnState {
+  int batch_column_index = -1;
+};
 
 }  // namespace
 
 struct ScanState {
   MemoryContextCallback* cleanup_callback = nullptr;
-  std::shared_ptr<arrow::Table> table;
+  std::shared_ptr<iceberg::Table> table;
+  std::unique_ptr<IcebergScanCursor> cursor;
+  std::shared_ptr<arrow::RecordBatch> batch;
   std::vector<std::optional<ColumnState>> columns;
   std::int64_t row = 0;
 };
+
+namespace {
+
+bool LoadNextBatch(ScanState* state) {
+  while (state->batch == nullptr || state->row >= state->batch->num_rows()) {
+    std::shared_ptr<arrow::RecordBatch> batch;
+    if (!state->cursor->NextBatch(&batch)) {
+      state->batch.reset();
+      return false;
+    }
+    state->batch = std::move(batch);
+    state->row = 0;
+  }
+  return true;
+}
+
+}  // namespace
 
 void DeleteScanState(void* arg) { delete static_cast<ScanState*>(arg); }
 
@@ -79,85 +78,11 @@ void DetachMemoryContextCleanup(ScanState* state) {
   }
 }
 
-std::shared_ptr<arrow::Table> ReadIcebergTable(iceberg::Table& table) {
-  auto schema = table.schema();
-  if (!schema) {
-    pgiceberg::ThrowIcebergError(schema.error());
-  }
-
-  std::vector<std::shared_ptr<iceberg::Schema>> schemas;
-  auto all_schemas = table.schemas();
-  if (all_schemas) {
-    for (const auto& [_, candidate] : all_schemas->get()) {
-      schemas.push_back(candidate);
-    }
-  }
-
-  auto scan_builder = table.NewScan();
-  if (!scan_builder) {
-    pgiceberg::ThrowIcebergError(scan_builder.error());
-  }
-  auto scan = (*scan_builder)->Build();
-  if (!scan) {
-    pgiceberg::ThrowIcebergError(scan.error());
-  }
-  auto tasks = (*scan)->PlanFiles();
-  if (!tasks) {
-    pgiceberg::ThrowIcebergError(tasks.error());
-  }
-
-  auto reader = iceberg::FileScanTaskReader::Make(iceberg::FileScanTaskReader::Options{
-      .io = table.io(),
-      .table_schema = *schema,
-      .schemas = std::move(schemas),
-      .projected_schema = *schema,
-  });
-  if (!reader) {
-    pgiceberg::ThrowIcebergError(reader.error());
-  }
-
-  std::vector<std::shared_ptr<arrow::Table>> tables;
-  tables.reserve(tasks->size());
-  for (const auto& task : *tasks) {
-    auto stream = (*reader)->Open(*task);
-    if (!stream) {
-      pgiceberg::ThrowIcebergError(stream.error());
-    }
-    auto reader_ptr = pgiceberg::CheckArrowResult(
-        arrow::ImportRecordBatchReader(&*stream), "import record batch reader");
-    tables.push_back(pgiceberg::CheckArrowResult(
-        arrow::Table::FromRecordBatchReader(reader_ptr.get()), "read Arrow table"));
-  }
-
-  if (tables.empty()) {
-    ArrowSchema c_schema;
-    auto status = iceberg::ToArrowSchema(**schema, &c_schema);
-    if (!status) {
-      pgiceberg::ThrowIcebergError(status.error());
-    }
-    auto arrow_schema = pgiceberg::CheckArrowResult(arrow::ImportSchema(&c_schema),
-                                                    "import Arrow schema");
-    std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
-    columns.reserve(arrow_schema->num_fields());
-    for (const auto& field : arrow_schema->fields()) {
-      auto array = pgiceberg::CheckArrowResult(arrow::MakeArrayOfNull(field->type(), 0),
-                                               "make null Arrow array");
-      columns.push_back(std::make_shared<arrow::ChunkedArray>(array));
-    }
-    return arrow::Table::Make(arrow_schema, std::move(columns));
-  }
-  if (tables.size() == 1) {
-    return tables.front();
-  }
-  return pgiceberg::CheckArrowResult(arrow::ConcatenateTables(tables),
-                                     "concatenate Arrow tables");
-}
-
 ScanState* BeginScan(Relation relation, const Options& options) {
   auto state = std::make_unique<ScanState>();
-  auto table = pgiceberg::LoadIcebergTable(ToCatalogOptions(options),
-                                           RelationGetRelationName(relation));
-  state->table = ReadIcebergTable(*table);
+  state->table = pgiceberg::LoadIcebergTable(ToCatalogOptions(options),
+                                             RelationGetRelationName(relation));
+  state->cursor = std::make_unique<IcebergScanCursor>(state->table);
 
   TupleDesc desc = RelationGetDescr(relation);
   state->columns.resize(desc->natts);
@@ -167,13 +92,13 @@ ScanState* BeginScan(Relation relation, const Options& options) {
       continue;
     }
     const int column_index =
-        state->table->schema()->GetFieldIndex(NameStr(attr->attname));
+        state->cursor->arrow_schema()->GetFieldIndex(NameStr(attr->attname));
     if (column_index < 0) {
       ereport(ERROR, (errcode(ERRCODE_FDW_ERROR),
                       errmsg("column \"%s\" does not exist in Parquet file",
                              NameStr(attr->attname))));
     }
-    state->columns[i] = ColumnState{.column = state->table->column(column_index)};
+    state->columns[i] = ColumnState{.batch_column_index = column_index};
   }
 
   RegisterMemoryContextCleanup(state.get());
@@ -182,7 +107,7 @@ ScanState* BeginScan(Relation relation, const Options& options) {
 
 TupleTableSlot* IterateScan(ScanState* state, TupleTableSlot* slot) {
   ExecClearTuple(slot);
-  if (state == nullptr || state->row >= state->table->num_rows()) {
+  if (state == nullptr || !LoadNextBatch(state)) {
     return slot;
   }
 
@@ -195,15 +120,14 @@ TupleTableSlot* IterateScan(ScanState* state, TupleTableSlot* slot) {
       continue;
     }
 
-    std::int64_t offset = 0;
-    auto array = ArrayForRow(*column, state->row, offset);
+    auto array = state->batch->column(column->batch_column_index);
     if (array == nullptr) {
       continue;
     }
 
     Form_pg_attribute attr = TupleDescAttr(desc, i);
     slot->tts_values[i] =
-        pgiceberg::ConvertValue(*array, offset, attr->atttypid, slot->tts_isnull[i]);
+        pgiceberg::ConvertValue(*array, state->row, attr->atttypid, slot->tts_isnull[i]);
   }
 
   state->row++;
@@ -215,14 +139,9 @@ void ReScan(ScanState* state) {
   if (state == nullptr) {
     return;
   }
+  state->cursor->Reset();
+  state->batch.reset();
   state->row = 0;
-  for (auto& column : state->columns) {
-    if (!column.has_value()) {
-      continue;
-    }
-    column->chunk_index = 0;
-    column->chunk_start = 0;
-  }
 }
 
 void EndScan(ScanState* state) {

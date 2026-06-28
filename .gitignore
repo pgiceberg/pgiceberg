@@ -38,6 +38,7 @@ build
 # vscode files
 .vscode
 .cache
+.ccache/
 
 # devcontainer
 .devcontainer/*
