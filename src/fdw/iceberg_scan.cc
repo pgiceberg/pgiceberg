@@ -86,7 +86,7 @@ bool IcebergScanCursor::OpenCurrentTask() {
   if (!stream) {
     pgiceberg::ThrowIcebergError(stream.error());
   }
-  current_stream_ = std::move(*stream);
+  current_stream_ = *stream;
   batch_reader_ = pgiceberg::CheckArrowResult(
       arrow::ImportRecordBatchReader(&*current_stream_), "import record batch reader");
   return true;
