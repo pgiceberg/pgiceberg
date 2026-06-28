@@ -4,6 +4,7 @@ add_library(pgiceberg MODULE
             common/datum_convert.cc
             common/type_mapping.cc
             fdw/fdw.cc
+            fdw/iceberg_scan.cc
             fdw/modify_state.cc
             fdw/options.cc
             fdw/scan_state.cc

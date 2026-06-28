@@ -18,15 +18,12 @@
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <arrow/scalar.h>
-#include <arrow/table.h>
 #include <iceberg/data/data_writer.h>
-#include <iceberg/data/file_scan_task_reader.h>
 #include <iceberg/file_format.h>
 #include <iceberg/partition_spec.h>
 #include <iceberg/schema.h>
 #include <iceberg/schema_internal.h>
 #include <iceberg/table.h>
-#include <iceberg/table_scan.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/fast_append.h>
 #include <iceberg/update/merging_snapshot_update.h>
@@ -34,6 +31,7 @@
 #include "common/catalog.h"
 #include "common/datum_convert.h"
 #include "common/error.h"
+#include "fdw/iceberg_scan.h"
 
 extern "C" {
 #include "postgres.h"
@@ -54,6 +52,7 @@ namespace pgiceberg::fdw {
 namespace {
 
 constexpr std::int64_t kPostgresUnixEpochOffsetMicros = 946684800000000LL;
+constexpr std::int64_t kDmlRewriteBatchRows = 8192;
 
 struct Value {
   Datum datum = static_cast<Datum>(0);
@@ -61,11 +60,6 @@ struct Value {
 };
 
 using Row = std::vector<Value>;
-
-struct CurrentTableData {
-  std::shared_ptr<arrow::Table> table;
-  std::vector<std::shared_ptr<iceberg::DataFile>> data_files;
-};
 
 class OverwriteFiles final : public iceberg::MergingSnapshotUpdate {
  public:
@@ -342,98 +336,114 @@ std::shared_ptr<iceberg::DataFile> WriteRows(
   return metadata->data_files.front();
 }
 
-CurrentTableData ReadCurrentTable(iceberg::Table& table) {
-  auto schema = table.schema();
-  if (!schema) {
-    pgiceberg::ThrowIcebergError(schema.error());
-  }
+class RowBatchWriter {
+ public:
+  RowBatchWriter(iceberg::Table& table, std::shared_ptr<iceberg::Schema> iceberg_schema,
+                 std::shared_ptr<iceberg::PartitionSpec> spec,
+                 std::shared_ptr<arrow::Schema> arrow_schema)
+      : table_(table),
+        iceberg_schema_(std::move(iceberg_schema)),
+        spec_(std::move(spec)),
+        arrow_schema_(std::move(arrow_schema)),
+        builders_(MakeBuilders(*arrow_schema_)) {}
 
-  std::vector<std::shared_ptr<iceberg::Schema>> schemas;
-  auto all_schemas = table.schemas();
-  if (all_schemas) {
-    for (const auto& [_, candidate] : all_schemas->get()) {
-      schemas.push_back(candidate);
+  void Append(const std::vector<int>& attr_numbers, const Row& row) {
+    EnsureWriter();
+    AppendRow(builders_, *arrow_schema_, attr_numbers, row);
+    rows_in_batch_++;
+    if (rows_in_batch_ >= kDmlRewriteBatchRows) {
+      Flush();
     }
   }
 
-  auto scan_builder = table.NewScan();
-  if (!scan_builder) {
-    pgiceberg::ThrowIcebergError(scan_builder.error());
-  }
-  auto scan = (*scan_builder)->Build();
-  if (!scan) {
-    pgiceberg::ThrowIcebergError(scan.error());
-  }
-  auto tasks = (*scan)->PlanFiles();
-  if (!tasks) {
-    pgiceberg::ThrowIcebergError(tasks.error());
-  }
-
-  auto reader = iceberg::FileScanTaskReader::Make(iceberg::FileScanTaskReader::Options{
-      .io = table.io(),
-      .table_schema = *schema,
-      .schemas = std::move(schemas),
-      .projected_schema = *schema,
-  });
-  if (!reader) {
-    pgiceberg::ThrowIcebergError(reader.error());
-  }
-
-  CurrentTableData result;
-  std::vector<std::shared_ptr<arrow::Table>> tables;
-  tables.reserve(tasks->size());
-  result.data_files.reserve(tasks->size());
-  for (const auto& task : *tasks) {
-    result.data_files.push_back(task->data_file());
-    auto stream = (*reader)->Open(*task);
-    if (!stream) {
-      pgiceberg::ThrowIcebergError(stream.error());
+  std::shared_ptr<iceberg::DataFile> Finish() {
+    Flush();
+    if (writer_ == nullptr) {
+      return nullptr;
     }
-    auto reader_ptr = pgiceberg::CheckArrowResult(
-        arrow::ImportRecordBatchReader(&*stream), "import record batch reader");
-    tables.push_back(pgiceberg::CheckArrowResult(
-        arrow::Table::FromRecordBatchReader(reader_ptr.get()), "read Arrow table"));
+    auto close_status = writer_->Close();
+    if (!close_status) {
+      pgiceberg::ThrowIcebergError(close_status.error());
+    }
+    auto metadata = writer_->Metadata();
+    if (!metadata) {
+      pgiceberg::ThrowIcebergError(metadata.error());
+    }
+    if (metadata->data_files.empty()) {
+      return nullptr;
+    }
+    return metadata->data_files.front();
   }
 
-  if (tables.empty()) {
-    result.table = arrow::Table::Make(
-        ArrowSchemaFor(**schema), std::vector<std::shared_ptr<arrow::ChunkedArray>>{});
-  } else if (tables.size() == 1) {
-    result.table = tables.front();
-  } else {
-    result.table = pgiceberg::CheckArrowResult(arrow::ConcatenateTables(tables),
-                                               "concatenate Arrow tables");
+ private:
+  void EnsureWriter() {
+    if (writer_ != nullptr) {
+      return;
+    }
+    auto writer = iceberg::DataWriter::Make(iceberg::DataWriterOptions{
+        .path = DataFilePath(table_),
+        .schema = iceberg_schema_,
+        .spec = spec_,
+        .format = iceberg::FileFormatType::kParquet,
+        .io = table_.io(),
+        .properties = table_.properties().configs(),
+    });
+    if (!writer) {
+      pgiceberg::ThrowIcebergError(writer.error());
+    }
+    writer_ = std::move(*writer);
   }
-  return result;
-}
 
-Row RowFromArrowTable(const arrow::Table& table, std::int64_t row_index, TupleDesc desc) {
+  void Flush() {
+    if (rows_in_batch_ == 0) {
+      return;
+    }
+
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    arrays.reserve(builders_.size());
+    for (auto& builder : builders_) {
+      arrays.push_back(
+          pgiceberg::CheckArrowResult(builder->Finish(), "finish Arrow array"));
+    }
+
+    auto batch = arrow::RecordBatch::Make(arrow_schema_, rows_in_batch_, arrays);
+    ArrowArray c_array;
+    pgiceberg::CheckArrowStatus(arrow::ExportRecordBatch(*batch, &c_array),
+                                "export Arrow record batch");
+    auto write_status = writer_->Write(&c_array);
+    if (!write_status) {
+      pgiceberg::ThrowIcebergError(write_status.error());
+    }
+
+    builders_ = MakeBuilders(*arrow_schema_);
+    rows_in_batch_ = 0;
+  }
+
+  iceberg::Table& table_;
+  std::shared_ptr<iceberg::Schema> iceberg_schema_;
+  std::shared_ptr<iceberg::PartitionSpec> spec_;
+  std::shared_ptr<arrow::Schema> arrow_schema_;
+  std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders_;
+  std::unique_ptr<iceberg::DataWriter> writer_;
+  std::int64_t rows_in_batch_ = 0;
+};
+
+Row RowFromRecordBatch(const arrow::RecordBatch& batch, std::int64_t row_index,
+                       TupleDesc desc) {
   Row row(desc->natts);
   for (int i = 0; i < desc->natts; i++) {
     Form_pg_attribute attr = TupleDescAttr(desc, i);
     if (attr->attisdropped) {
       continue;
     }
-    const int column_index = table.schema()->GetFieldIndex(NameStr(attr->attname));
+    const int column_index = batch.schema()->GetFieldIndex(NameStr(attr->attname));
     if (column_index < 0) {
       throw std::runtime_error("column does not exist in Iceberg table");
     }
 
-    auto column = table.column(column_index);
-    std::int64_t offset = row_index;
-    int chunk_index = 0;
-    while (chunk_index < column->num_chunks() &&
-           offset >= column->chunk(chunk_index)->length()) {
-      offset -= column->chunk(chunk_index)->length();
-      chunk_index++;
-    }
-    if (chunk_index >= column->num_chunks()) {
-      throw std::runtime_error("invalid Arrow chunk index");
-    }
-
+    auto column = batch.column(column_index);
     bool is_null = true;
-    Datum datum = pgiceberg::ConvertValue(*column->chunk(chunk_index), offset,
-                                          attr->atttypid, is_null);
+    Datum datum = pgiceberg::ConvertValue(*column, row_index, attr->atttypid, is_null);
     if (is_null) {
       continue;
     }
@@ -593,42 +603,40 @@ void EndModify(ModifyState* state) {
     return;
   }
 
-  auto current = ReadCurrentTable(*state->table);
-  auto rewrite_builders = MakeBuilders(*state->arrow_schema);
+  IcebergScanCursor current(state->table);
+  RowBatchWriter rewrite_writer(*state->table, state->iceberg_schema, state->spec,
+                                state->arrow_schema);
   std::vector<bool> used_changes(state->old_rows.size(), false);
-  std::int64_t rewrite_rows = 0;
 
-  for (std::int64_t row_index = 0; row_index < current.table->num_rows(); row_index++) {
-    Row current_row = RowFromArrowTable(*current.table, row_index, state->tuple_desc);
+  std::shared_ptr<arrow::RecordBatch> batch;
+  while (current.NextBatch(&batch)) {
+    for (std::int64_t row_index = 0; row_index < batch->num_rows(); row_index++) {
+      Row current_row = RowFromRecordBatch(*batch, row_index, state->tuple_desc);
 
-    std::optional<std::size_t> matched_change;
-    for (std::size_t i = 0; i < state->old_rows.size(); i++) {
-      if (!used_changes[i] &&
-          RowEquals(current_row, state->old_rows[i], state->tuple_desc)) {
-        matched_change = i;
-        used_changes[i] = true;
-        break;
+      std::optional<std::size_t> matched_change;
+      for (std::size_t i = 0; i < state->old_rows.size(); i++) {
+        if (!used_changes[i] &&
+            RowEquals(current_row, state->old_rows[i], state->tuple_desc)) {
+          matched_change = i;
+          used_changes[i] = true;
+          break;
+        }
       }
-    }
 
-    if (!matched_change.has_value()) {
-      AppendRow(rewrite_builders, *state->arrow_schema, state->attr_numbers, current_row);
-      rewrite_rows++;
-    } else if (state->operation == CMD_UPDATE) {
-      AppendRow(rewrite_builders, *state->arrow_schema, state->attr_numbers,
-                state->new_rows[*matched_change]);
-      rewrite_rows++;
+      if (!matched_change.has_value()) {
+        rewrite_writer.Append(state->attr_numbers, current_row);
+      } else if (state->operation == CMD_UPDATE) {
+        rewrite_writer.Append(state->attr_numbers, state->new_rows[*matched_change]);
+      }
     }
   }
 
-  auto replacement =
-      WriteRows(*state->table, state->iceberg_schema, state->spec, state->arrow_schema,
-                std::move(rewrite_builders), rewrite_rows);
+  auto replacement = rewrite_writer.Finish();
   auto overwrite = OverwriteFiles::Make(state->table);
   if (!overwrite) {
     pgiceberg::ThrowIcebergError(overwrite.error());
   }
-  for (const auto& file : current.data_files) {
+  for (const auto& file : current.data_files()) {
     auto remove = (*overwrite)->RemoveFile(file);
     if (!remove) {
       pgiceberg::ThrowIcebergError(remove.error());
