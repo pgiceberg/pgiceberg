@@ -26,7 +26,7 @@
 #include <iceberg/table.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/fast_append.h>
-#include <iceberg/update/merging_snapshot_update.h>
+#include <iceberg/update/overwrite_files.h>
 
 #include "common/catalog.h"
 #include "common/datum_convert.h"
@@ -60,34 +60,6 @@ struct Value {
 };
 
 using Row = std::vector<Value>;
-
-class OverwriteFiles final : public iceberg::MergingSnapshotUpdate {
- public:
-  static iceberg::Result<std::shared_ptr<OverwriteFiles>> Make(
-      const std::shared_ptr<iceberg::Table>& table) {
-    auto ctx_result =
-        iceberg::TransactionContext::Make(table, iceberg::TransactionKind::kUpdate);
-    if (!ctx_result) {
-      return std::unexpected<iceberg::Error>(ctx_result.error());
-    }
-    return std::shared_ptr<OverwriteFiles>(
-        new OverwriteFiles(std::string(table->name().name), std::move(*ctx_result)));
-  }
-
-  std::string operation() override { return iceberg::DataOperation::kOverwrite; }
-
-  iceberg::Status AddFile(std::shared_ptr<iceberg::DataFile> file) {
-    return AddDataFile(std::move(file));
-  }
-
-  iceberg::Status RemoveFile(std::shared_ptr<iceberg::DataFile> file) {
-    return DeleteDataFile(std::move(file));
-  }
-
- private:
-  OverwriteFiles(std::string table_name, std::shared_ptr<iceberg::TransactionContext> ctx)
-      : iceberg::MergingSnapshotUpdate(std::move(table_name), std::move(ctx)) {}
-};
 
 std::shared_ptr<arrow::Schema> ArrowSchemaFor(const iceberg::Schema& schema) {
   ArrowSchema c_schema;
@@ -632,21 +604,15 @@ void EndModify(ModifyState* state) {
   }
 
   auto replacement = rewrite_writer.Finish();
-  auto overwrite = OverwriteFiles::Make(state->table);
+  auto overwrite = state->table->NewOverwrite();
   if (!overwrite) {
     pgiceberg::ThrowIcebergError(overwrite.error());
   }
   for (const auto& file : current.data_files()) {
-    auto remove = (*overwrite)->RemoveFile(file);
-    if (!remove) {
-      pgiceberg::ThrowIcebergError(remove.error());
-    }
+    (*overwrite)->DeleteFile(file);
   }
   if (replacement != nullptr) {
-    auto add = (*overwrite)->AddFile(replacement);
-    if (!add) {
-      pgiceberg::ThrowIcebergError(add.error());
-    }
+    (*overwrite)->AddFile(replacement);
   }
   auto commit = (*overwrite)->Commit();
   if (!commit) {
