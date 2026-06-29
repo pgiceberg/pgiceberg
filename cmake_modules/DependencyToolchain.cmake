@@ -19,7 +19,7 @@ endmacro()
 # Apache Iceberg C++
 
 set(PGICEBERG_ICEBERG_GIT_TAG
-    "main"
+    "93577b3fe713912b3017e5e3374e89d64c4d0c7a"
     CACHE STRING "apache/iceberg-cpp commit or tag to fetch")
 
 function(resolve_iceberg_dependency out_target)
