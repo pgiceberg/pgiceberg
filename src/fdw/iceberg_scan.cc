@@ -9,31 +9,27 @@
 #include <iceberg/table.h>
 #include <iceberg/table_scan.h>
 
-#include "common/error.h"
+#include "common/status.h"
 
 namespace pgiceberg::fdw {
 
 namespace {
 
-std::shared_ptr<arrow::Schema> ArrowSchemaFor(const iceberg::Schema& schema) {
+Result<std::shared_ptr<arrow::Schema>> ArrowSchemaFor(const iceberg::Schema& schema) {
   ArrowSchema c_schema;
-  auto status = iceberg::ToArrowSchema(schema, &c_schema);
-  if (!status) {
-    pgiceberg::ThrowIcebergError(status.error());
-  }
-  return pgiceberg::CheckArrowResult(arrow::ImportSchema(&c_schema),
-                                     "import Arrow schema");
+  PGICEBERG_RETURN_NOT_OK(ToPgStatus(iceberg::ToArrowSchema(schema, &c_schema),
+                                     "convert Iceberg schema to Arrow"));
+  return ToPgResult(arrow::ImportSchema(&c_schema), "import Arrow schema");
 }
 
 }  // namespace
 
 IcebergScanCursor::IcebergScanCursor(std::shared_ptr<iceberg::Table> table)
-    : table_(std::move(table)) {
-  auto schema = table_->schema();
-  if (!schema) {
-    pgiceberg::ThrowIcebergError(schema.error());
-  }
-  arrow_schema_ = ArrowSchemaFor(**schema);
+    : table_(std::move(table)) {}
+
+Status IcebergScanCursor::Init() {
+  PGICEBERG_ASSIGN_OR_RETURN(auto schema, ToPgResult(table_->schema(), "load schema"));
+  PGICEBERG_ASSIGN_OR_RETURN(arrow_schema_, ArrowSchemaFor(*schema));
 
   std::vector<std::shared_ptr<iceberg::Schema>> schemas;
   auto all_schemas = table_->schemas();
@@ -43,19 +39,11 @@ IcebergScanCursor::IcebergScanCursor(std::shared_ptr<iceberg::Table> table)
     }
   }
 
-  auto scan_builder = table_->NewScan();
-  if (!scan_builder) {
-    pgiceberg::ThrowIcebergError(scan_builder.error());
-  }
-  auto scan = (*scan_builder)->Build();
-  if (!scan) {
-    pgiceberg::ThrowIcebergError(scan.error());
-  }
-  auto tasks = (*scan)->PlanFiles();
-  if (!tasks) {
-    pgiceberg::ThrowIcebergError(tasks.error());
-  }
-  tasks_ = std::move(*tasks);
+  PGICEBERG_ASSIGN_OR_RETURN(auto scan_builder,
+                             ToPgResult(table_->NewScan(), "create table scan"));
+  PGICEBERG_ASSIGN_OR_RETURN(auto scan,
+                             ToPgResult(scan_builder->Build(), "build table scan"));
+  PGICEBERG_ASSIGN_OR_RETURN(tasks_, ToPgResult(scan->PlanFiles(), "plan scan files"));
 
   data_files_.reserve(tasks_.size());
   for (const auto& task : tasks_) {
@@ -64,43 +52,44 @@ IcebergScanCursor::IcebergScanCursor(std::shared_ptr<iceberg::Table> table)
 
   auto reader = iceberg::FileScanTaskReader::Make(iceberg::FileScanTaskReader::Options{
       .io = table_->io(),
-      .table_schema = *schema,
+      .table_schema = schema,
       .schemas = std::move(schemas),
-      .projected_schema = *schema,
+      .projected_schema = schema,
       .properties = table_->properties().configs(),
   });
-  if (!reader) {
-    pgiceberg::ThrowIcebergError(reader.error());
-  }
-  task_reader_ = std::move(*reader);
+  PGICEBERG_ASSIGN_OR_RETURN(task_reader_,
+                             ToPgResult(std::move(reader), "create scan task reader"));
+  return Ok();
 }
 
 IcebergScanCursor::~IcebergScanCursor() { Reset(); }
 
-bool IcebergScanCursor::OpenCurrentTask() {
+Result<bool> IcebergScanCursor::OpenCurrentTask() {
   if (task_index_ >= tasks_.size()) {
     return false;
   }
 
-  auto stream = task_reader_->Open(*tasks_[task_index_]);
-  if (!stream) {
-    pgiceberg::ThrowIcebergError(stream.error());
-  }
-  current_stream_ = *stream;
-  batch_reader_ = pgiceberg::CheckArrowResult(
-      arrow::ImportRecordBatchReader(&*current_stream_), "import record batch reader");
+  PGICEBERG_ASSIGN_OR_RETURN(
+      current_stream_,
+      ToPgResult(task_reader_->Open(*tasks_[task_index_]), "open scan task"));
+  PGICEBERG_ASSIGN_OR_RETURN(batch_reader_,
+                             ToPgResult(arrow::ImportRecordBatchReader(&*current_stream_),
+                                        "import record batch reader"));
   return true;
 }
 
-bool IcebergScanCursor::NextBatch(std::shared_ptr<arrow::RecordBatch>* batch) {
+Result<bool> IcebergScanCursor::NextBatch(std::shared_ptr<arrow::RecordBatch>* batch) {
   *batch = nullptr;
   while (true) {
-    if (batch_reader_ == nullptr && !OpenCurrentTask()) {
-      return false;
+    if (batch_reader_ == nullptr) {
+      PGICEBERG_ASSIGN_OR_RETURN(auto opened, OpenCurrentTask());
+      if (!opened) {
+        return false;
+      }
     }
 
-    auto next =
-        pgiceberg::CheckArrowResult(batch_reader_->Next(), "read Arrow record batch");
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto next, ToPgResult(batch_reader_->Next(), "read Arrow record batch"));
     if (next != nullptr) {
       *batch = std::move(next);
       return true;

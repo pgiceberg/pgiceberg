@@ -3,6 +3,8 @@
 #include <memory>
 #include <string>
 
+#include "common/status.h"
+
 namespace iceberg {
 class Table;
 }
@@ -18,7 +20,7 @@ struct CatalogOptions {
   std::string table;
 };
 
-std::shared_ptr<iceberg::Table> LoadIcebergTable(const CatalogOptions& options,
-                                                 const char* relation_name);
+Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
+                                                         const char* relation_name);
 
 }  // namespace pgiceberg

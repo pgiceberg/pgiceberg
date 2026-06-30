@@ -1,8 +1,8 @@
 #pragma once
 
-#include <exception>
-#include <string>
 #include <utility>
+
+#include "common/status.h"
 
 extern "C" {
 #include "postgres.h"
@@ -12,32 +12,22 @@ extern "C" {
 
 namespace pgiceberg {
 
-class PgError : public std::exception {
- public:
-  PgError(int sqlerrcode, std::string message, std::string hint = {})
-      : sqlerrcode_(sqlerrcode), message_(std::move(message)), hint_(std::move(hint)) {}
+[[noreturn]] inline void ReportError(const PgError& error) {
+  if (error.hint().empty()) {
+    ereport(ERROR, (errcode(error.sqlerrcode()), errmsg("%s", error.what())));
+  } else {
+    ereport(ERROR, (errcode(error.sqlerrcode()), errmsg("%s", error.what()),
+                    errhint("%s", error.hint().c_str())));
+  }
 
-  const char* what() const noexcept override { return message_.c_str(); }
-
-  int sqlerrcode() const { return sqlerrcode_; }
-  const std::string& hint() const { return hint_; }
-
- private:
-  int sqlerrcode_;
-  std::string message_;
-  std::string hint_;
-};
+  std::unreachable();
+}
 
 [[noreturn]] inline void ReportCurrentException() {
   try {
     throw;
   } catch (const PgError& ex) {
-    if (ex.hint().empty()) {
-      ereport(ERROR, (errcode(ex.sqlerrcode()), errmsg("%s", ex.what())));
-    } else {
-      ereport(ERROR, (errcode(ex.sqlerrcode()), errmsg("%s", ex.what()),
-                      errhint("%s", ex.hint().c_str())));
-    }
+    ReportError(ex);
   } catch (const std::exception& ex) {
     ereport(ERROR, (errmsg("pgiceberg error: %s", ex.what())));
   } catch (...) {
@@ -56,6 +46,33 @@ Datum PgGuard(Fn&& fn) {
   }
 
   return static_cast<Datum>(0);
+}
+
+template <typename Fn>
+void PgStatusGuard(Fn&& fn) {
+  try {
+    Status status = fn();
+    if (!status) {
+      ReportError(status.error());
+    }
+  } catch (...) {
+    ReportCurrentException();
+  }
+}
+
+template <typename Fn>
+auto PgResultGuard(Fn&& fn) -> typename decltype(fn())::value_type {
+  try {
+    auto result = fn();
+    if (!result) {
+      ReportError(result.error());
+    }
+    return std::move(result).value();
+  } catch (...) {
+    ReportCurrentException();
+  }
+
+  std::unreachable();
 }
 
 }  // namespace pgiceberg
