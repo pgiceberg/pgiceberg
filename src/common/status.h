@@ -55,6 +55,7 @@ inline std::string WithContext(std::string_view context, std::string message) {
 }
 
 inline int SqlStateForIcebergError(iceberg::ErrorKind kind) {
+  // NOLINTNEXTLINE(bugprone-branch-clone): ERRCODE_* macros expand similarly.
   switch (kind) {
     case iceberg::ErrorKind::kAlreadyExists:
       return ERRCODE_DUPLICATE_OBJECT;
@@ -89,17 +90,17 @@ inline PgError MakePgError(const iceberg::Error& error, std::string_view context
 }
 
 inline int SqlStateForArrowStatus(const arrow::Status& status) {
-  const auto code = status.code();
-  if (code == arrow::StatusCode::Invalid) {
-    return ERRCODE_INVALID_PARAMETER_VALUE;
+  // NOLINTNEXTLINE(bugprone-branch-clone): ERRCODE_* macros expand similarly.
+  switch (status.code()) {
+    case arrow::StatusCode::Invalid:
+      return ERRCODE_INVALID_PARAMETER_VALUE;
+    case arrow::StatusCode::IOError:
+      return ERRCODE_IO_ERROR;
+    case arrow::StatusCode::NotImplemented:
+      return ERRCODE_FEATURE_NOT_SUPPORTED;
+    default:
+      return ERRCODE_FDW_ERROR;
   }
-  if (code == arrow::StatusCode::IOError) {
-    return ERRCODE_IO_ERROR;
-  }
-  if (code == arrow::StatusCode::NotImplemented) {
-    return ERRCODE_FEATURE_NOT_SUPPORTED;
-  }
-  return ERRCODE_FDW_ERROR;
 }
 
 inline PgError MakePgError(const arrow::Status& status, std::string_view context = {}) {
