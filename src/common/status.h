@@ -42,8 +42,9 @@ using Status = Result<void>;
 
 inline Status Ok() { return {}; }
 
-inline PgError MakeError(int sqlerrcode, std::string message, std::string hint = {}) {
-  return PgError(sqlerrcode, std::move(message), std::move(hint));
+inline PgError MakeError(int sqlerrcode, std::string_view message,
+                         std::string_view hint = {}) {
+  return PgError(sqlerrcode, std::string(message), std::string(hint));
 }
 
 inline std::string WithContext(std::string_view context, std::string message) {
@@ -82,27 +83,26 @@ inline int SqlStateForIcebergError(iceberg::ErrorKind kind) {
   }
 }
 
-inline PgError PgErrorFromIcebergError(const iceberg::Error& error,
-                                       std::string_view context = {}) {
+inline PgError MakePgError(const iceberg::Error& error, std::string_view context = {}) {
   return MakeError(SqlStateForIcebergError(error.kind),
                    WithContext(context, error.message));
 }
 
 inline int SqlStateForArrowStatus(const arrow::Status& status) {
-  switch (status.code()) {
-    case arrow::StatusCode::Invalid:
-      return ERRCODE_INVALID_PARAMETER_VALUE;
-    case arrow::StatusCode::IOError:
-      return ERRCODE_IO_ERROR;
-    case arrow::StatusCode::NotImplemented:
-      return ERRCODE_FEATURE_NOT_SUPPORTED;
-    default:
-      return ERRCODE_FDW_ERROR;
+  const auto code = status.code();
+  if (code == arrow::StatusCode::Invalid) {
+    return ERRCODE_INVALID_PARAMETER_VALUE;
   }
+  if (code == arrow::StatusCode::IOError) {
+    return ERRCODE_IO_ERROR;
+  }
+  if (code == arrow::StatusCode::NotImplemented) {
+    return ERRCODE_FEATURE_NOT_SUPPORTED;
+  }
+  return ERRCODE_FDW_ERROR;
 }
 
-inline PgError PgErrorFromArrowStatus(const arrow::Status& status,
-                                      std::string_view context = {}) {
+inline PgError MakePgError(const arrow::Status& status, std::string_view context = {}) {
   return MakeError(SqlStateForArrowStatus(status),
                    WithContext(context, status.ToString()));
 }
@@ -112,13 +112,13 @@ inline Status FromIcebergStatus(const iceberg::Status& status,
   if (status) {
     return Ok();
   }
-  return std::unexpected(PgErrorFromIcebergError(status.error(), context));
+  return std::unexpected(MakePgError(status.error(), context));
 }
 
 template <typename T>
 Result<T> FromIcebergResult(iceberg::Result<T> result, std::string_view context = {}) {
   if (!result) {
-    return std::unexpected(PgErrorFromIcebergError(result.error(), context));
+    return std::unexpected(MakePgError(result.error(), context));
   }
   return std::move(*result);
 }
@@ -128,13 +128,13 @@ inline Status FromArrowStatus(const arrow::Status& status,
   if (status.ok()) {
     return Ok();
   }
-  return std::unexpected(PgErrorFromArrowStatus(status, context));
+  return std::unexpected(MakePgError(status, context));
 }
 
 template <typename T>
 Result<T> FromArrowResult(arrow::Result<T> result, std::string_view context = {}) {
   if (!result.ok()) {
-    return std::unexpected(PgErrorFromArrowStatus(result.status(), context));
+    return std::unexpected(MakePgError(result.status(), context));
   }
   return std::move(result).ValueOrDie();
 }
