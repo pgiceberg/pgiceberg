@@ -86,7 +86,11 @@ jobs:
           ignore: "build|cmake_modules"
           database: build/cpp-linter
           verbosity: debug
-          extra-args: "-std=c++23 -fno-builtin-std-forward_like"
+          extra-args: >-
+            -std=c++23
+            -fno-builtin-std-forward_like
+            -I${{ github.workspace }}/build/cpp-linter/_deps/iceberg-build/src
+            -I${{ github.workspace }}/build/cpp-linter/_deps/iceberg-src/src
 
       - name: Fail on linter findings
         if: steps.linter.outputs.checks-failed != 0
