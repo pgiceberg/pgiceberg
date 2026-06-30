@@ -62,9 +62,9 @@ using Row = std::vector<Value>;
 
 Result<std::shared_ptr<arrow::Schema>> ArrowSchemaFor(const iceberg::Schema& schema) {
   ArrowSchema c_schema;
-  PGICEBERG_RETURN_NOT_OK(ToPgStatus(iceberg::ToArrowSchema(schema, &c_schema),
-                                     "convert Iceberg schema to Arrow"));
-  return ToPgResult(arrow::ImportSchema(&c_schema), "import Arrow schema");
+  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(iceberg::ToArrowSchema(schema, &c_schema),
+                                            "convert Iceberg schema to Arrow"));
+  return FromArrowResult(arrow::ImportSchema(&c_schema), "import Arrow schema");
 }
 
 std::string DataFilePath(const iceberg::Table& table) {
@@ -86,9 +86,9 @@ Result<std::vector<std::unique_ptr<arrow::ArrayBuilder>>> MakeBuilders(
   builders.reserve(schema.num_fields());
   for (int i = 0; i < schema.num_fields(); i++) {
     PGICEBERG_ASSIGN_OR_RETURN(
-        auto builder, ToPgResult(arrow::MakeBuilder(schema.field(i)->type(),
-                                                    arrow::default_memory_pool()),
-                                 "make Arrow builder"));
+        auto builder, FromArrowResult(arrow::MakeBuilder(schema.field(i)->type(),
+                                                         arrow::default_memory_pool()),
+                                      "make Arrow builder"));
     builders.push_back(std::move(builder));
   }
   return builders;
@@ -137,10 +137,10 @@ Result<std::shared_ptr<arrow::Scalar>> ScalarFromDatum(Datum value,
 Status AppendValue(arrow::ArrayBuilder& builder, const Value& value,
                    const arrow::DataType& type) {
   if (value.is_null) {
-    return ToPgStatus(builder.AppendNull(), "append Arrow NULL");
+    return FromArrowStatus(builder.AppendNull(), "append Arrow NULL");
   }
   PGICEBERG_ASSIGN_OR_RETURN(auto scalar, ScalarFromDatum(value.datum, type));
-  return ToPgStatus(builder.AppendScalar(*scalar), "append Arrow scalar");
+  return FromArrowStatus(builder.AppendScalar(*scalar), "append Arrow scalar");
 }
 
 Row CopyRowFromSlot(TupleTableSlot* slot, TupleDesc desc) {
@@ -276,29 +276,29 @@ Result<std::shared_ptr<iceberg::DataFile>> WriteRows(
   arrays.reserve(builders.size());
   for (auto& builder : builders) {
     PGICEBERG_ASSIGN_OR_RETURN(auto array,
-                               ToPgResult(builder->Finish(), "finish Arrow array"));
+                               FromArrowResult(builder->Finish(), "finish Arrow array"));
     arrays.push_back(std::move(array));
   }
 
   auto batch = arrow::RecordBatch::Make(arrow_schema, rows, arrays);
   ArrowArray c_array;
-  PGICEBERG_RETURN_NOT_OK(ToPgStatus(arrow::ExportRecordBatch(*batch, &c_array),
-                                     "export Arrow record batch"));
+  PGICEBERG_RETURN_NOT_OK(FromArrowStatus(arrow::ExportRecordBatch(*batch, &c_array),
+                                          "export Arrow record batch"));
 
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto writer, ToPgResult(iceberg::DataWriter::Make(iceberg::DataWriterOptions{
-                                  .path = DataFilePath(table),
-                                  .schema = iceberg_schema,
-                                  .spec = spec,
-                                  .format = iceberg::FileFormatType::kParquet,
-                                  .io = table.io(),
-                                  .properties = table.properties().configs(),
-                              }),
-                              "create data writer"));
-  PGICEBERG_RETURN_NOT_OK(ToPgStatus(writer->Write(&c_array), "write data file"));
-  PGICEBERG_RETURN_NOT_OK(ToPgStatus(writer->Close(), "close data writer"));
-  PGICEBERG_ASSIGN_OR_RETURN(auto metadata,
-                             ToPgResult(writer->Metadata(), "read writer metadata"));
+      auto writer, FromIcebergResult(iceberg::DataWriter::Make(iceberg::DataWriterOptions{
+                                         .path = DataFilePath(table),
+                                         .schema = iceberg_schema,
+                                         .spec = spec,
+                                         .format = iceberg::FileFormatType::kParquet,
+                                         .io = table.io(),
+                                         .properties = table.properties().configs(),
+                                     }),
+                                     "create data writer"));
+  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(writer->Write(&c_array), "write data file"));
+  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(writer->Close(), "close data writer"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto metadata, FromIcebergResult(writer->Metadata(), "read writer metadata"));
   if (metadata.data_files.empty()) {
     return nullptr;
   }
@@ -332,9 +332,9 @@ class RowBatchWriter {
     if (writer_ == nullptr) {
       return nullptr;
     }
-    PGICEBERG_RETURN_NOT_OK(ToPgStatus(writer_->Close(), "close data writer"));
-    PGICEBERG_ASSIGN_OR_RETURN(auto metadata,
-                               ToPgResult(writer_->Metadata(), "read writer metadata"));
+    PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(writer_->Close(), "close data writer"));
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto metadata, FromIcebergResult(writer_->Metadata(), "read writer metadata"));
     if (metadata.data_files.empty()) {
       return nullptr;
     }
@@ -357,15 +357,16 @@ class RowBatchWriter {
       return Ok();
     }
     PGICEBERG_ASSIGN_OR_RETURN(
-        auto writer, ToPgResult(iceberg::DataWriter::Make(iceberg::DataWriterOptions{
-                                    .path = DataFilePath(table_),
-                                    .schema = iceberg_schema_,
-                                    .spec = spec_,
-                                    .format = iceberg::FileFormatType::kParquet,
-                                    .io = table_.io(),
-                                    .properties = table_.properties().configs(),
-                                }),
-                                "create data writer"));
+        auto writer,
+        FromIcebergResult(iceberg::DataWriter::Make(iceberg::DataWriterOptions{
+                              .path = DataFilePath(table_),
+                              .schema = iceberg_schema_,
+                              .spec = spec_,
+                              .format = iceberg::FileFormatType::kParquet,
+                              .io = table_.io(),
+                              .properties = table_.properties().configs(),
+                          }),
+                          "create data writer"));
     writer_ = std::move(writer);
     return Ok();
   }
@@ -378,16 +379,17 @@ class RowBatchWriter {
     std::vector<std::shared_ptr<arrow::Array>> arrays;
     arrays.reserve(builders_.size());
     for (auto& builder : builders_) {
-      PGICEBERG_ASSIGN_OR_RETURN(auto array,
-                                 ToPgResult(builder->Finish(), "finish Arrow array"));
+      PGICEBERG_ASSIGN_OR_RETURN(
+          auto array, FromArrowResult(builder->Finish(), "finish Arrow array"));
       arrays.push_back(std::move(array));
     }
 
     auto batch = arrow::RecordBatch::Make(arrow_schema_, rows_in_batch_, arrays);
     ArrowArray c_array;
-    PGICEBERG_RETURN_NOT_OK(ToPgStatus(arrow::ExportRecordBatch(*batch, &c_array),
-                                       "export Arrow record batch"));
-    PGICEBERG_RETURN_NOT_OK(ToPgStatus(writer_->Write(&c_array), "write data file"));
+    PGICEBERG_RETURN_NOT_OK(FromArrowStatus(arrow::ExportRecordBatch(*batch, &c_array),
+                                            "export Arrow record batch"));
+    PGICEBERG_RETURN_NOT_OK(
+        FromIcebergStatus(writer_->Write(&c_array), "write data file"));
 
     PGICEBERG_ASSIGN_OR_RETURN(builders_, MakeBuilders(*arrow_schema_));
     rows_in_batch_ = 0;
@@ -478,11 +480,11 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
                                                 RelationGetRelationName(relation)));
 
   PGICEBERG_ASSIGN_OR_RETURN(state->iceberg_schema,
-                             ToPgResult(state->table->schema(), "load schema"));
+                             FromIcebergResult(state->table->schema(), "load schema"));
   PGICEBERG_ASSIGN_OR_RETURN(state->arrow_schema, ArrowSchemaFor(*state->iceberg_schema));
 
-  PGICEBERG_ASSIGN_OR_RETURN(state->spec,
-                             ToPgResult(state->table->spec(), "load partition spec"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      state->spec, FromIcebergResult(state->table->spec(), "load partition spec"));
   if (!state->spec->fields().empty()) {
     return std::unexpected(
         MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -568,11 +570,12 @@ Status EndModify(ModifyState* state) {
         WriteRows(*state->table, state->iceberg_schema, state->spec, state->arrow_schema,
                   std::move(state->builders), state->rows));
     PGICEBERG_ASSIGN_OR_RETURN(
-        auto append, ToPgResult(state->table->NewFastAppend(), "create append update"));
+        auto append,
+        FromIcebergResult(state->table->NewFastAppend(), "create append update"));
     if (data_file != nullptr) {
       append->AppendFile(data_file);
     }
-    PGICEBERG_RETURN_NOT_OK(ToPgStatus(append->Commit(), "commit append"));
+    PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(append->Commit(), "commit append"));
     return Ok();
   }
 
@@ -615,15 +618,16 @@ Status EndModify(ModifyState* state) {
   }
 
   PGICEBERG_ASSIGN_OR_RETURN(auto replacement, rewrite_writer->Finish());
-  PGICEBERG_ASSIGN_OR_RETURN(auto overwrite, ToPgResult(state->table->NewOverwrite(),
-                                                        "create overwrite update"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto overwrite,
+      FromIcebergResult(state->table->NewOverwrite(), "create overwrite update"));
   for (const auto& file : current.data_files()) {
     overwrite->DeleteFile(file);
   }
   if (replacement != nullptr) {
     overwrite->AddFile(replacement);
   }
-  PGICEBERG_RETURN_NOT_OK(ToPgStatus(overwrite->Commit(), "commit overwrite"));
+  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(overwrite->Commit(), "commit overwrite"));
   return Ok();
 }
 

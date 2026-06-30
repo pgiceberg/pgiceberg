@@ -82,8 +82,8 @@ inline int SqlStateForIcebergError(iceberg::ErrorKind kind) {
   }
 }
 
-inline PgError FromIcebergError(const iceberg::Error& error,
-                                std::string_view context = {}) {
+inline PgError PgErrorFromIcebergError(const iceberg::Error& error,
+                                       std::string_view context = {}) {
   return MakeError(SqlStateForIcebergError(error.kind),
                    WithContext(context, error.message));
 }
@@ -101,38 +101,40 @@ inline int SqlStateForArrowStatus(const arrow::Status& status) {
   }
 }
 
-inline PgError FromArrowStatus(const arrow::Status& status,
-                               std::string_view context = {}) {
+inline PgError PgErrorFromArrowStatus(const arrow::Status& status,
+                                      std::string_view context = {}) {
   return MakeError(SqlStateForArrowStatus(status),
                    WithContext(context, status.ToString()));
 }
 
-inline Status ToPgStatus(const iceberg::Status& status, std::string_view context = {}) {
+inline Status FromIcebergStatus(const iceberg::Status& status,
+                                std::string_view context = {}) {
   if (status) {
     return Ok();
   }
-  return std::unexpected(FromIcebergError(status.error(), context));
+  return std::unexpected(PgErrorFromIcebergError(status.error(), context));
 }
 
 template <typename T>
-Result<T> ToPgResult(iceberg::Result<T> result, std::string_view context = {}) {
+Result<T> FromIcebergResult(iceberg::Result<T> result, std::string_view context = {}) {
   if (!result) {
-    return std::unexpected(FromIcebergError(result.error(), context));
+    return std::unexpected(PgErrorFromIcebergError(result.error(), context));
   }
   return std::move(*result);
 }
 
-inline Status ToPgStatus(const arrow::Status& status, std::string_view context = {}) {
+inline Status FromArrowStatus(const arrow::Status& status,
+                              std::string_view context = {}) {
   if (status.ok()) {
     return Ok();
   }
-  return std::unexpected(FromArrowStatus(status, context));
+  return std::unexpected(PgErrorFromArrowStatus(status, context));
 }
 
 template <typename T>
-Result<T> ToPgResult(arrow::Result<T> result, std::string_view context = {}) {
+Result<T> FromArrowResult(arrow::Result<T> result, std::string_view context = {}) {
   if (!result.ok()) {
-    return std::unexpected(FromArrowStatus(result.status(), context));
+    return std::unexpected(PgErrorFromArrowStatus(result.status(), context));
   }
   return std::move(result).ValueOrDie();
 }

@@ -76,13 +76,13 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
   if (options.catalog_type == "sqlite") {
     PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQLite"));
     auto catalog = iceberg::sql::SqlCatalog::MakeSqliteCatalog(config, file_io);
-    return ToPgResult(std::move(catalog), "create SQLite catalog");
+    return FromIcebergResult(std::move(catalog), "create SQLite catalog");
   }
 
   if (options.catalog_type == "sql") {
     PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQL"));
     auto catalog = iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io);
-    return ToPgResult(std::move(catalog), "create PostgreSQL catalog");
+    return FromIcebergResult(std::move(catalog), "create PostgreSQL catalog");
   }
 
   return std::unexpected(
@@ -96,8 +96,8 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name) {
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
-  return ToPgResult(catalog->LoadTable(TableIdentifierFor(options, relation_name)),
-                    "load Iceberg table");
+  return FromIcebergResult(catalog->LoadTable(TableIdentifierFor(options, relation_name)),
+                           "load Iceberg table");
 }
 
 }  // namespace pgiceberg

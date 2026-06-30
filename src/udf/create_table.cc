@@ -175,12 +175,12 @@ pgiceberg::Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateCatalog(
   };
 
   if (catalog_type == "sqlite") {
-    return pgiceberg::ToPgResult(
+    return pgiceberg::FromIcebergResult(
         iceberg::sql::SqlCatalog::MakeSqliteCatalog(config, file_io),
         "create SQLite catalog");
   }
   if (catalog_type == "sql") {
-    return pgiceberg::ToPgResult(
+    return pgiceberg::FromIcebergResult(
         iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io),
         "create PostgreSQL catalog");
   }
@@ -217,16 +217,16 @@ extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
     iceberg::Namespace ns{.levels = SplitNamespace(name_space)};
     PGICEBERG_ASSIGN_OR_RETURN(
         auto ns_exists,
-        pgiceberg::ToPgResult(catalog->NamespaceExists(ns), "check namespace"));
+        pgiceberg::FromIcebergResult(catalog->NamespaceExists(ns), "check namespace"));
     if (!ns_exists) {
-      PGICEBERG_RETURN_NOT_OK(
-          pgiceberg::ToPgStatus(catalog->CreateNamespace(ns, {}), "create namespace"));
+      PGICEBERG_RETURN_NOT_OK(pgiceberg::FromIcebergStatus(
+          catalog->CreateNamespace(ns, {}), "create namespace"));
     }
 
     iceberg::TableIdentifier ident{.ns = ns, .name = table_name};
     PGICEBERG_ASSIGN_OR_RETURN(
         auto table_exists,
-        pgiceberg::ToPgResult(catalog->TableExists(ident), "check table"));
+        pgiceberg::FromIcebergResult(catalog->TableExists(ident), "check table"));
     if (table_exists) {
       if (!drop_if_exists) {
         return std::unexpected(pgiceberg::MakeError(
@@ -234,7 +234,7 @@ extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
             "Iceberg table \"" + name_space + "." + table_name + "\" already exists"));
       }
       PGICEBERG_RETURN_NOT_OK(
-          pgiceberg::ToPgStatus(catalog->DropTable(ident, false), "drop table"));
+          pgiceberg::FromIcebergStatus(catalog->DropTable(ident, false), "drop table"));
     }
 
     const auto table_location =
@@ -244,7 +244,7 @@ extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
                                BuildSchema(column_names, column_types, column_required));
     PGICEBERG_ASSIGN_OR_RETURN(
         auto table,
-        pgiceberg::ToPgResult(
+        pgiceberg::FromIcebergResult(
             catalog->CreateTable(ident, schema, iceberg::PartitionSpec::Unpartitioned(),
                                  iceberg::SortOrder::Unsorted(), table_location.string(),
                                  {{"write.parquet.compression-codec", "uncompressed"}}),

@@ -254,7 +254,7 @@ List* PgIcebergImportForeignSchema(ImportForeignSchemaStmt* stmt, Oid server_oid
     if (!table) {
       pgiceberg::ReportError(table.error());
     }
-    auto schema = pgiceberg::ToPgResult((*table)->schema(), "load schema");
+    auto schema = pgiceberg::FromIcebergResult((*table)->schema(), "load schema");
     if (!schema) {
       pgiceberg::ReportError(schema.error());
     }
