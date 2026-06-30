@@ -3,6 +3,7 @@
 #include <string>
 
 #include "common/catalog.h"
+#include "common/status.h"
 
 struct DefElem;
 struct List;
@@ -20,7 +21,7 @@ struct Options {
 
 bool IsValidOption(const char* name);
 std::string ValidOptionsText();
-void ValidateCatalogType(const char* value);
+Status ValidateCatalogType(const char* value);
 void ApplyOption(Options& options, DefElem* def);
 void ApplyOptions(Options& options, List* option_list);
 Options OptionsForForeignTable(unsigned int foreigntableid, const char* relation_name);

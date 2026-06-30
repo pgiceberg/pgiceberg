@@ -57,6 +57,13 @@ jobs:
       - name: Install PostgreSQL with pgenv
         run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
 
+      - name: Discover PostgreSQL include directories
+        id: pg-includes
+        run: |
+          export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
+          echo "includedir=$(pg_config --includedir)" >> "${GITHUB_OUTPUT}"
+          echo "includedir_server=$(pg_config --includedir-server)" >> "${GITHUB_OUTPUT}"
+
       - name: Configure compile database
         run: |
           export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
@@ -86,7 +93,13 @@ jobs:
           ignore: "build|cmake_modules"
           database: build/cpp-linter
           verbosity: debug
-          extra-args: "-std=c++23 -fno-builtin-std-forward_like"
+          extra-args: >-
+            -std=c++23
+            -fno-builtin-std-forward_like
+            -isystem ${{ steps.pg-includes.outputs.includedir }}
+            -isystem ${{ steps.pg-includes.outputs.includedir_server }}
+            -I${{ github.workspace }}/build/cpp-linter/_deps/iceberg-build/src
+            -I${{ github.workspace }}/build/cpp-linter/_deps/iceberg-src/src
 
       - name: Fail on linter findings
         if: steps.linter.outputs.checks-failed != 0

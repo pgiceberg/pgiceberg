@@ -10,7 +10,7 @@
 
 #include "common/catalog.h"
 #include "common/datum_convert.h"
-#include "common/error.h"
+#include "common/status.h"
 #include "fdw/iceberg_scan.h"
 
 extern "C" {
@@ -26,7 +26,7 @@ extern "C" {
 namespace pgiceberg::fdw {
 namespace {
 
-bool LoadNextBatch(ScanState* state);
+Result<bool> LoadNextBatch(ScanState* state);
 
 struct ColumnState {
   int batch_column_index = -1;
@@ -45,10 +45,11 @@ struct ScanState {
 
 namespace {
 
-bool LoadNextBatch(ScanState* state) {
+Result<bool> LoadNextBatch(ScanState* state) {
   while (state->batch == nullptr || state->row >= state->batch->num_rows()) {
     std::shared_ptr<arrow::RecordBatch> batch;
-    if (!state->cursor->NextBatch(&batch)) {
+    PGICEBERG_ASSIGN_OR_RETURN(auto has_batch, state->cursor->NextBatch(&batch));
+    if (!has_batch) {
       state->batch.reset();
       return false;
     }
@@ -78,11 +79,13 @@ void DetachMemoryContextCleanup(ScanState* state) {
   }
 }
 
-ScanState* BeginScan(Relation relation, const Options& options) {
+Result<ScanState*> BeginScan(Relation relation, const Options& options) {
   auto state = std::make_unique<ScanState>();
-  state->table = pgiceberg::LoadIcebergTable(ToCatalogOptions(options),
-                                             RelationGetRelationName(relation));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      state->table, pgiceberg::LoadIcebergTable(ToCatalogOptions(options),
+                                                RelationGetRelationName(relation)));
   state->cursor = std::make_unique<IcebergScanCursor>(state->table);
+  PGICEBERG_RETURN_NOT_OK(state->cursor->Init());
 
   TupleDesc desc = RelationGetDescr(relation);
   state->columns.resize(desc->natts);
@@ -94,9 +97,9 @@ ScanState* BeginScan(Relation relation, const Options& options) {
     const int column_index =
         state->cursor->arrow_schema()->GetFieldIndex(NameStr(attr->attname));
     if (column_index < 0) {
-      ereport(ERROR, (errcode(ERRCODE_FDW_ERROR),
-                      errmsg("column \"%s\" does not exist in Parquet file",
-                             NameStr(attr->attname))));
+      return std::unexpected(
+          MakeError(ERRCODE_FDW_ERROR, std::string("column \"") + NameStr(attr->attname) +
+                                           "\" does not exist in Parquet file"));
     }
     state->columns[i] = ColumnState{.batch_column_index = column_index};
   }
@@ -105,9 +108,13 @@ ScanState* BeginScan(Relation relation, const Options& options) {
   return state.release();
 }
 
-TupleTableSlot* IterateScan(ScanState* state, TupleTableSlot* slot) {
+Result<TupleTableSlot*> IterateScan(ScanState* state, TupleTableSlot* slot) {
   ExecClearTuple(slot);
-  if (state == nullptr || !LoadNextBatch(state)) {
+  if (state == nullptr) {
+    return slot;
+  }
+  PGICEBERG_ASSIGN_OR_RETURN(auto has_batch, LoadNextBatch(state));
+  if (!has_batch) {
     return slot;
   }
 
@@ -126,8 +133,9 @@ TupleTableSlot* IterateScan(ScanState* state, TupleTableSlot* slot) {
     }
 
     Form_pg_attribute attr = TupleDescAttr(desc, i);
-    slot->tts_values[i] =
-        pgiceberg::ConvertValue(*array, state->row, attr->atttypid, slot->tts_isnull[i]);
+    PGICEBERG_ASSIGN_OR_RETURN(
+        slot->tts_values[i],
+        pgiceberg::ConvertValue(*array, state->row, attr->atttypid, slot->tts_isnull[i]));
   }
 
   state->row++;

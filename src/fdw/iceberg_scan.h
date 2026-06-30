@@ -10,6 +10,8 @@
 #include <iceberg/arrow_c_data.h>
 #include <iceberg/type_fwd.h>
 
+#include "common/status.h"
+
 namespace iceberg {
 class FileScanTaskReader;
 }  // namespace iceberg
@@ -29,11 +31,12 @@ class IcebergScanCursor {
     return data_files_;
   }
 
-  bool NextBatch(std::shared_ptr<arrow::RecordBatch>* batch);
+  Status Init();
+  Result<bool> NextBatch(std::shared_ptr<arrow::RecordBatch>* batch);
   void Reset();
 
  private:
-  bool OpenCurrentTask();
+  Result<bool> OpenCurrentTask();
 
   std::shared_ptr<iceberg::Table> table_;
   std::shared_ptr<arrow::Schema> arrow_schema_;

@@ -10,7 +10,7 @@
 #include <iceberg/table.h>
 #include <iceberg/table_identifier.h>
 
-#include "common/error.h"
+#include "common/status.h"
 
 extern "C" {
 #include "postgres.h"
@@ -45,22 +45,24 @@ iceberg::TableIdentifier TableIdentifierFor(const CatalogOptions& options,
       .name = table_name};
 }
 
-void ValidateSqlCatalogOptions(const CatalogOptions& options, const char* catalog_label) {
+Status ValidateSqlCatalogOptions(const CatalogOptions& options,
+                                 const char* catalog_label) {
   if (options.catalog_uri.empty()) {
-    ereport(ERROR, (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-                    errmsg("pgiceberg option \"catalog_uri\" is required for %s "
-                           "catalog scans",
-                           catalog_label)));
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
+                  std::string("pgiceberg option \"catalog_uri\" is required for ") +
+                      catalog_label + " catalog scans"));
   }
   if (options.warehouse.empty()) {
-    ereport(ERROR, (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-                    errmsg("pgiceberg option \"warehouse\" is required for %s "
-                           "catalog scans",
-                           catalog_label)));
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
+                  std::string("pgiceberg option \"warehouse\" is required for ") +
+                      catalog_label + " catalog scans"));
   }
+  return Ok();
 }
 
-std::shared_ptr<iceberg::sql::SqlCatalog> CreateSqlCatalog(
+Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
     const CatalogOptions& options) {
   std::shared_ptr<iceberg::FileIO> file_io(
       iceberg::arrow::ArrowFileSystemFileIO::MakeLocalFileIO().release());
@@ -72,38 +74,30 @@ std::shared_ptr<iceberg::sql::SqlCatalog> CreateSqlCatalog(
   };
 
   if (options.catalog_type == "sqlite") {
-    ValidateSqlCatalogOptions(options, "SQLite");
+    PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQLite"));
     auto catalog = iceberg::sql::SqlCatalog::MakeSqliteCatalog(config, file_io);
-    if (!catalog) {
-      pgiceberg::ThrowIcebergError(catalog.error());
-    }
-    return *catalog;
+    return FromIcebergResult(std::move(catalog), "create SQLite catalog");
   }
 
   if (options.catalog_type == "sql") {
-    ValidateSqlCatalogOptions(options, "SQL");
+    PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQL"));
     auto catalog = iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io);
-    if (!catalog) {
-      pgiceberg::ThrowIcebergError(catalog.error());
-    }
-    return *catalog;
+    return FromIcebergResult(std::move(catalog), "create PostgreSQL catalog");
   }
 
-  ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                  errmsg("pgiceberg currently supports only catalog_type 'sql' or "
-                         "'sqlite' for Iceberg table access")));
+  return std::unexpected(
+      MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                "pgiceberg currently supports only catalog_type 'sql' or 'sqlite' for "
+                "Iceberg table access"));
 }
 
 }  // namespace
 
-std::shared_ptr<iceberg::Table> LoadIcebergTable(const CatalogOptions& options,
-                                                 const char* relation_name) {
-  auto catalog = CreateSqlCatalog(options);
-  auto table = catalog->LoadTable(TableIdentifierFor(options, relation_name));
-  if (!table) {
-    pgiceberg::ThrowIcebergError(table.error());
-  }
-  return *table;
+Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
+                                                         const char* relation_name) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
+  return FromIcebergResult(catalog->LoadTable(TableIdentifierFor(options, relation_name)),
+                           "load Iceberg table");
 }
 
 }  // namespace pgiceberg

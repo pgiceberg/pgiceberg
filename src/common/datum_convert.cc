@@ -1,7 +1,6 @@
 #include "common/datum_convert.h"
 
 #include <optional>
-#include <stdexcept>
 #include <string>
 
 #include <arrow/array.h>
@@ -90,8 +89,8 @@ std::int64_t TimestampMicros(const arrow::Array& array, std::int64_t offset) {
 
 }  // namespace
 
-std::uintptr_t ConvertValue(const arrow::Array& array, std::int64_t offset,
-                            unsigned int pg_type, bool& is_null) {
+Result<std::uintptr_t> ConvertValue(const arrow::Array& array, std::int64_t offset,
+                                    unsigned int pg_type, bool& is_null) {
   if (array.IsNull(offset)) {
     is_null = true;
     return static_cast<Datum>(0);
@@ -155,10 +154,10 @@ std::uintptr_t ConvertValue(const arrow::Array& array, std::int64_t offset,
       break;
   }
 
-  throw std::runtime_error(
-      "unsupported pgiceberg column conversion from Arrow "
-      "type " +
-      array.type()->ToString());
+  return std::unexpected(
+      MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                "unsupported pgiceberg column conversion from Arrow type " +
+                    array.type()->ToString()));
 }
 
 }  // namespace pgiceberg

@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <sstream>
-#include <stdexcept>
 
 #include <iceberg/type.h>
 
@@ -23,25 +22,25 @@ struct DecimalTypmod {
   int32 scale = kDefaultDecimalScale;
 };
 
-DecimalTypmod DecodeNumericTypmod(int32 typmod) {
+Result<DecimalTypmod> DecodeNumericTypmod(int32 typmod) {
   if (typmod < static_cast<int32>(VARHDRSZ)) {
-    return {};
+    return DecimalTypmod{};
   }
 
   const int32 payload = typmod - static_cast<int32>(VARHDRSZ);
   const int32 precision = (payload >> 16) & 0xffff;
   const int32 scale = static_cast<int16_t>(payload & 0xffff);
   if (precision <= 0 || precision > kMaxIcebergDecimalPrecision) {
-    throw std::runtime_error(
-        "PostgreSQL numeric precision is not supported "
-        "for Iceberg decimal: " +
-        std::to_string(precision));
+    return std::unexpected(
+        MakeError(ERRCODE_INVALID_PARAMETER_VALUE,
+                  "PostgreSQL numeric precision is not supported for Iceberg decimal: " +
+                      std::to_string(precision)));
   }
   if (scale < 0) {
-    throw std::runtime_error(
-        "PostgreSQL numeric negative scale is not "
-        "supported for Iceberg decimal: " +
-        std::to_string(scale));
+    return std::unexpected(MakeError(
+        ERRCODE_INVALID_PARAMETER_VALUE,
+        "PostgreSQL numeric negative scale is not supported for Iceberg decimal: " +
+            std::to_string(scale)));
   }
   return DecimalTypmod{.precision = precision, .scale = scale};
 }
@@ -55,7 +54,8 @@ std::string DecimalSql(const iceberg::Type& type) {
 
 }  // namespace
 
-std::shared_ptr<iceberg::Type> PostgresTypeToIcebergType(Oid pg_type, int32 typmod) {
+Result<std::shared_ptr<iceberg::Type>> PostgresTypeToIcebergType(Oid pg_type,
+                                                                 int32 typmod) {
   switch (pg_type) {
     case BOOLOID:
       return iceberg::boolean();
@@ -69,7 +69,7 @@ std::shared_ptr<iceberg::Type> PostgresTypeToIcebergType(Oid pg_type, int32 typm
     case FLOAT8OID:
       return iceberg::float64();
     case NUMERICOID: {
-      const auto decimal = DecodeNumericTypmod(typmod);
+      PGICEBERG_ASSIGN_OR_RETURN(auto decimal, DecodeNumericTypmod(typmod));
       return iceberg::decimal(decimal.precision, decimal.scale);
     }
     case DATEOID:
@@ -83,8 +83,10 @@ std::shared_ptr<iceberg::Type> PostgresTypeToIcebergType(Oid pg_type, int32 typm
     case BPCHAROID:
       return iceberg::string();
     default:
-      throw std::runtime_error(std::string("PostgreSQL type ") + format_type_be(pg_type) +
-                               " is not supported for Iceberg schema mapping");
+      return std::unexpected(
+          MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                    std::string("PostgreSQL type ") + format_type_be(pg_type) +
+                        " is not supported for Iceberg schema mapping"));
   }
 }
 

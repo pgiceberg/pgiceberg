@@ -46,25 +46,26 @@ std::string ValidOptionsText() {
   return result;
 }
 
-void ValidateCatalogType(const char* value) {
+Status ValidateCatalogType(const char* value) {
   if (std::strcmp(value, "sql") == 0 || std::strcmp(value, "sqlite") == 0) {
-    return;
+    return Ok();
   }
 
   if (std::strcmp(value, "rest") == 0) {
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
-    return;
+    return Ok();
 #else
-    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                    errmsg("pgiceberg REST catalog support is not enabled"),
-                    errhint("Rebuild pgiceberg with -DPGICEBERG_ENABLE_REST_CATALOG=ON "
-                            "to use catalog_type 'rest'.")));
+    return std::unexpected(MakeError(
+        ERRCODE_FEATURE_NOT_SUPPORTED, "pgiceberg REST catalog support is not enabled",
+        "Rebuild pgiceberg with -DPGICEBERG_ENABLE_REST_CATALOG=ON to use "
+        "catalog_type 'rest'."));
 #endif
   }
 
-  ereport(ERROR, (errcode(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE),
-                  errmsg("invalid pgiceberg catalog_type \"%s\"", value),
-                  errhint("Valid catalog_type values are: %s.", kValidCatalogTypes)));
+  return std::unexpected(MakeError(
+      ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
+      std::string("invalid pgiceberg catalog_type \"") + value + "\"",
+      std::string("Valid catalog_type values are: ") + kValidCatalogTypes + "."));
 }
 
 void ApplyOption(Options& options, DefElem* def) {
