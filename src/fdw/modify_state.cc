@@ -3,7 +3,6 @@
 #include <unistd.h>
 
 #include <chrono>
-#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -16,7 +15,6 @@
 #include <arrow/array/builder_base.h>
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
-#include <arrow/scalar.h>
 #include <iceberg/data/data_writer.h>
 #include <iceberg/file_format.h>
 #include <iceberg/partition_spec.h>
@@ -35,22 +33,17 @@
 extern "C" {
 #include "postgres.h"
 #include "access/htup_details.h"
-#include "catalog/pg_type_d.h"
 #include "executor/executor.h"
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
-#include "utils/builtins.h"
-#include "utils/date.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
-#include "utils/timestamp.h"
 }
 
 namespace pgiceberg::fdw {
 namespace {
 
-constexpr std::int64_t kPostgresUnixEpochOffsetMicros = 946684800000000LL;
 constexpr std::int64_t kDmlRewriteBatchRows = 8192;
 
 struct Value {
@@ -94,53 +87,9 @@ Result<std::vector<std::unique_ptr<arrow::ArrayBuilder>>> MakeBuilders(
   return builders;
 }
 
-Result<std::shared_ptr<arrow::Scalar>> ScalarFromDatum(Datum value,
-                                                       const arrow::DataType& type) {
-  switch (type.id()) {
-    case arrow::Type::BOOL:
-      return std::make_shared<arrow::BooleanScalar>(DatumGetBool(value));
-    case arrow::Type::INT16:
-      return std::make_shared<arrow::Int16Scalar>(DatumGetInt16(value));
-    case arrow::Type::INT32:
-    case arrow::Type::DATE32: {
-      if (type.id() == arrow::Type::DATE32) {
-        const auto days =
-            DatumGetDateADT(value) + POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
-        return std::make_shared<arrow::Date32Scalar>(days);
-      }
-      return std::make_shared<arrow::Int32Scalar>(DatumGetInt32(value));
-    }
-    case arrow::Type::INT64:
-      return std::make_shared<arrow::Int64Scalar>(DatumGetInt64(value));
-    case arrow::Type::FLOAT:
-      return std::make_shared<arrow::FloatScalar>(DatumGetFloat4(value));
-    case arrow::Type::DOUBLE:
-      return std::make_shared<arrow::DoubleScalar>(DatumGetFloat8(value));
-    case arrow::Type::STRING:
-    case arrow::Type::LARGE_STRING: {
-      char* text_value = TextDatumGetCString(value);
-      return std::make_shared<arrow::StringScalar>(std::string(text_value));
-    }
-    case arrow::Type::TIMESTAMP: {
-      const auto micros = DatumGetTimestamp(value) + kPostgresUnixEpochOffsetMicros;
-      return std::make_shared<arrow::TimestampScalar>(
-          micros, std::static_pointer_cast<arrow::TimestampType>(
-                      std::const_pointer_cast<arrow::DataType>(type.shared_from_this())));
-    }
-    default:
-      return std::unexpected(
-          MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
-                    "unsupported pgiceberg INSERT Arrow type " + type.ToString()));
-  }
-}
-
 Status AppendValue(arrow::ArrayBuilder& builder, const Value& value,
                    const arrow::DataType& type) {
-  if (value.is_null) {
-    return FromArrowStatus(builder.AppendNull(), "append Arrow NULL");
-  }
-  PGICEBERG_ASSIGN_OR_RETURN(auto scalar, ScalarFromDatum(value.datum, type));
-  return FromArrowStatus(builder.AppendScalar(*scalar), "append Arrow scalar");
+  return pgiceberg::AppendDatum(builder, value.datum, value.is_null, type);
 }
 
 Row CopyRowFromSlot(TupleTableSlot* slot, TupleDesc desc) {
@@ -197,39 +146,6 @@ TupleTableSlot* StoreRowInSlot(const Row& row, TupleTableSlot* slot, TupleDesc d
   return slot;
 }
 
-Result<bool> DatumEquals(Datum left, Datum right, Oid type) {
-  switch (type) {
-    case BOOLOID:
-      return DatumGetBool(left) == DatumGetBool(right);
-    case INT2OID:
-      return DatumGetInt16(left) == DatumGetInt16(right);
-    case INT4OID:
-      return DatumGetInt32(left) == DatumGetInt32(right);
-    case INT8OID:
-      return DatumGetInt64(left) == DatumGetInt64(right);
-    case FLOAT4OID:
-      return DatumGetFloat4(left) == DatumGetFloat4(right);
-    case FLOAT8OID:
-      return DatumGetFloat8(left) == DatumGetFloat8(right);
-    case DATEOID:
-      return DatumGetDateADT(left) == DatumGetDateADT(right);
-    case TIMESTAMPOID:
-      return DatumGetTimestamp(left) == DatumGetTimestamp(right);
-    case TIMESTAMPTZOID:
-      return DatumGetTimestampTz(left) == DatumGetTimestampTz(right);
-    case TEXTOID:
-    case VARCHAROID:
-    case BPCHAROID: {
-      char* left_text = TextDatumGetCString(left);
-      char* right_text = TextDatumGetCString(right);
-      return std::strcmp(left_text, right_text) == 0;
-    }
-    default:
-      return std::unexpected(MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
-                                       "unsupported pgiceberg row identity type"));
-  }
-}
-
 Result<bool> RowEquals(const Row& left, const Row& right, TupleDesc desc) {
   if (left.size() != right.size()) {
     return false;
@@ -244,7 +160,8 @@ Result<bool> RowEquals(const Row& left, const Row& right, TupleDesc desc) {
     }
     if (!left[i].is_null) {
       PGICEBERG_ASSIGN_OR_RETURN(
-          auto equal, DatumEquals(left[i].datum, right[i].datum, attr->atttypid));
+          auto equal,
+          pgiceberg::DatumEquals(left[i].datum, right[i].datum, attr->atttypid));
       if (!equal) {
         return false;
       }
