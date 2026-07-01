@@ -22,7 +22,8 @@ CREATE FUNCTION pgiceberg.create_table(
   column_types regtype[],
   column_required boolean[],
   drop_if_exists boolean DEFAULT false,
-  catalog_name text DEFAULT 'pgiceberg'
+  catalog_name text DEFAULT 'pgiceberg',
+  format_version integer DEFAULT 2
 )
 RETURNS void
 AS 'MODULE_PATHNAME', 'pgiceberg_create_table'

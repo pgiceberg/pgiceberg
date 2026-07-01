@@ -4,7 +4,10 @@
 #include <iceberg/schema.h>
 #include <iceberg/schema_field.h>
 #include <iceberg/sort_order.h>
+#include <iceberg/table_properties.h>
 #include <iceberg/table_identifier.h>
+#include <iceberg/transaction.h>
+#include <iceberg/update/update_properties.h>
 
 #include <filesystem>
 #include <memory>
@@ -147,6 +150,17 @@ pgiceberg::Result<std::shared_ptr<iceberg::Schema>> BuildSchema(
   return std::make_shared<iceberg::Schema>(std::move(fields), 1);
 }
 
+pgiceberg::Status ValidateFormatVersion(int32_t format_version) {
+  if (format_version == 2 || format_version == 3) {
+    return {};
+  }
+  return std::unexpected(pgiceberg::MakeError(
+      ERRCODE_INVALID_PARAMETER_VALUE,
+      "unsupported pgiceberg.create_table format_version " +
+          std::to_string(format_version),
+      "Iceberg format version 1 is not supported; valid values are 2 and 3."));
+}
+
 std::vector<std::string> SplitNamespace(const std::string& name_space) {
   std::vector<std::string> levels;
   std::stringstream input(name_space);
@@ -211,6 +225,8 @@ extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
                                BoolArrayArg(fcinfo, 7, "column_required"));
     const bool drop_if_exists = PG_GETARG_BOOL(8);
     const std::string catalog_name = TextArg(fcinfo, 9);
+    const int32_t format_version = PG_GETARG_INT32(10);
+    PGICEBERG_RETURN_NOT_OK(ValidateFormatVersion(format_version));
 
     PGICEBERG_ASSIGN_OR_RETURN(
         auto catalog, CreateCatalog(catalog_type, catalog_uri, warehouse, catalog_name));
@@ -243,12 +259,25 @@ extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
     PGICEBERG_ASSIGN_OR_RETURN(auto schema,
                                BuildSchema(column_names, column_types, column_required));
     PGICEBERG_ASSIGN_OR_RETURN(
-        auto table,
-        pgiceberg::FromIcebergResult(
-            catalog->CreateTable(ident, schema, iceberg::PartitionSpec::Unpartitioned(),
-                                 iceberg::SortOrder::Unsorted(), table_location.string(),
-                                 {{"write.parquet.compression-codec", "uncompressed"}}),
-            "create table"));
+        auto table, pgiceberg::FromIcebergResult(
+                        catalog->StageCreateTable(
+                            ident, schema, iceberg::PartitionSpec::Unpartitioned(),
+                            iceberg::SortOrder::Unsorted(), table_location.string(),
+                            {{"write.parquet.compression-codec", "uncompressed"}}),
+                        "stage create table"));
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto properties_update,
+        pgiceberg::FromIcebergResult(table->NewUpdateProperties(),
+                                     "create table properties update"));
+    PGICEBERG_RETURN_NOT_OK(pgiceberg::FromIcebergStatus(
+        properties_update
+            ->Set(iceberg::TableProperties::kFormatVersion.key(),
+                  std::to_string(format_version))
+            .Commit(),
+        "set table format version"));
+    PGICEBERG_ASSIGN_OR_RETURN(auto created_table, pgiceberg::FromIcebergResult(
+                                                       table->Commit(), "create table"));
+    (void)created_table;
     (void)table;
 
     return static_cast<Datum>(0);
