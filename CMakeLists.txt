@@ -38,6 +38,11 @@ if(PGICEBERG_USE_CCACHE)
 endif()
 
 find_package(PostgreSQL REQUIRED)
+if(POSTGRESQL_VERSION VERSION_LESS "16" OR POSTGRESQL_VERSION VERSION_GREATER_EQUAL "19")
+  message(FATAL_ERROR "pgiceberg supports PostgreSQL 16, 17, and 18; found ${POSTGRESQL_VERSION_STRING}"
+  )
+endif()
+
 include(DependencyToolchain)
 
 if(PGICEBERG_FETCH_ICEBERG)

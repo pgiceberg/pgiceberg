@@ -12,20 +12,25 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PG_VERSION: "18.4"
   CCACHE_DIR: ${{ github.workspace }}/.ccache
 
 jobs:
   build:
-    name: Build and test (${{ matrix.os }})
+    name: Build and test (PostgreSQL ${{ matrix.pg-version }}, ${{ matrix.os }})
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        pg-version:
+          - "16.14"
+          - "17.10"
+          - "18.4"
         os:
           - ubuntu-24.04
           - macos-26
+    env:
+      PG_VERSION: ${{ matrix.pg-version }}
 
     steps:
       - name: Check out repository
@@ -38,7 +43,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.pgenv
-          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-v1
+          key: pgenv-${{ runner.os }}-${{ matrix.pg-version }}-v1
 
       - name: Cache CMake build dependencies
         uses: actions/cache@v4
@@ -79,6 +84,8 @@ jobs:
             build/tests/test/extension/pgiceberg.control \
             build/tests/test/regress/regression.diffs \
             build/tests/test/regress/regression.out \
+            build/tests/test/regress/log/initdb.log \
+            build/tests/test/regress/log/postmaster.log \
             build/tests/Testing/Temporary/LastTest.log; do
             if [[ -f "${file}" ]]; then
               echo "::group::${file}"
@@ -91,12 +98,13 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: regression-${{ matrix.os }}
+          name: regression-pg${{ matrix.pg-version }}-${{ matrix.os }}
           path: |
             build/tests/test/pg_regress.conf
             build/tests/test/extension
             build/tests/test/regress/regression.diffs
             build/tests/test/regress/regression.out
+            build/tests/test/regress/log
             build/tests/test/regress/results
             build/tests/Testing/Temporary/LastTest.log
           if-no-files-found: ignore

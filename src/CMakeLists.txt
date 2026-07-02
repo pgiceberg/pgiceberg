@@ -41,6 +41,11 @@ endif()
 
 install(TARGETS pgiceberg LIBRARY DESTINATION "${POSTGRESQL_PKGLIB_DIR}"
                                   COMPONENT pgiceberg)
+if(APPLE)
+  install(CODE "file(REMOVE \"\$ENV{DESTDIR}${POSTGRESQL_PKGLIB_DIR}/pgiceberg\")
+file(CREATE_LINK \"$<TARGET_FILE_NAME:pgiceberg>\"
+     \"\$ENV{DESTDIR}${POSTGRESQL_PKGLIB_DIR}/pgiceberg\" SYMBOLIC)" COMPONENT pgiceberg)
+endif()
 install(FILES "${PROJECT_SOURCE_DIR}/pgiceberg.control"
         DESTINATION "${POSTGRESQL_EXTENSION_DIR}"
         COMPONENT pgiceberg)

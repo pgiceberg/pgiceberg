@@ -56,10 +56,24 @@ void PgIcebergGetForeignRelSize(PlannerInfo*, RelOptInfo* baserel, Oid) {
   baserel->rows = 1000;
 }
 
+ForeignPath* CreateIcebergForeignScanPath(PlannerInfo* root, RelOptInfo* baserel) {
+  const auto rows = baserel->rows;
+  const auto total_cost = std::max(1.0, rows);
+
+#if PG_VERSION_NUM >= 180000
+  return create_foreignscan_path(root, baserel, nullptr, rows, 0, 0, total_cost, NIL,
+                                 nullptr, nullptr, NIL, NIL);
+#elif PG_VERSION_NUM >= 170000
+  return create_foreignscan_path(root, baserel, nullptr, rows, 0, total_cost, NIL,
+                                 nullptr, nullptr, NIL, NIL);
+#else
+  return create_foreignscan_path(root, baserel, nullptr, rows, 0, total_cost, NIL,
+                                 nullptr, nullptr, NIL);
+#endif
+}
+
 void PgIcebergGetForeignPaths(PlannerInfo* root, RelOptInfo* baserel, Oid) {
-  add_path(baserel, reinterpret_cast<Path*>(create_foreignscan_path(
-                        root, baserel, nullptr, baserel->rows, 0, 0,
-                        std::max(1.0, baserel->rows), NIL, nullptr, nullptr, NIL, NIL)));
+  add_path(baserel, reinterpret_cast<Path*>(CreateIcebergForeignScanPath(root, baserel)));
 }
 
 ForeignScan* PgIcebergGetForeignPlan(PlannerInfo*, RelOptInfo* baserel, Oid, ForeignPath*,
