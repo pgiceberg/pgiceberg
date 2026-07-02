@@ -1,0 +1,69 @@
+CREATE EXTENSION pgiceberg;
+
+\pset format unaligned
+\set VERBOSITY terse
+
+DO $$
+BEGIN
+  PERFORM pgiceberg.create_table(
+    'sqlite',
+    '/tmp/pgiceberg_catalog_register_source_regress.db',
+    '/tmp/pgiceberg_warehouse_register_source_regress',
+    'default',
+    'trip_fixture',
+    ARRAY['vendorid', 'passenger_count', 'trip_distance', 'store_and_fwd_flag'],
+    ARRAY['bigint'::regtype, 'bigint'::regtype, 'double precision'::regtype, 'text'::regtype],
+    ARRAY[true, false, false, false],
+    true,
+    'pgiceberg_regress'
+  );
+END $$;
+
+SELECT pgiceberg.register_table(
+  'sqlite',
+  '/tmp/pgiceberg_catalog_register_target_regress.db',
+  'default',
+  'registered_trip_fixture',
+  (
+    SELECT '/tmp/pgiceberg_warehouse_register_source_regress/default/trip_fixture/metadata/' || metadata_file
+    FROM pg_ls_dir('/tmp/pgiceberg_warehouse_register_source_regress/default/trip_fixture/metadata') AS metadata_file
+    WHERE metadata_file LIKE '%.metadata.json'
+    ORDER BY metadata_file DESC
+    LIMIT 1
+  ),
+  true,
+  'pgiceberg_regress'
+);
+
+CREATE SERVER registered_iceberg
+FOREIGN DATA WRAPPER pgiceberg
+OPTIONS (
+  catalog_type 'sqlite',
+  catalog_uri '/tmp/pgiceberg_catalog_register_target_regress.db',
+  warehouse '/tmp/pgiceberg_warehouse_register_target_regress',
+  catalog_name 'pgiceberg_regress'
+);
+
+CREATE SCHEMA registered;
+
+IMPORT FOREIGN SCHEMA "default"
+LIMIT TO (registered_trip_fixture)
+FROM SERVER registered_iceberg
+INTO registered;
+
+SELECT foreign_table_schema, foreign_table_name
+FROM information_schema.foreign_tables
+WHERE foreign_table_schema = 'registered'
+ORDER BY foreign_table_name;
+
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'registered'
+  AND table_name = 'registered_trip_fixture'
+ORDER BY ordinal_position;
+
+\set VERBOSITY default
+
+DROP SCHEMA registered CASCADE;
+DROP SERVER registered_iceberg;
+DROP EXTENSION pgiceberg;

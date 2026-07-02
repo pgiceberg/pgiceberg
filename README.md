@@ -202,6 +202,23 @@ FROM SERVER iceberg
 INTO imported;
 ```
 
+To register an existing Iceberg metadata file into a SQL catalog first, use
+`pgiceberg.register_table`:
+
+```sql
+SELECT pgiceberg.register_table(
+  'sqlite',
+  '/tmp/pgiceberg_catalog_dev.db',
+  'default',
+  'trip_fixture',
+  '/tmp/external_warehouse/default/trip_fixture/metadata/00001.metadata.json'
+);
+```
+
+The registered metadata location must be readable by pgiceberg's local file IO.
+The function creates the namespace when needed and rejects an existing catalog
+table unless `drop_if_exists` is set to `true`.
+
 REST catalog support is optional. This requires
 `-DPGICEBERG_ENABLE_REST_CATALOG=ON`; default builds fail with a
 feature-not-supported error:

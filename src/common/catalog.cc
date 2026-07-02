@@ -45,25 +45,25 @@ iceberg::TableIdentifier TableIdentifierFor(const CatalogOptions& options,
       .name = table_name};
 }
 
-Status ValidateSqlCatalogOptions(const CatalogOptions& options,
-                                 const char* catalog_label) {
+Status ValidateSqlCatalogOptions(const CatalogOptions& options, const char* catalog_label,
+                                 bool require_warehouse) {
   if (options.catalog_uri.empty()) {
     return std::unexpected(
         MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
                   std::string("pgiceberg option \"catalog_uri\" is required for ") +
-                      catalog_label + " catalog scans"));
+                      catalog_label + " catalog access"));
   }
-  if (options.warehouse.empty()) {
+  if (require_warehouse && options.warehouse.empty()) {
     return std::unexpected(
         MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
                   std::string("pgiceberg option \"warehouse\" is required for ") +
-                      catalog_label + " catalog scans"));
+                      catalog_label + " catalog access"));
   }
   return Ok();
 }
 
 Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
-    const CatalogOptions& options) {
+    const CatalogOptions& options, bool require_warehouse) {
   std::shared_ptr<iceberg::FileIO> file_io(
       iceberg::arrow::ArrowFileSystemFileIO::MakeLocalFileIO().release());
   iceberg::sql::SqlCatalogConfig config{
@@ -74,13 +74,14 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
   };
 
   if (options.catalog_type == "sqlite") {
-    PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQLite"));
+    PGICEBERG_RETURN_NOT_OK(
+        ValidateSqlCatalogOptions(options, "SQLite", require_warehouse));
     auto catalog = iceberg::sql::SqlCatalog::MakeSqliteCatalog(config, file_io);
     return FromIcebergResult(std::move(catalog), "create SQLite catalog");
   }
 
   if (options.catalog_type == "sql") {
-    PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQL"));
+    PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQL", require_warehouse));
     auto catalog = iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io);
     return FromIcebergResult(std::move(catalog), "create PostgreSQL catalog");
   }
@@ -91,13 +92,46 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
                 "Iceberg table access"));
 }
 
+Status EnsureNamespaceExists(std::shared_ptr<iceberg::sql::SqlCatalog>& catalog,
+                             const iceberg::Namespace& ns) {
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto exists, FromIcebergResult(catalog->NamespaceExists(ns), "check namespace"));
+  if (exists) {
+    return Ok();
+  }
+  return FromIcebergStatus(catalog->CreateNamespace(ns, {}), "create namespace");
+}
+
 }  // namespace
 
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name) {
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options, true));
   return FromIcebergResult(catalog->LoadTable(TableIdentifierFor(options, relation_name)),
                            "load Iceberg table");
+}
+
+Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
+    const CatalogOptions& options, const char* relation_name,
+    const std::string& metadata_file_location, bool drop_if_exists) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options, false));
+  const auto ident = TableIdentifierFor(options, relation_name);
+  PGICEBERG_RETURN_NOT_OK(EnsureNamespaceExists(catalog, ident.ns));
+
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto exists, FromIcebergResult(catalog->TableExists(ident), "check table"));
+  if (exists) {
+    if (!drop_if_exists) {
+      return std::unexpected(
+          MakeError(ERRCODE_DUPLICATE_TABLE,
+                    "Iceberg table \"" + ident.ToString() + "\" already exists"));
+    }
+    PGICEBERG_RETURN_NOT_OK(
+        FromIcebergStatus(catalog->DropTable(ident, false), "drop table"));
+  }
+
+  return FromIcebergResult(catalog->RegisterTable(ident, metadata_file_location),
+                           "register Iceberg table");
 }
 
 }  // namespace pgiceberg
