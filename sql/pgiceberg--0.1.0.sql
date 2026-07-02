@@ -29,6 +29,19 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'pgiceberg_create_table'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION pgiceberg.register_table(
+  catalog_type text,
+  catalog_uri text,
+  namespace text,
+  table_name text,
+  metadata_file_location text,
+  drop_if_exists boolean DEFAULT false,
+  catalog_name text DEFAULT 'pgiceberg'
+)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_register_table'
+LANGUAGE C STRICT;
+
 CREATE FOREIGN DATA WRAPPER pgiceberg
 HANDLER pgiceberg.fdw_handler
 VALIDATOR pgiceberg.fdw_validator;

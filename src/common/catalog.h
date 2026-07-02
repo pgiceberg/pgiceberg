@@ -22,5 +22,8 @@ struct CatalogOptions {
 
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name);
+Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
+    const CatalogOptions& options, const char* relation_name,
+    const std::string& metadata_file_location, bool drop_if_exists);
 
 }  // namespace pgiceberg

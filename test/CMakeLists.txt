@@ -1,5 +1,5 @@
 if(POSTGRESQL_REGRESS)
-  set(PGICEBERG_REGRESS_TESTS fdw_options fdw_dml fdw_import_schema)
+  set(PGICEBERG_REGRESS_TESTS fdw_options fdw_dml fdw_import_schema fdw_register_table)
   set(PGICEBERG_REGRESS_EXTENSION_DIR "${CMAKE_CURRENT_BINARY_DIR}/extension")
 
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/regress")
