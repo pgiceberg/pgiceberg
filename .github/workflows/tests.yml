@@ -84,6 +84,8 @@ jobs:
             build/tests/test/extension/pgiceberg.control \
             build/tests/test/regress/regression.diffs \
             build/tests/test/regress/regression.out \
+            build/tests/test/regress/log/initdb.log \
+            build/tests/test/regress/log/postmaster.log \
             build/tests/Testing/Temporary/LastTest.log; do
             if [[ -f "${file}" ]]; then
               echo "::group::${file}"
@@ -102,6 +104,7 @@ jobs:
             build/tests/test/extension
             build/tests/test/regress/regression.diffs
             build/tests/test/regress/regression.out
+            build/tests/test/regress/log
             build/tests/test/regress/results
             build/tests/Testing/Temporary/LastTest.log
           if-no-files-found: ignore

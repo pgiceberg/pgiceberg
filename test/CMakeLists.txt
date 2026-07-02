@@ -20,8 +20,10 @@ if(POSTGRESQL_REGRESS)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
        "unix_socket_directories = '${CMAKE_CURRENT_BINARY_DIR}/regress'\n"
        "listen_addresses = '127.0.0.1'\n")
-  file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
-       "extension_control_path = '${CMAKE_CURRENT_BINARY_DIR}:$system'\n")
+  if(POSTGRESQL_VERSION VERSION_GREATER_EQUAL "18")
+    file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
+         "extension_control_path = '${CMAKE_CURRENT_BINARY_DIR}:$system'\n")
+  endif()
 
   add_test(NAME regress_fdw
            COMMAND "${POSTGRESQL_REGRESS}" --bindir "${POSTGRESQL_BIN_DIR}" --inputdir
