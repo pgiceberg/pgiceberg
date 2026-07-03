@@ -71,12 +71,8 @@ function(resolve_iceberg_dependency out_target)
   endforeach()
 
   if(NOT iceberg_targets)
-    message(WARNING "iceberg-cpp was fetched, but no known bundle library target was found"
+    message(FATAL_ERROR "iceberg-cpp was fetched, but no known bundle library target was found"
     )
-    set(${out_target}
-        ""
-        PARENT_SCOPE)
-    return()
   endif()
 
   if(PGICEBERG_ENABLE_REST_CATALOG)
