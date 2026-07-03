@@ -59,6 +59,21 @@ SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
 FROM pgiceberg_trip_fixture
 ORDER BY vendorid;
 
+BEGIN;
+INSERT INTO pgiceberg_trip_fixture
+VALUES (4, 4, 4.0, 'R');
+UPDATE pgiceberg_trip_fixture
+SET passenger_count = 5
+WHERE vendorid = 4;
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+WHERE vendorid = 4;
+ROLLBACK;
+
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+
 UPDATE pgiceberg_trip_fixture
 SET passenger_count = passenger_count + 10,
     store_and_fwd_flag = 'U'
@@ -69,9 +84,34 @@ SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
 FROM pgiceberg_trip_fixture
 ORDER BY vendorid;
 
+BEGIN;
+UPDATE pgiceberg_trip_fixture
+SET passenger_count = 99
+WHERE vendorid = 3;
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+ROLLBACK;
+
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+
 DELETE FROM pgiceberg_trip_fixture
 WHERE vendorid = 1
 RETURNING vendorid, passenger_count, trip_distance, store_and_fwd_flag;
+
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+
+BEGIN;
+DELETE FROM pgiceberg_trip_fixture
+WHERE vendorid = 2;
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+ROLLBACK;
 
 SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
 FROM pgiceberg_trip_fixture
