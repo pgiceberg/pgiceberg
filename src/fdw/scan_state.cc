@@ -12,6 +12,7 @@
 #include "common/datum_convert.h"
 #include "common/status.h"
 #include "fdw/iceberg_scan.h"
+#include "fdw/modify_state.h"
 
 extern "C" {
 #include "postgres.h"
@@ -84,6 +85,8 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options) {
   PGICEBERG_ASSIGN_OR_RETURN(
       state->table, pgiceberg::LoadIcebergTable(ToCatalogOptions(options),
                                                 RelationGetRelationName(relation)));
+  PGICEBERG_ASSIGN_OR_RETURN(state->table,
+                             ReadTableForCurrentTransaction(options, state->table));
   state->cursor = std::make_unique<IcebergScanCursor>(state->table);
   PGICEBERG_RETURN_NOT_OK(state->cursor->Init());
 

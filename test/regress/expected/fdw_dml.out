@@ -65,6 +65,27 @@ vendorid|passenger_count|trip_distance|store_and_fwd_flag
 2|1|8.25|Y
 3||0.75|
 (3 rows)
+BEGIN;
+INSERT INTO pgiceberg_trip_fixture
+VALUES (4, 4, 4.0, 'R');
+UPDATE pgiceberg_trip_fixture
+SET passenger_count = 5
+WHERE vendorid = 4;
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+WHERE vendorid = 4;
+vendorid|passenger_count|trip_distance|store_and_fwd_flag
+4|5|4|R
+(1 row)
+ROLLBACK;
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+vendorid|passenger_count|trip_distance|store_and_fwd_flag
+1|2|3.5|N
+2|1|8.25|Y
+3||0.75|
+(3 rows)
 UPDATE pgiceberg_trip_fixture
 SET passenger_count = passenger_count + 10,
     store_and_fwd_flag = 'U'
@@ -81,12 +102,50 @@ vendorid|passenger_count|trip_distance|store_and_fwd_flag
 2|11|8.25|U
 3||0.75|
 (3 rows)
+BEGIN;
+UPDATE pgiceberg_trip_fixture
+SET passenger_count = 99
+WHERE vendorid = 3;
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+vendorid|passenger_count|trip_distance|store_and_fwd_flag
+1|2|3.5|N
+2|11|8.25|U
+3|99|0.75|
+(3 rows)
+ROLLBACK;
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+vendorid|passenger_count|trip_distance|store_and_fwd_flag
+1|2|3.5|N
+2|11|8.25|U
+3||0.75|
+(3 rows)
 DELETE FROM pgiceberg_trip_fixture
 WHERE vendorid = 1
 RETURNING vendorid, passenger_count, trip_distance, store_and_fwd_flag;
 vendorid|passenger_count|trip_distance|store_and_fwd_flag
 1|2|3.5|N
 (1 row)
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+vendorid|passenger_count|trip_distance|store_and_fwd_flag
+2|11|8.25|U
+3||0.75|
+(2 rows)
+BEGIN;
+DELETE FROM pgiceberg_trip_fixture
+WHERE vendorid = 2;
+SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
+FROM pgiceberg_trip_fixture
+ORDER BY vendorid;
+vendorid|passenger_count|trip_distance|store_and_fwd_flag
+3||0.75|
+(1 row)
+ROLLBACK;
 SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
 FROM pgiceberg_trip_fixture
 ORDER BY vendorid;

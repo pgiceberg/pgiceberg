@@ -3,11 +3,9 @@
 #include <memory>
 #include <string>
 
-#include "common/status.h"
+#include <iceberg/type_fwd.h>
 
-namespace iceberg {
-class Table;
-}
+#include "common/status.h"
 
 namespace pgiceberg {
 

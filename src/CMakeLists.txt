@@ -23,9 +23,7 @@ set_target_properties(pgiceberg PROPERTIES PREFIX "" OUTPUT_NAME pgiceberg)
 set_target_properties(pgiceberg PROPERTIES BUILD_RPATH "${POSTGRESQL_LIBRARY_DIR}"
                                            INSTALL_RPATH "${POSTGRESQL_LIBRARY_DIR}")
 
-if(PGICEBERG_ICEBERG_TARGET)
-  target_link_libraries(pgiceberg PRIVATE ${PGICEBERG_ICEBERG_TARGET})
-endif()
+target_link_libraries(pgiceberg PRIVATE ${PGICEBERG_ICEBERG_TARGET})
 
 if(PGICEBERG_SANITIZERS)
   add_library(pgiceberg_sanitizers INTERFACE)

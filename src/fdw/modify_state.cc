@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -16,23 +17,28 @@
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/data_writer.h>
+#include <iceberg/file_io.h>
 #include <iceberg/file_format.h>
+#include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
 #include <iceberg/schema.h>
 #include <iceberg/schema_internal.h>
 #include <iceberg/table.h>
+#include <iceberg/table_metadata.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/fast_append.h>
 #include <iceberg/update/overwrite_files.h>
 
 #include "common/catalog.h"
 #include "common/datum_convert.h"
+#include "common/pg_error.h"
 #include "common/status.h"
 #include "fdw/iceberg_scan.h"
 
 extern "C" {
 #include "postgres.h"
 #include "access/htup_details.h"
+#include "access/xact.h"
 #include "executor/executor.h"
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
@@ -45,6 +51,315 @@ namespace pgiceberg::fdw {
 namespace {
 
 constexpr std::int64_t kDmlRewriteBatchRows = 8192;
+
+class PendingIcebergChange {
+ public:
+  virtual ~PendingIcebergChange() = default;
+  virtual Status Apply(iceberg::Transaction& transaction) = 0;
+  virtual std::vector<std::string> NewDataFilePaths() const = 0;
+};
+
+class PendingAppendChange final : public PendingIcebergChange {
+ public:
+  explicit PendingAppendChange(std::shared_ptr<iceberg::DataFile> data_file)
+      : data_file_(std::move(data_file)) {}
+
+  Status Apply(iceberg::Transaction& transaction) override {
+    if (data_file_ == nullptr) {
+      return Ok();
+    }
+    PGICEBERG_ASSIGN_OR_RETURN(auto append, FromIcebergResult(transaction.NewFastAppend(),
+                                                              "create append update"));
+    append->AppendFile(data_file_);
+    return FromIcebergStatus(append->Commit(), "apply pending Iceberg append");
+  }
+
+  std::vector<std::string> NewDataFilePaths() const override {
+    if (data_file_ == nullptr) {
+      return {};
+    }
+    return {data_file_->file_path};
+  }
+
+ private:
+  std::shared_ptr<iceberg::DataFile> data_file_;
+};
+
+class PendingOverwriteChange final : public PendingIcebergChange {
+ public:
+  PendingOverwriteChange(std::vector<std::shared_ptr<iceberg::DataFile>> deleted_files,
+                         std::shared_ptr<iceberg::DataFile> replacement_file)
+      : deleted_files_(std::move(deleted_files)),
+        replacement_file_(std::move(replacement_file)) {}
+
+  Status Apply(iceberg::Transaction& transaction) override {
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto overwrite,
+        FromIcebergResult(transaction.NewOverwrite(), "create overwrite update"));
+    for (const auto& file : deleted_files_) {
+      overwrite->DeleteFile(file);
+    }
+    if (replacement_file_ != nullptr) {
+      overwrite->AddFile(replacement_file_);
+    }
+    return FromIcebergStatus(overwrite->Commit(), "apply pending Iceberg overwrite");
+  }
+
+  std::vector<std::string> NewDataFilePaths() const override {
+    if (replacement_file_ == nullptr) {
+      return {};
+    }
+    return {replacement_file_->file_path};
+  }
+
+ private:
+  std::vector<std::shared_ptr<iceberg::DataFile>> deleted_files_;
+  std::shared_ptr<iceberg::DataFile> replacement_file_;
+};
+
+struct PendingModifyChange {
+  SubTransactionId subtransaction_id = InvalidSubTransactionId;
+  std::unique_ptr<PendingIcebergChange> change;
+};
+
+struct PendingTableChange {
+  std::string key;
+  std::shared_ptr<iceberg::Table> base_table;
+  std::shared_ptr<iceberg::Transaction> transaction;
+  std::vector<PendingModifyChange> changes;
+  bool committed = false;
+  bool commit_state_unknown = false;
+};
+
+// LoadIcebergTable returns a fresh Table object for each executor entry, so use the
+// foreign-table options as the stable backend-local identity for pending changes.
+std::string PendingTableKey(const Options& options) {
+  std::string key;
+  const std::string_view parts[] = {options.catalog_type, options.catalog_uri,
+                                    options.warehouse,    options.catalog_name,
+                                    options.name_space,   options.table};
+  for (auto part : parts) {
+    key += std::to_string(part.size());
+    key += ':';
+    key.append(part);
+  }
+  return key;
+}
+
+std::vector<PendingTableChange>& PendingTableChanges() {
+  static auto* changes = new std::vector<PendingTableChange>();
+  return *changes;
+}
+
+PendingTableChange* FindPendingTableChange(const std::string& key) {
+  auto& changes = PendingTableChanges();
+  auto it =
+      std::find_if(changes.begin(), changes.end(), [&](const PendingTableChange& change) {
+        return change.key == key && !change.committed;
+      });
+  if (it == changes.end()) {
+    return nullptr;
+  }
+  return &*it;
+}
+
+Status RebuildPendingTransaction(PendingTableChange& table_change) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto transaction,
+                             FromIcebergResult(table_change.base_table->NewTransaction(),
+                                               "create Iceberg transaction"));
+  for (auto& change : table_change.changes) {
+    PGICEBERG_RETURN_NOT_OK(change.change->Apply(*transaction));
+  }
+  table_change.transaction = std::move(transaction);
+  return Ok();
+}
+
+Result<PendingTableChange*> EnsurePendingTableChange(
+    const Options& options, std::shared_ptr<iceberg::Table> table) {
+  auto key = PendingTableKey(options);
+  if (auto* pending = FindPendingTableChange(key); pending != nullptr) {
+    return pending;
+  }
+
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto transaction,
+      FromIcebergResult(table->NewTransaction(), "create Iceberg transaction"));
+  auto& changes = PendingTableChanges();
+  changes.push_back(PendingTableChange{
+      .key = std::move(key),
+      .base_table = std::move(table),
+      .transaction = std::move(transaction),
+      .changes = {},
+      .committed = false,
+      .commit_state_unknown = false,
+  });
+  return &changes.back();
+}
+
+Result<std::shared_ptr<iceberg::Table>> StaticTableForPendingChange(
+    const PendingTableChange& table_change) {
+  auto metadata = std::shared_ptr<iceberg::TableMetadata>(
+      table_change.transaction,
+      const_cast<iceberg::TableMetadata*>(&table_change.transaction->current()));
+  return FromIcebergResult(
+      iceberg::StaticTable::Make(
+          table_change.base_table->name(), std::move(metadata),
+          std::string(table_change.base_table->metadata_file_location()),
+          table_change.base_table->io()),
+      "create Iceberg transaction read table");
+}
+
+std::vector<std::string> NewDataFilePaths(const PendingTableChange& table_change) {
+  std::vector<std::string> paths;
+  for (const auto& change : table_change.changes) {
+    auto change_paths = change.change->NewDataFilePaths();
+    paths.insert(paths.end(), change_paths.begin(), change_paths.end());
+  }
+  return paths;
+}
+
+std::vector<std::string> NewDataFilePaths(
+    const std::shared_ptr<iceberg::DataFile>& data_file) {
+  if (data_file == nullptr) {
+    return {};
+  }
+  return {data_file->file_path};
+}
+
+void CleanupDataFiles(const std::shared_ptr<iceberg::Table>& table,
+                      const std::vector<std::string>& paths) {
+  if (table == nullptr || paths.empty()) {
+    return;
+  }
+  auto status = FromIcebergStatus(table->io()->DeleteFiles(paths),
+                                  "delete aborted Iceberg data files");
+  if (!status) {
+    elog(WARNING, "%s", status.error().message().c_str());
+  }
+}
+
+void ClearPendingTableChanges(bool cleanup_data_files) {
+  if (cleanup_data_files) {
+    for (const auto& table_change : PendingTableChanges()) {
+      if (!table_change.committed && !table_change.commit_state_unknown) {
+        CleanupDataFiles(table_change.base_table, NewDataFilePaths(table_change));
+      }
+    }
+  }
+  PendingTableChanges().clear();
+}
+
+Status QueuePendingModifyChange(PendingTableChange& table_change,
+                                std::unique_ptr<PendingIcebergChange> change) {
+  auto* pending_change = change.get();
+  table_change.changes.push_back(PendingModifyChange{
+      .subtransaction_id = GetCurrentSubTransactionId(), .change = std::move(change)});
+  auto status = pending_change->Apply(*table_change.transaction);
+  if (!status) {
+    CleanupDataFiles(table_change.base_table, pending_change->NewDataFilePaths());
+    table_change.changes.pop_back();
+    return std::unexpected(status.error());
+  }
+  return Ok();
+}
+
+Status CommitPendingModifyChanges() {
+  for (auto& table_change : PendingTableChanges()) {
+    if (table_change.committed || table_change.changes.empty()) {
+      continue;
+    }
+    auto commit_result = table_change.transaction->Commit();
+    if (!commit_result) {
+      if (commit_result.error().kind == iceberg::ErrorKind::kCommitStateUnknown) {
+        table_change.commit_state_unknown = true;
+      }
+      return std::unexpected(
+          MakePgError(commit_result.error(), "commit pending Iceberg transaction"));
+    }
+    auto committed_table = std::move(commit_result).value();
+    table_change.base_table = std::move(committed_table);
+    table_change.changes.clear();
+    table_change.committed = true;
+  }
+  ClearPendingTableChanges(false);
+  return Ok();
+}
+
+void XactCallback(XactEvent event, void*) {
+  try {
+    switch (event) {
+      case XACT_EVENT_PRE_COMMIT: {
+        auto status = CommitPendingModifyChanges();
+        if (!status) {
+          pgiceberg::ReportError(status.error());
+        }
+        break;
+      }
+      case XACT_EVENT_PRE_PREPARE:
+        if (!PendingTableChanges().empty()) {
+          ereport(ERROR,
+                  (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                   errmsg("pgiceberg DML does not support prepared transactions")));
+        }
+        break;
+      case XACT_EVENT_ABORT:
+      case XACT_EVENT_PARALLEL_ABORT:
+        ClearPendingTableChanges(true);
+        break;
+      default:
+        break;
+    }
+  } catch (...) {
+    pgiceberg::ReportCurrentException();
+  }
+}
+
+void SubXactCallback(SubXactEvent event, SubTransactionId my_subid,
+                     SubTransactionId parent_subid, void*) {
+  try {
+    auto& table_changes = PendingTableChanges();
+    switch (event) {
+      case SUBXACT_EVENT_COMMIT_SUB:
+        for (auto& table_change : table_changes) {
+          for (auto& change : table_change.changes) {
+            if (change.subtransaction_id == my_subid) {
+              change.subtransaction_id = parent_subid;
+            }
+          }
+        }
+        break;
+      case SUBXACT_EVENT_ABORT_SUB:
+        for (auto& table_change : table_changes) {
+          std::vector<std::string> aborted_paths;
+          for (const auto& change : table_change.changes) {
+            if (change.subtransaction_id == my_subid) {
+              auto paths = change.change->NewDataFilePaths();
+              aborted_paths.insert(aborted_paths.end(), paths.begin(), paths.end());
+            }
+          }
+          CleanupDataFiles(table_change.base_table, aborted_paths);
+          std::erase_if(table_change.changes,
+                        [my_subid](const PendingModifyChange& change) {
+                          return change.subtransaction_id == my_subid;
+                        });
+          if (!table_change.changes.empty()) {
+            auto status = RebuildPendingTransaction(table_change);
+            if (!status) {
+              pgiceberg::ReportError(status.error());
+            }
+          }
+        }
+        std::erase_if(table_changes, [](const PendingTableChange& table_change) {
+          return table_change.changes.empty();
+        });
+        break;
+      default:
+        break;
+    }
+  } catch (...) {
+    pgiceberg::ReportCurrentException();
+  }
+}
 
 struct Value {
   Datum datum = static_cast<Datum>(0);
@@ -352,10 +667,26 @@ Result<Row> RowFromRecordBatch(const arrow::RecordBatch& batch, std::int64_t row
 
 }  // namespace
 
+void RegisterTransactionCallbacks() {
+  RegisterXactCallback(XactCallback, nullptr);
+  RegisterSubXactCallback(SubXactCallback, nullptr);
+}
+
+Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
+    const Options& options, std::shared_ptr<iceberg::Table> table) {
+  auto* pending = FindPendingTableChange(PendingTableKey(options));
+  if (pending == nullptr) {
+    return table;
+  }
+  return StaticTableForPendingChange(*pending);
+}
+
 struct ModifyState {
   MemoryContextCallback* cleanup_callback = nullptr;
   CmdType operation = CMD_UNKNOWN;
+  Options options;
   std::shared_ptr<iceberg::Table> table;
+  std::shared_ptr<iceberg::Table> read_table;
   std::shared_ptr<iceberg::Schema> iceberg_schema;
   std::shared_ptr<iceberg::PartitionSpec> spec;
   std::shared_ptr<arrow::Schema> arrow_schema;
@@ -390,18 +721,22 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
                                  const Options& options) {
   auto state = std::make_unique<ModifyState>();
   state->operation = mtstate->operation;
+  state->options = options;
   Relation relation = rinfo->ri_RelationDesc;
   state->tuple_desc = RelationGetDescr(relation);
   PGICEBERG_ASSIGN_OR_RETURN(
       state->table, pgiceberg::LoadIcebergTable(ToCatalogOptions(options),
                                                 RelationGetRelationName(relation)));
+  PGICEBERG_ASSIGN_OR_RETURN(state->read_table,
+                             ReadTableForCurrentTransaction(options, state->table));
 
-  PGICEBERG_ASSIGN_OR_RETURN(state->iceberg_schema,
-                             FromIcebergResult(state->table->schema(), "load schema"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      state->iceberg_schema,
+      FromIcebergResult(state->read_table->schema(), "load schema"));
   PGICEBERG_ASSIGN_OR_RETURN(state->arrow_schema, ArrowSchemaFor(*state->iceberg_schema));
 
   PGICEBERG_ASSIGN_OR_RETURN(
-      state->spec, FromIcebergResult(state->table->spec(), "load partition spec"));
+      state->spec, FromIcebergResult(state->read_table->spec(), "load partition spec"));
   if (!state->spec->fields().empty()) {
     return std::unexpected(
         MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -486,17 +821,18 @@ Status EndModify(ModifyState* state) {
         auto data_file,
         WriteRows(*state->table, state->iceberg_schema, state->spec, state->arrow_schema,
                   std::move(state->builders), state->rows));
-    PGICEBERG_ASSIGN_OR_RETURN(
-        auto append,
-        FromIcebergResult(state->table->NewFastAppend(), "create append update"));
-    if (data_file != nullptr) {
-      append->AppendFile(data_file);
+    auto pending_table_result = EnsurePendingTableChange(state->options, state->table);
+    if (!pending_table_result) {
+      CleanupDataFiles(state->table, NewDataFilePaths(data_file));
+      return std::unexpected(pending_table_result.error());
     }
-    PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(append->Commit(), "commit append"));
+    PGICEBERG_RETURN_NOT_OK(QueuePendingModifyChange(
+        **pending_table_result,
+        std::make_unique<PendingAppendChange>(std::move(data_file))));
     return Ok();
   }
 
-  IcebergScanCursor current(state->table);
+  IcebergScanCursor current(state->read_table);
   PGICEBERG_RETURN_NOT_OK(current.Init());
   PGICEBERG_ASSIGN_OR_RETURN(auto rewrite_writer,
                              RowBatchWriter::Make(*state->table, state->iceberg_schema,
@@ -535,16 +871,14 @@ Status EndModify(ModifyState* state) {
   }
 
   PGICEBERG_ASSIGN_OR_RETURN(auto replacement, rewrite_writer->Finish());
-  PGICEBERG_ASSIGN_OR_RETURN(
-      auto overwrite,
-      FromIcebergResult(state->table->NewOverwrite(), "create overwrite update"));
-  for (const auto& file : current.data_files()) {
-    overwrite->DeleteFile(file);
+  auto pending_table_result = EnsurePendingTableChange(state->options, state->table);
+  if (!pending_table_result) {
+    CleanupDataFiles(state->table, NewDataFilePaths(replacement));
+    return std::unexpected(pending_table_result.error());
   }
-  if (replacement != nullptr) {
-    overwrite->AddFile(replacement);
-  }
-  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(overwrite->Commit(), "commit overwrite"));
+  PGICEBERG_RETURN_NOT_OK(QueuePendingModifyChange(
+      **pending_table_result, std::make_unique<PendingOverwriteChange>(
+                                  current.data_files(), std::move(replacement))));
   return Ok();
 }
 
