@@ -85,6 +85,9 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options) {
   PGICEBERG_ASSIGN_OR_RETURN(
       state->table, pgiceberg::LoadIcebergTable(ToCatalogOptions(options),
                                                 RelationGetRelationName(relation)));
+  // A scan can follow DML in the same PostgreSQL transaction.  Use the pending
+  // transaction view when one exists so the FDW does not expose a weaker
+  // read-your-writes rule than PostgreSQL users expect.
   PGICEBERG_ASSIGN_OR_RETURN(state->table,
                              ReadTableForCurrentTransaction(options, state->table));
   state->cursor = std::make_unique<IcebergScanCursor>(state->table);
