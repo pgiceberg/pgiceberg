@@ -38,21 +38,34 @@ jobs:
       - name: Install CI dependencies
         run: .github/scripts/install-ci-dependencies.sh
 
-      - name: Cache pgenv PostgreSQL
-        uses: actions/cache@v4
+      - name: Restore pgenv PostgreSQL cache
+        id: cache-pgenv
+        uses: actions/cache/restore@v4
         with:
           path: ~/.pgenv
-          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-v1
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-${{ github.run_id }}-v1
+          restore-keys: |
+            pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-
 
-      - name: Cache CMake build dependencies
-        uses: actions/cache@v4
+      - name: Restore CMake build dependencies cache
+        id: cache-cmake-deps
+        uses: actions/cache/restore@v4
         with:
           path: |
             .ccache
             build/cpp-linter/_deps
-          key: cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-v1
+          key: cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
           restore-keys: |
+            cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-
             cmake-deps-cpp-linter-${{ runner.os }}-
+
+      - name: Write dependency cache summary
+        if: always()
+        env:
+          CACHE_CONTEXT: ${{ runner.os }} / PostgreSQL ${{ env.PG_VERSION }}
+          PGENV_CACHE_HIT: ${{ steps.cache-pgenv.outputs.cache-hit }}
+          CMAKE_DEPS_CACHE_HIT: ${{ steps.cache-cmake-deps.outputs.cache-hit }}
+        run: bash .github/scripts/write-cache-summary.sh
 
       - name: Install PostgreSQL with pgenv
         run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
@@ -77,6 +90,17 @@ jobs:
       - name: Build
         run: cmake --build build/cpp-linter
 
+      - name: Write ccache summary
+        if: always()
+        run: |
+          {
+            echo "### ccache statistics"
+            echo
+            echo '```'
+            ccache -s || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Run cpp-linter
         id: linter
         uses: cpp-linter/cpp-linter-action@v2.15.1
@@ -100,6 +124,22 @@ jobs:
             -isystem ${{ steps.pg-includes.outputs.includedir_server }}
             -I${{ github.workspace }}/build/cpp-linter/_deps/iceberg-build/src
             -I${{ github.workspace }}/build/cpp-linter/_deps/iceberg-src/src
+
+      - name: Save CMake build dependencies cache
+        if: always() && steps.cache-cmake-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ccache
+            build/cpp-linter/_deps
+          key: cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+
+      - name: Save pgenv PostgreSQL cache
+        if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-${{ github.run_id }}-v1
 
       - name: Fail on linter findings
         if: steps.linter.outputs.checks-failed != 0
