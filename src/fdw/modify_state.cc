@@ -128,8 +128,11 @@ struct PendingTableChange {
   std::shared_ptr<iceberg::Transaction> transaction;
   std::vector<PendingModifyChange> changes;
   bool committed = false;
+  bool commit_state_unknown = false;
 };
 
+// LoadIcebergTable returns a fresh Table object for each executor entry, so use the
+// foreign-table options as the stable backend-local identity for pending changes.
 std::string PendingTableKey(const Options& options) {
   std::string key;
   const std::string_view parts[] = {options.catalog_type, options.catalog_uri,
@@ -188,6 +191,7 @@ Result<PendingTableChange*> EnsurePendingTableChange(
       .transaction = std::move(transaction),
       .changes = {},
       .committed = false,
+      .commit_state_unknown = false,
   });
   return &changes.back();
 }
@@ -237,7 +241,7 @@ void CleanupDataFiles(const std::shared_ptr<iceberg::Table>& table,
 void ClearPendingTableChanges(bool cleanup_data_files) {
   if (cleanup_data_files) {
     for (const auto& table_change : PendingTableChanges()) {
-      if (!table_change.committed) {
+      if (!table_change.committed && !table_change.commit_state_unknown) {
         CleanupDataFiles(table_change.base_table, NewDataFilePaths(table_change));
       }
     }
@@ -264,9 +268,15 @@ Status CommitPendingModifyChanges() {
     if (table_change.committed || table_change.changes.empty()) {
       continue;
     }
-    PGICEBERG_ASSIGN_OR_RETURN(auto committed_table,
-                               FromIcebergResult(table_change.transaction->Commit(),
-                                                 "commit pending Iceberg transaction"));
+    auto commit_result = table_change.transaction->Commit();
+    if (!commit_result) {
+      if (commit_result.error().kind == iceberg::ErrorKind::kCommitStateUnknown) {
+        table_change.commit_state_unknown = true;
+      }
+      return std::unexpected(
+          MakePgError(commit_result.error(), "commit pending Iceberg transaction"));
+    }
+    auto committed_table = std::move(commit_result).value();
     table_change.base_table = std::move(committed_table);
     table_change.changes.clear();
     table_change.committed = true;
