@@ -3,14 +3,12 @@
 #include <memory>
 #include <string>
 
+#include <iceberg/type_fwd.h>
+
 #include "common/status.h"
 
 extern "C" {
 #include "postgres.h"
-}
-
-namespace iceberg {
-class Type;
 }
 
 namespace pgiceberg {

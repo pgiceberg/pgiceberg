@@ -2,6 +2,8 @@
 
 #include <memory>
 
+#include <iceberg/type_fwd.h>
+
 #include "common/status.h"
 #include "fdw/options.h"
 
@@ -9,10 +11,6 @@ struct EState;
 struct ModifyTableState;
 struct ResultRelInfo;
 struct TupleTableSlot;
-
-namespace iceberg {
-class Table;
-}  // namespace iceberg
 
 namespace pgiceberg::fdw {
 
