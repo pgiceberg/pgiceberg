@@ -3,17 +3,22 @@ CREATE EXTENSION pgiceberg;
 \set VERBOSITY terse
 DO $$
 BEGIN
-  PERFORM pgiceberg.create_table(
+  PERFORM pgiceberg.add_catalog(
+    'import_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_import_regress.db',
     '/tmp/pgiceberg_warehouse_import_regress',
+    'pgiceberg_regress'
+  );
+
+  PERFORM pgiceberg.create_table(
+    'import_regress',
     'default',
     'trip_fixture',
     ARRAY['vendorid', 'passenger_count', 'trip_distance', 'store_and_fwd_flag', 'fare_amount'],
     ARRAY['bigint'::regtype, 'bigint'::regtype, 'double precision'::regtype, 'text'::regtype, 'numeric'::regtype],
     ARRAY[true, false, false, false, false],
-    true,
-    'pgiceberg_regress'
+    true
   );
 END $$;
 CREATE SERVER iceberg

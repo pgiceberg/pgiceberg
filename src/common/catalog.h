@@ -18,8 +18,29 @@ struct CatalogOptions {
   std::string table;
 };
 
+struct TableFilesSummary {
+  int64_t snapshot_count = 0;
+  bool has_current_snapshot = false;
+  int64_t current_snapshot_id = 0;
+  int64_t manifest_count = 0;
+  int64_t data_manifest_count = 0;
+  int64_t delete_manifest_count = 0;
+  int64_t data_file_count = 0;
+  int64_t delete_file_count = 0;
+  int64_t position_delete_file_count = 0;
+  int64_t equality_delete_file_count = 0;
+  int64_t deletion_vector_file_count = 0;
+  int64_t data_file_size_in_bytes = 0;
+  int64_t delete_file_size_in_bytes = 0;
+};
+
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name);
+Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& options,
+                                                         const char* relation_name);
+Result<TableFilesSummary> LoadIcebergTableFilesSummary(const CatalogOptions& options,
+                                                       const char* relation_name);
+Result<CatalogOptions> LoadCatalogOptionsByAlias(const std::string& catalog_alias);
 Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
     const CatalogOptions& options, const char* relation_name,
     const std::string& metadata_file_location, bool drop_if_exists);

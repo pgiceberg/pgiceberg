@@ -22,17 +22,22 @@ OPTIONS (catalog_type 'rest');
 
 DO $$
 BEGIN
-  PERFORM pgiceberg.create_table(
+  PERFORM pgiceberg.add_catalog(
+    'format_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_format_regress.db',
     '/tmp/pgiceberg_warehouse_format_regress',
+    'pgiceberg_regress'
+  );
+
+  PERFORM pgiceberg.create_table(
+    'format_regress',
     'default',
     'format_v3',
     ARRAY['id'],
     ARRAY['bigint'::regtype],
     ARRAY[true],
     true,
-    'pgiceberg_regress',
     3
   );
 END $$;
@@ -44,16 +49,13 @@ ORDER BY metadata_file
 LIMIT 1;
 
 SELECT pgiceberg.create_table(
-  'sqlite',
-  '/tmp/pgiceberg_catalog_format_regress.db',
-  '/tmp/pgiceberg_warehouse_format_regress',
+  'format_regress',
   'default',
   'format_v1',
   ARRAY['id'],
   ARRAY['bigint'::regtype],
   ARRAY[true],
   true,
-  'pgiceberg_regress',
   1
 );
 

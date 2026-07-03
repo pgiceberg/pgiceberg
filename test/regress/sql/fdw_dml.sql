@@ -5,17 +5,22 @@ CREATE EXTENSION pgiceberg;
 
 DO $$
 BEGIN
-  PERFORM pgiceberg.create_table(
+  PERFORM pgiceberg.add_catalog(
+    'crud_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_crud_regress.db',
     '/tmp/pgiceberg_warehouse_crud_regress',
+    'pgiceberg_regress'
+  );
+
+  PERFORM pgiceberg.create_table(
+    'crud_regress',
     'default',
     'trip_fixture',
     ARRAY['vendorid', 'passenger_count', 'trip_distance', 'store_and_fwd_flag'],
     ARRAY['bigint'::regtype, 'bigint'::regtype, 'double precision'::regtype, 'text'::regtype],
     ARRAY[true, false, false, false],
-    true,
-    'pgiceberg_regress'
+    true
   );
 END $$;
 
