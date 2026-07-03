@@ -43,6 +43,9 @@ extern "C" {
 namespace {
 
 void EnsureIcebergRegistrations() {
+  // iceberg-cpp keeps file-format and Arrow integrations in process-global
+  // registries.  FDW callbacks can be entered many times in one backend, so
+  // register once and let later scans reuse the same registry state.
   static const bool registered = [] {
     iceberg::arrow::RegisterAll();
     iceberg::parquet::RegisterAll();
@@ -60,6 +63,9 @@ ForeignPath* CreateIcebergForeignScanPath(PlannerInfo* root, RelOptInfo* baserel
   const auto rows = baserel->rows;
   const auto total_cost = std::max(1.0, rows);
 
+  // PostgreSQL changed create_foreignscan_path() arguments across supported
+  // releases.  Keep the version split at the call site so the rest of the FDW
+  // path construction does not need PG-version-specific wrappers.
 #if PG_VERSION_NUM >= 180000
   return create_foreignscan_path(root, baserel, nullptr, rows, 0, 0, total_cost, NIL,
                                  nullptr, nullptr, NIL, NIL);
@@ -136,6 +142,9 @@ List* PgIcebergPlanForeignModify(PlannerInfo*, ModifyTable*, Index, int) { retur
 
 void PgIcebergAddForeignUpdateTargets(PlannerInfo* root, Index rtindex, RangeTblEntry*,
                                       Relation) {
+  // Iceberg rows do not have a PostgreSQL TID.  Carry the whole old row through
+  // the plan so UPDATE/DELETE can later match it against the Iceberg file being
+  // rewritten.
   auto* var =
       makeVar(static_cast<int>(rtindex), InvalidAttrNumber, RECORDOID, -1, InvalidOid, 0);
   add_row_identity_var(root, var, rtindex, "wholerow");

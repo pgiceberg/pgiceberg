@@ -50,8 +50,19 @@ extern "C" {
 namespace pgiceberg::fdw {
 namespace {
 
+// UPDATE/DELETE rewrite whole Iceberg data files today.  Keep the Arrow batch
+// bounded so a large rewrite does not also require materializing the whole
+// replacement file in backend memory.
 constexpr std::int64_t kDmlRewriteBatchRows = 8192;
 
+// Iceberg metadata updates need to be replayable.  A PostgreSQL subtransaction
+// can abort after we have already applied an update to the in-memory Iceberg
+// transaction, and iceberg-cpp does not provide a way to subtract one update
+// from that transaction.  Replaying the surviving changes into a new
+// transaction keeps PostgreSQL subtransaction semantics intact.
+//
+// Data files are tracked separately because they are written outside
+// PostgreSQL storage and therefore need best-effort cleanup on abort.
 class PendingIcebergChange {
  public:
   virtual ~PendingIcebergChange() = default;
@@ -117,11 +128,17 @@ class PendingOverwriteChange final : public PendingIcebergChange {
   std::shared_ptr<iceberg::DataFile> replacement_file_;
 };
 
+// A pending change is tagged with the current PostgreSQL subtransaction so an
+// abort can discard only the work done inside that savepoint.
 struct PendingModifyChange {
   SubTransactionId subtransaction_id = InvalidSubTransactionId;
   std::unique_ptr<PendingIcebergChange> change;
 };
 
+// Pending table state is backend-local transaction state.  The Iceberg
+// transaction is updated eagerly so later statements in the same PostgreSQL
+// transaction can read their own writes, but its catalog commit is delayed
+// until PostgreSQL reaches PRE_COMMIT.
 struct PendingTableChange {
   std::string key;
   std::shared_ptr<iceberg::Table> base_table;
@@ -131,8 +148,10 @@ struct PendingTableChange {
   bool commit_state_unknown = false;
 };
 
-// LoadIcebergTable returns a fresh Table object for each executor entry, so use the
-// foreign-table options as the stable backend-local identity for pending changes.
+// LoadIcebergTable returns a fresh Table object for each executor entry, so
+// pointer identity would split pending work from later statements.  Length
+// prefixes keep the option tuple unambiguous without depending on a character
+// that catalog names cannot contain.
 std::string PendingTableKey(const Options& options) {
   std::string key;
   const std::string_view parts[] = {options.catalog_type, options.catalog_uri,
@@ -146,6 +165,9 @@ std::string PendingTableKey(const Options& options) {
   return key;
 }
 
+// Keep the queue outside executor state.  EndModify is statement-scoped, while
+// the decision to publish or discard Iceberg metadata is PostgreSQL
+// transaction-scoped.
 std::vector<PendingTableChange>& PendingTableChanges() {
   static auto* changes = new std::vector<PendingTableChange>();
   return *changes;
@@ -163,6 +185,9 @@ PendingTableChange* FindPendingTableChange(const std::string& key) {
   return &*it;
 }
 
+// Rebuild after a subtransaction abort rather than trying to mutate the old
+// Iceberg transaction.  That makes abort handling depend only on the list of
+// surviving logical changes, not on iceberg-cpp internals.
 Status RebuildPendingTransaction(PendingTableChange& table_change) {
   PGICEBERG_ASSIGN_OR_RETURN(auto transaction,
                              FromIcebergResult(table_change.base_table->NewTransaction(),
@@ -198,6 +223,10 @@ Result<PendingTableChange*> EnsurePendingTableChange(
 
 Result<std::shared_ptr<iceberg::Table>> StaticTableForPendingChange(
     const PendingTableChange& table_change) {
+  // Scans in the same PostgreSQL transaction should see earlier FDW writes.
+  // A StaticTable over the pending transaction metadata gives the scan a
+  // snapshot with those uncommitted Iceberg metadata updates, while the catalog
+  // still remains unchanged until PRE_COMMIT.
   auto metadata = std::shared_ptr<iceberg::TableMetadata>(
       table_change.transaction,
       const_cast<iceberg::TableMetadata*>(&table_change.transaction->current()));
@@ -231,6 +260,9 @@ void CleanupDataFiles(const std::shared_ptr<iceberg::Table>& table,
   if (table == nullptr || paths.empty()) {
     return;
   }
+  // Parquet files are written before PostgreSQL knows whether the transaction
+  // will commit.  Deletion is necessarily best effort because the files live in
+  // the Iceberg table's file IO, outside PostgreSQL rollback machinery.
   auto status = FromIcebergStatus(table->io()->DeleteFiles(paths),
                                   "delete aborted Iceberg data files");
   if (!status) {
@@ -254,6 +286,9 @@ Status QueuePendingModifyChange(PendingTableChange& table_change,
   auto* pending_change = change.get();
   table_change.changes.push_back(PendingModifyChange{
       .subtransaction_id = GetCurrentSubTransactionId(), .change = std::move(change)});
+  // Apply now, but do not publish to the catalog yet.  Applying now gives later
+  // statements read-your-writes behavior; delaying the transaction commit lets
+  // PostgreSQL abort discard the Iceberg metadata update.
   auto status = pending_change->Apply(*table_change.transaction);
   if (!status) {
     CleanupDataFiles(table_change.base_table, pending_change->NewDataFilePaths());
@@ -264,6 +299,9 @@ Status QueuePendingModifyChange(PendingTableChange& table_change,
 }
 
 Status CommitPendingModifyChanges() {
+  // PRE_COMMIT is the latest point where an ERROR can still abort the
+  // PostgreSQL transaction.  Commit Iceberg here so a catalog failure does not
+  // leave PostgreSQL thinking the statement succeeded.
   for (auto& table_change : PendingTableChanges()) {
     if (table_change.committed || table_change.changes.empty()) {
       continue;
@@ -271,6 +309,9 @@ Status CommitPendingModifyChanges() {
     auto commit_result = table_change.transaction->Commit();
     if (!commit_result) {
       if (commit_result.error().kind == iceberg::ErrorKind::kCommitStateUnknown) {
+        // Once iceberg-cpp reports an unknown commit state, deleting newly
+        // written files could corrupt a commit that actually reached the
+        // catalog.  Leave the files in place and surface the commit error.
         table_change.commit_state_unknown = true;
       }
       return std::unexpected(
@@ -297,6 +338,9 @@ void XactCallback(XactEvent event, void*) {
       }
       case XACT_EVENT_PRE_PREPARE:
         if (!PendingTableChanges().empty()) {
+          // Prepared transactions would require durable pending Iceberg change
+          // state across backend exit and crash recovery.  This queue is only
+          // backend-local, so fail before PostgreSQL prepares.
           ereport(ERROR,
                   (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                    errmsg("pgiceberg DML does not support prepared transactions")));
@@ -323,6 +367,9 @@ void SubXactCallback(SubXactEvent event, SubTransactionId my_subid,
         for (auto& table_change : table_changes) {
           for (auto& change : table_change.changes) {
             if (change.subtransaction_id == my_subid) {
+              // PostgreSQL promotes a committed subtransaction's effects to
+              // its parent.  The Iceberg metadata update must follow that same
+              // ownership so a later parent abort can still find it.
               change.subtransaction_id = parent_subid;
             }
           }
@@ -343,6 +390,9 @@ void SubXactCallback(SubXactEvent event, SubTransactionId my_subid,
                           return change.subtransaction_id == my_subid;
                         });
           if (!table_change.changes.empty()) {
+            // The transaction already saw the aborted subtransaction's Iceberg
+            // update.  Replaying only the survivors is simpler and safer than
+            // depending on update-specific undo support.
             auto status = RebuildPendingTransaction(table_change);
             if (!status) {
               pgiceberg::ReportError(status.error());
@@ -361,6 +411,9 @@ void SubXactCallback(SubXactEvent event, SubTransactionId my_subid,
   }
 }
 
+// Rows copied out of executor slots must own their Datums.  PostgreSQL is free
+// to reuse slot storage between callbacks, while UPDATE/DELETE matching happens
+// later when the old Iceberg files are rewritten.
 struct Value {
   Datum datum = static_cast<Datum>(0);
   bool is_null = true;
@@ -668,6 +721,9 @@ Result<Row> RowFromRecordBatch(const arrow::RecordBatch& batch, std::int64_t row
 }  // namespace
 
 void RegisterTransactionCallbacks() {
+  // PostgreSQL calls extension _PG_init once per backend, which is the right
+  // lifetime for the pending queue.  Per-statement FDW callbacks cannot see
+  // the final transaction outcome.
   RegisterXactCallback(XactCallback, nullptr);
   RegisterSubXactCallback(SubXactCallback, nullptr);
 }
@@ -681,6 +737,9 @@ Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
   return StaticTableForPendingChange(*pending);
 }
 
+// ModifyState is statement-local executor state.  It owns transient row and
+// Arrow builder state, but never owns the final Iceberg commit decision; that
+// belongs to the backend-local pending queue above.
 struct ModifyState {
   MemoryContextCallback* cleanup_callback = nullptr;
   CmdType operation = CMD_UNKNOWN;
@@ -702,6 +761,9 @@ struct ModifyState {
 void DeleteModifyState(void* arg) { delete static_cast<ModifyState*>(arg); }
 
 void RegisterMemoryContextCleanup(ModifyState* state) {
+  // FDW EndForeignModify is not guaranteed after an ERROR.  Register with the
+  // current memory context so C++ state is released with PostgreSQL executor
+  // cleanup even on error paths.
   auto* callback = static_cast<MemoryContextCallback*>(
       MemoryContextAlloc(CurrentMemoryContext, sizeof(MemoryContextCallback)));
   callback->func = DeleteModifyState;
@@ -832,6 +894,9 @@ Status EndModify(ModifyState* state) {
     return Ok();
   }
 
+  // UPDATE and DELETE rewrite the files visible to this statement.  read_table
+  // may already include earlier pending writes from the same PostgreSQL
+  // transaction, so the rewrite preserves read-your-writes across statements.
   IcebergScanCursor current(state->read_table);
   PGICEBERG_RETURN_NOT_OK(current.Init());
   PGICEBERG_ASSIGN_OR_RETURN(auto rewrite_writer,
