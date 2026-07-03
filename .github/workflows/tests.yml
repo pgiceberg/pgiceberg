@@ -39,21 +39,35 @@ jobs:
       - name: Install CI dependencies
         run: .github/scripts/install-ci-dependencies.sh
 
-      - name: Cache pgenv PostgreSQL
-        uses: actions/cache@v4
+      - name: Restore pgenv PostgreSQL cache
+        id: cache-pgenv
+        uses: actions/cache/restore@v4
         with:
           path: ~/.pgenv
-          key: pgenv-${{ runner.os }}-${{ matrix.pg-version }}-v1
+          key: pgenv-${{ runner.os }}-${{ matrix.pg-version }}-${{ github.run_id }}-v1
+          restore-keys: |
+            pgenv-${{ runner.os }}-${{ matrix.pg-version }}-
 
-      - name: Cache CMake build dependencies
-        uses: actions/cache@v4
+      - name: Restore CMake build dependencies cache
+        id: cache-cmake-deps
+        uses: actions/cache/restore@v4
         with:
           path: |
             .ccache
             build/tests/_deps
-          key: cmake-deps-tests-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-v1
+          key: cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
           restore-keys: |
+            cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-
+            cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-
             cmake-deps-tests-${{ runner.os }}-
+
+      - name: Write dependency cache summary
+        if: always()
+        env:
+          CACHE_CONTEXT: ${{ matrix.os }} / PostgreSQL ${{ matrix.pg-version }}
+          PGENV_CACHE_HIT: ${{ steps.cache-pgenv.outputs.cache-hit }}
+          CMAKE_DEPS_CACHE_HIT: ${{ steps.cache-cmake-deps.outputs.cache-hit }}
+        run: bash .github/scripts/write-cache-summary.sh
 
       - name: Install PostgreSQL with pgenv
         run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
@@ -69,6 +83,17 @@ jobs:
 
       - name: Build
         run: cmake --build build/tests
+
+      - name: Write ccache summary
+        if: always()
+        run: |
+          {
+            echo "### ccache statistics"
+            echo
+            echo '```'
+            ccache -s || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Install extension
         run: cmake --install build/tests --component pgiceberg
@@ -109,3 +134,19 @@ jobs:
             build/tests/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Save CMake build dependencies cache
+        if: always() && steps.cache-cmake-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ccache
+            build/tests/_deps
+          key: cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+
+      - name: Save pgenv PostgreSQL cache
+        if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ matrix.pg-version }}-${{ github.run_id }}-v1
