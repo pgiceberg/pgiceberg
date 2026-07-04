@@ -472,7 +472,19 @@ Status AppendValue(arrow::ArrayBuilder& builder, const Value& value,
   return pgiceberg::AppendDatum(builder, value.datum, value.is_null, type);
 }
 
-Row CopyRowFromSlot(TupleTableSlot* slot, TupleDesc desc) {
+class ScopedMemoryContext {
+ public:
+  explicit ScopedMemoryContext(MemoryContext context)
+      : previous_(MemoryContextSwitchTo(context)) {}
+
+  ~ScopedMemoryContext() { MemoryContextSwitchTo(previous_); }
+
+ private:
+  MemoryContext previous_;
+};
+
+Row CopyRowFromSlot(TupleTableSlot* slot, TupleDesc desc, MemoryContext memory_context) {
+  ScopedMemoryContext context(memory_context);
   Row row(desc->natts);
   slot_getallattrs(slot);
   for (int i = 0; i < desc->natts; i++) {
@@ -486,7 +498,9 @@ Row CopyRowFromSlot(TupleTableSlot* slot, TupleDesc desc) {
   return row;
 }
 
-Row CopyRowFromHeapTupleDatum(Datum tuple_datum, TupleDesc desc) {
+Row CopyRowFromHeapTupleDatum(Datum tuple_datum, TupleDesc desc,
+                              MemoryContext memory_context) {
+  ScopedMemoryContext context(memory_context);
   HeapTupleHeader header = DatumGetHeapTupleHeader(tuple_datum);
   HeapTupleData tuple;
   tuple.t_len = HeapTupleHeaderGetDatumLength(header);
@@ -754,6 +768,7 @@ Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
 // belongs to the backend-local pending queue above.
 struct ModifyState {
   MemoryContextCallback* cleanup_callback = nullptr;
+  MemoryContext row_context = nullptr;
   CmdType operation = CMD_UNKNOWN;
   Options options;
   std::shared_ptr<iceberg::Table> table;
@@ -772,16 +787,16 @@ struct ModifyState {
 
 void DeleteModifyState(void* arg) { delete static_cast<ModifyState*>(arg); }
 
-void RegisterMemoryContextCleanup(ModifyState* state) {
+void RegisterMemoryContextCleanup(ModifyState* state, MemoryContext context) {
   // FDW EndForeignModify is not guaranteed after an ERROR.  Register with the
-  // current memory context so C++ state is released with PostgreSQL executor
-  // cleanup even on error paths.
+  // row context so C++ state is released when PostgreSQL tears down the
+  // statement-owned row copies on error paths.
   auto* callback = static_cast<MemoryContextCallback*>(
-      MemoryContextAlloc(CurrentMemoryContext, sizeof(MemoryContextCallback)));
+      MemoryContextAlloc(context, sizeof(MemoryContextCallback)));
   callback->func = DeleteModifyState;
   callback->arg = state;
   state->cleanup_callback = callback;
-  MemoryContextRegisterResetCallback(CurrentMemoryContext, callback);
+  MemoryContextRegisterResetCallback(context, callback);
 }
 
 void DetachMemoryContextCleanup(ModifyState* state) {
@@ -789,6 +804,18 @@ void DetachMemoryContextCleanup(ModifyState* state) {
     state->cleanup_callback->arg = nullptr;
     state->cleanup_callback = nullptr;
   }
+}
+
+void DeleteModifyStateAndRowContext(ModifyState* state) {
+  if (state == nullptr) {
+    return;
+  }
+  if (state->row_context != nullptr) {
+    MemoryContext row_context = state->row_context;
+    state->row_context = nullptr;
+    MemoryContextDelete(row_context);
+  }
+  delete state;
 }
 
 Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo,
@@ -845,14 +872,16 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
     }
   }
 
-  RegisterMemoryContextCleanup(state.get());
+  state->row_context = AllocSetContextCreate(
+      mtstate->ps.state->es_query_cxt, "pgiceberg DML rows", ALLOCSET_DEFAULT_SIZES);
+  RegisterMemoryContextCleanup(state.get(), state->row_context);
   return state.release();
 }
 
 Result<TupleTableSlot*> ExecInsert(ModifyState* state, TupleTableSlot* slot) {
-  PGICEBERG_RETURN_NOT_OK(AppendRow(state->builders, *state->arrow_schema,
-                                    state->attr_numbers,
-                                    CopyRowFromSlot(slot, state->tuple_desc)));
+  PGICEBERG_RETURN_NOT_OK(
+      AppendRow(state->builders, *state->arrow_schema, state->attr_numbers,
+                CopyRowFromSlot(slot, state->tuple_desc, CurrentMemoryContext)));
   state->rows++;
   return slot;
 }
@@ -864,8 +893,9 @@ Result<TupleTableSlot*> ExecUpdate(ModifyState* state, TupleTableSlot* slot,
   if (is_null) {
     return std::unexpected(MakeError(ERRCODE_FDW_ERROR, "wholerow is NULL"));
   }
-  state->old_rows.push_back(CopyRowFromHeapTupleDatum(wholerow, state->tuple_desc));
-  state->new_rows.push_back(CopyRowFromSlot(slot, state->tuple_desc));
+  state->old_rows.push_back(
+      CopyRowFromHeapTupleDatum(wholerow, state->tuple_desc, state->row_context));
+  state->new_rows.push_back(CopyRowFromSlot(slot, state->tuple_desc, state->row_context));
   state->rows++;
   return slot;
 }
@@ -877,7 +907,8 @@ Result<TupleTableSlot*> ExecDelete(ModifyState* state, TupleTableSlot* slot,
   if (is_null) {
     return std::unexpected(MakeError(ERRCODE_FDW_ERROR, "wholerow is NULL"));
   }
-  Row old_row = CopyRowFromHeapTupleDatum(wholerow, state->tuple_desc);
+  Row old_row =
+      CopyRowFromHeapTupleDatum(wholerow, state->tuple_desc, state->row_context);
   state->old_rows.push_back(old_row);
   state->rows++;
   return StoreRowInSlot(old_row, slot, state->tuple_desc);
@@ -885,7 +916,8 @@ Result<TupleTableSlot*> ExecDelete(ModifyState* state, TupleTableSlot* slot,
 
 Status EndModify(ModifyState* state) {
   DetachMemoryContextCleanup(state);
-  std::unique_ptr<ModifyState> guard(state);
+  std::unique_ptr<ModifyState, decltype(&DeleteModifyStateAndRowContext)> guard(
+      state, DeleteModifyStateAndRowContext);
   if (state == nullptr || state->rows == 0) {
     return Ok();
   }
