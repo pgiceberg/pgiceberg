@@ -20,6 +20,17 @@ CREATE SERVER rest_catalog
 FOREIGN DATA WRAPPER pgiceberg
 OPTIONS (catalog_type 'rest');
 
+SELECT pgiceberg.add_catalog(
+  'future_catalog_regress',
+  'rest',
+  'http://127.0.0.1:8181',
+  '/tmp/pgiceberg_warehouse_future_catalog_regress'
+);
+
+SELECT catalog_type
+FROM pgiceberg.catalogs
+WHERE catalog_alias = 'future_catalog_regress';
+
 DO $$
 BEGIN
   PERFORM pgiceberg.add_catalog(

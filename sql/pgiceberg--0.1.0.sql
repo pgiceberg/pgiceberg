@@ -4,7 +4,7 @@ CREATE SCHEMA pgiceberg;
 
 CREATE TABLE pgiceberg.catalogs (
   catalog_alias text PRIMARY KEY,
-  catalog_type text NOT NULL CHECK (catalog_type IN ('sql', 'sqlite')),
+  catalog_type text NOT NULL,
   catalog_uri text NOT NULL,
   warehouse text NOT NULL,
   catalog_name text NOT NULL DEFAULT 'pgiceberg'
@@ -15,7 +15,7 @@ COMMENT ON TABLE pgiceberg.catalogs IS
 COMMENT ON COLUMN pgiceberg.catalogs.catalog_alias IS
   'User-facing alias passed to pgiceberg helper functions.';
 COMMENT ON COLUMN pgiceberg.catalogs.catalog_type IS
-  'Iceberg catalog backend type, currently sql or sqlite.';
+  'Iceberg catalog backend type, such as sql, sqlite, rest, or hms.';
 COMMENT ON COLUMN pgiceberg.catalogs.catalog_uri IS
   'Connection URI for the Iceberg SQL catalog backend.';
 COMMENT ON COLUMN pgiceberg.catalogs.warehouse IS
