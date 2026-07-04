@@ -2,6 +2,7 @@
 
 CREATE SCHEMA pgiceberg;
 
+-- Catalog registry.
 CREATE TABLE pgiceberg.catalogs (
   name text PRIMARY KEY,
   catalog_type text NOT NULL,
@@ -22,16 +23,6 @@ COMMENT ON COLUMN pgiceberg.catalogs.warehouse IS
   'Warehouse location used to create and load Iceberg table files.';
 COMMENT ON COLUMN pgiceberg.catalogs.iceberg_catalog_name IS
   'Logical Iceberg catalog name used to scope tables in the catalog backend.';
-
-CREATE FUNCTION pgiceberg.fdw_handler()
-RETURNS fdw_handler
-AS 'MODULE_PATHNAME', 'pgiceberg_fdw_handler'
-LANGUAGE C STRICT;
-
-CREATE FUNCTION pgiceberg.fdw_validator(text[], oid)
-RETURNS void
-AS 'MODULE_PATHNAME', 'pgiceberg_fdw_validator'
-LANGUAGE C STRICT;
 
 CREATE FUNCTION pgiceberg.add_catalog(
   name text,
@@ -72,6 +63,22 @@ $$;
 COMMENT ON FUNCTION pgiceberg.drop_catalog(text) IS
   'Remove a local pgiceberg catalog name.';
 
+-- Foreign data wrapper entrypoints.
+CREATE FUNCTION pgiceberg.fdw_handler()
+RETURNS fdw_handler
+AS 'MODULE_PATHNAME', 'pgiceberg_fdw_handler'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pgiceberg.fdw_validator(text[], oid)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_fdw_validator'
+LANGUAGE C STRICT;
+
+CREATE FOREIGN DATA WRAPPER pgiceberg
+HANDLER pgiceberg.fdw_handler
+VALIDATOR pgiceberg.fdw_validator;
+
+-- Table lifecycle helpers.
 CREATE FUNCTION pgiceberg.create_table(
   name text,
   namespace text,
@@ -107,6 +114,7 @@ SET search_path = pg_catalog, pgiceberg
 COMMENT ON FUNCTION pgiceberg.register_table(text, text, text, text, boolean) IS
   'Register an existing Iceberg metadata file as a table through a registered pgiceberg catalog name.';
 
+-- Metadata inspection helpers.
 CREATE FUNCTION pgiceberg.metadata_file_json(
   metadata_file_location text
 )
@@ -175,7 +183,3 @@ $$;
 
 COMMENT ON FUNCTION pgiceberg.table_format_version(text, text, text) IS
   'Return the Iceberg table format version from the current table metadata.';
-
-CREATE FOREIGN DATA WRAPPER pgiceberg
-HANDLER pgiceberg.fdw_handler
-VALIDATOR pgiceberg.fdw_validator;
