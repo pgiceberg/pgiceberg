@@ -8,8 +8,9 @@ add_library(pgiceberg MODULE
             fdw/modify_state.cc
             fdw/options.cc
             fdw/scan_state.cc
-            udf/create_table.cc
-            udf/register_table.cc)
+            functions/create_table.cc
+            functions/metadata.cc
+            functions/register_table.cc)
 target_include_directories(pgiceberg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(pgiceberg PRIVATE PostgreSQL::Server PostgreSQL::Client)
 if(APPLE)

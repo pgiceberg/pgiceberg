@@ -122,10 +122,15 @@ SELECT fdwname
 FROM pg_foreign_data_wrapper
 WHERE fdwname = 'pgiceberg';
 
-SELECT pgiceberg.create_table(
+SELECT pgiceberg.add_catalog(
+  'dev',
   'sqlite',
   '/tmp/pgiceberg_catalog_dev.db',
-  '/tmp/pgiceberg_warehouse',
+  '/tmp/pgiceberg_warehouse'
+);
+
+SELECT pgiceberg.create_table(
+  'dev',
   'default',
   'trip_fixture',
   ARRAY['vendorid', 'passenger_count', 'trip_distance', 'store_and_fwd_flag'],
@@ -136,8 +141,7 @@ SELECT pgiceberg.create_table(
     'text'::regtype
   ],
   ARRAY[true, false, false, false],
-  true,
-  'pgiceberg_dev'
+  true
 );
 
 CREATE SERVER iceberg
@@ -146,7 +150,7 @@ OPTIONS (
   catalog_type 'sqlite',
   catalog_uri '/tmp/pgiceberg_catalog_dev.db',
   warehouse '/tmp/pgiceberg_warehouse',
-  catalog_name 'pgiceberg_dev'
+  catalog_name 'dev'
 );
 
 CREATE FOREIGN TABLE pgiceberg_trip_fixture (
@@ -207,8 +211,7 @@ To register an existing Iceberg metadata file into a SQL catalog first, use
 
 ```sql
 SELECT pgiceberg.register_table(
-  'sqlite',
-  '/tmp/pgiceberg_catalog_dev.db',
+  'dev',
   'default',
   'trip_fixture',
   '/tmp/external_warehouse/default/trip_fixture/metadata/00001.metadata.json'
@@ -218,6 +221,76 @@ SELECT pgiceberg.register_table(
 The registered metadata location must be readable by pgiceberg's local file IO.
 The function creates the namespace when needed and rejects an existing catalog
 table unless `drop_if_exists` is set to `true`.
+
+Use the metadata utility functions to inspect the Iceberg metadata file backing
+a catalog table. Register catalog connection details once:
+
+```sql
+SELECT pgiceberg.add_catalog(
+  'dev',
+  'sqlite',
+  '/tmp/pgiceberg_catalog_dev.db',
+  '/tmp/pgiceberg_warehouse'
+);
+```
+
+The first argument is the local `name` used by pgiceberg helper functions.
+pgiceberg uses the same value as the logical Iceberg catalog name unless an
+explicit `iceberg_catalog_name` fifth argument is provided.
+
+Then use the short helper signatures:
+
+```sql
+SELECT pgiceberg.table_metadata_file_location(
+  'dev',
+  'default',
+  'trip_fixture'
+);
+
+SELECT pgiceberg.table_format_version(
+  'dev',
+  'default',
+  'trip_fixture'
+);
+
+SELECT pgiceberg.table_metadata_json(
+  'dev',
+  'default',
+  'trip_fixture'
+) ->> 'table-uuid';
+
+SELECT pgiceberg.table_snapshot_files_summary(
+  'dev',
+  'default',
+  'trip_fixture'
+);
+```
+
+To inspect a metadata file directly, call `metadata_file_json` with the metadata
+file path:
+
+```sql
+SELECT pgiceberg.metadata_file_json(
+  '/tmp/pgiceberg_warehouse/default/trip_fixture/metadata/00001.metadata.json'
+);
+```
+
+psql backslash commands are client-side commands and cannot be extended by a
+PostgreSQL extension. They are still useful around these helpers:
+
+```psql
+\df pgiceberg.*metadata*
+\x on
+SELECT pgiceberg.table_metadata_json(
+  'dev',
+  'default',
+  'trip_fixture'
+);
+\d+ pgiceberg_trip_fixture
+```
+
+`\d+` shows the PostgreSQL foreign table, server, and table options. Use the
+metadata utility functions for the Iceberg metadata file contents.
 
 REST catalog support is optional. This requires
 `-DPGICEBERG_ENABLE_REST_CATALOG=ON`; default builds fail with a

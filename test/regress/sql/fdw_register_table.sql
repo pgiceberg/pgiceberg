@@ -5,23 +5,33 @@ CREATE EXTENSION pgiceberg;
 
 DO $$
 BEGIN
-  PERFORM pgiceberg.create_table(
+  PERFORM pgiceberg.add_catalog(
+    'register_source_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_register_source_regress.db',
-    '/tmp/pgiceberg_warehouse_register_source_regress',
+    '/tmp/pgiceberg_warehouse_register_source_regress'
+  );
+
+  PERFORM pgiceberg.add_catalog(
+    'register_target_regress',
+    'sqlite',
+    '/tmp/pgiceberg_catalog_register_target_regress.db',
+    '/tmp/pgiceberg_warehouse_register_target_regress'
+  );
+
+  PERFORM pgiceberg.create_table(
+    'register_source_regress',
     'default',
     'trip_fixture',
     ARRAY['vendorid', 'passenger_count', 'trip_distance', 'store_and_fwd_flag'],
     ARRAY['bigint'::regtype, 'bigint'::regtype, 'double precision'::regtype, 'text'::regtype],
     ARRAY[true, false, false, false],
-    true,
-    'pgiceberg_regress'
+    true
   );
 END $$;
 
 SELECT pgiceberg.register_table(
-  'sqlite',
-  '/tmp/pgiceberg_catalog_register_target_regress.db',
+  'register_target_regress',
   'default',
   'registered_trip_fixture',
   (
@@ -31,8 +41,7 @@ SELECT pgiceberg.register_table(
     ORDER BY metadata_file DESC
     LIMIT 1
   ),
-  true,
-  'pgiceberg_regress'
+  true
 );
 
 CREATE SERVER registered_iceberg
@@ -41,7 +50,7 @@ OPTIONS (
   catalog_type 'sqlite',
   catalog_uri '/tmp/pgiceberg_catalog_register_target_regress.db',
   warehouse '/tmp/pgiceberg_warehouse_register_target_regress',
-  catalog_name 'pgiceberg_regress'
+  catalog_name 'register_target_regress'
 );
 
 CREATE SCHEMA registered;

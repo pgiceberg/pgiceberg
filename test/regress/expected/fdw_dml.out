@@ -3,17 +3,21 @@ CREATE EXTENSION pgiceberg;
 \set VERBOSITY terse
 DO $$
 BEGIN
-  PERFORM pgiceberg.create_table(
+  PERFORM pgiceberg.add_catalog(
+    'crud_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_crud_regress.db',
-    '/tmp/pgiceberg_warehouse_crud_regress',
+    '/tmp/pgiceberg_warehouse_crud_regress'
+  );
+
+  PERFORM pgiceberg.create_table(
+    'crud_regress',
     'default',
     'trip_fixture',
     ARRAY['vendorid', 'passenger_count', 'trip_distance', 'store_and_fwd_flag'],
     ARRAY['bigint'::regtype, 'bigint'::regtype, 'double precision'::regtype, 'text'::regtype],
     ARRAY[true, false, false, false],
-    true,
-    'pgiceberg_regress'
+    true
   );
 END $$;
 CREATE SERVER iceberg
@@ -22,7 +26,7 @@ OPTIONS (
   catalog_type 'sqlite',
   catalog_uri '/tmp/pgiceberg_catalog_crud_regress.db',
   warehouse '/tmp/pgiceberg_warehouse_crud_regress',
-  catalog_name 'pgiceberg_regress'
+  catalog_name 'crud_regress'
 );
 CREATE FOREIGN TABLE pgiceberg_trip_fixture (
   vendorid bigint,

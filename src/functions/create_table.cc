@@ -27,6 +27,7 @@ extern "C" {
 }
 
 #include "common/pg_error.h"
+#include "common/catalog.h"
 #include "common/status.h"
 #include "common/type_mapping.h"
 
@@ -209,27 +210,25 @@ pgiceberg::Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateCatalog(
 
 extern "C" {
 PG_FUNCTION_INFO_V1(pgiceberg_create_table);
-}
 
-extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
+Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
-    const std::string catalog_type = TextArg(fcinfo, 0);
-    const std::string catalog_uri = TextArg(fcinfo, 1);
-    const std::string warehouse = TextArg(fcinfo, 2);
-    const std::string name_space = TextArg(fcinfo, 3);
-    const std::string table_name = TextArg(fcinfo, 4);
+    PGICEBERG_ASSIGN_OR_RETURN(auto options,
+                               pgiceberg::LoadCatalogOptions(TextArg(fcinfo, 0)));
+    const std::string name_space = TextArg(fcinfo, 1);
+    const std::string table_name = TextArg(fcinfo, 2);
     PGICEBERG_ASSIGN_OR_RETURN(auto column_names,
-                               TextArrayArg(fcinfo, 5, "column_names"));
-    PGICEBERG_ASSIGN_OR_RETURN(auto column_types, OidArrayArg(fcinfo, 6, "column_types"));
+                               TextArrayArg(fcinfo, 3, "column_names"));
+    PGICEBERG_ASSIGN_OR_RETURN(auto column_types, OidArrayArg(fcinfo, 4, "column_types"));
     PGICEBERG_ASSIGN_OR_RETURN(auto column_required,
-                               BoolArrayArg(fcinfo, 7, "column_required"));
-    const bool drop_if_exists = PG_GETARG_BOOL(8);
-    const std::string catalog_name = TextArg(fcinfo, 9);
-    const int32_t format_version = PG_GETARG_INT32(10);
+                               BoolArrayArg(fcinfo, 5, "column_required"));
+    const bool drop_if_exists = PG_GETARG_BOOL(6);
+    const int32_t format_version = PG_GETARG_INT32(7);
     PGICEBERG_RETURN_NOT_OK(ValidateFormatVersion(format_version));
 
-    PGICEBERG_ASSIGN_OR_RETURN(
-        auto catalog, CreateCatalog(catalog_type, catalog_uri, warehouse, catalog_name));
+    PGICEBERG_ASSIGN_OR_RETURN(auto catalog,
+                               CreateCatalog(options.catalog_type, options.catalog_uri,
+                                             options.warehouse, options.catalog_name));
     iceberg::Namespace ns{.levels = SplitNamespace(name_space)};
     PGICEBERG_ASSIGN_OR_RETURN(
         auto ns_exists,
@@ -254,7 +253,7 @@ extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
     }
 
     const auto table_location =
-        std::filesystem::path(warehouse) / name_space / table_name;
+        std::filesystem::path(options.warehouse) / name_space / table_name;
     std::filesystem::create_directories(table_location / "metadata");
     PGICEBERG_ASSIGN_OR_RETURN(auto schema,
                                BuildSchema(column_names, column_types, column_required));
@@ -283,3 +282,5 @@ extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
     return static_cast<Datum>(0);
   });
 }
+
+}  // extern "C"

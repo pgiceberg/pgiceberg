@@ -5,17 +5,21 @@ CREATE EXTENSION pgiceberg;
 
 DO $$
 BEGIN
-  PERFORM pgiceberg.create_table(
+  PERFORM pgiceberg.add_catalog(
+    'import_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_import_regress.db',
-    '/tmp/pgiceberg_warehouse_import_regress',
+    '/tmp/pgiceberg_warehouse_import_regress'
+  );
+
+  PERFORM pgiceberg.create_table(
+    'import_regress',
     'default',
     'trip_fixture',
     ARRAY['vendorid', 'passenger_count', 'trip_distance', 'store_and_fwd_flag', 'fare_amount'],
     ARRAY['bigint'::regtype, 'bigint'::regtype, 'double precision'::regtype, 'text'::regtype, 'numeric'::regtype],
     ARRAY[true, false, false, false, false],
-    true,
-    'pgiceberg_regress'
+    true
   );
 END $$;
 
@@ -25,7 +29,7 @@ OPTIONS (
   catalog_type 'sqlite',
   catalog_uri '/tmp/pgiceberg_catalog_import_regress.db',
   warehouse '/tmp/pgiceberg_warehouse_import_regress',
-  catalog_name 'pgiceberg_regress'
+  catalog_name 'import_regress'
 );
 
 CREATE SCHEMA imported;

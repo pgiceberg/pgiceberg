@@ -20,19 +20,34 @@ CREATE SERVER rest_catalog
 FOREIGN DATA WRAPPER pgiceberg
 OPTIONS (catalog_type 'rest');
 
+SELECT pgiceberg.add_catalog(
+  'future_catalog_regress',
+  'rest',
+  'http://127.0.0.1:8181',
+  '/tmp/pgiceberg_warehouse_future_catalog_regress'
+);
+
+SELECT catalog_type
+FROM pgiceberg.catalogs
+WHERE name = 'future_catalog_regress';
+
 DO $$
 BEGIN
-  PERFORM pgiceberg.create_table(
+  PERFORM pgiceberg.add_catalog(
+    'format_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_format_regress.db',
-    '/tmp/pgiceberg_warehouse_format_regress',
+    '/tmp/pgiceberg_warehouse_format_regress'
+  );
+
+  PERFORM pgiceberg.create_table(
+    'format_regress',
     'default',
     'format_v3',
     ARRAY['id'],
     ARRAY['bigint'::regtype],
     ARRAY[true],
     true,
-    'pgiceberg_regress',
     3
   );
 END $$;
@@ -44,16 +59,13 @@ ORDER BY metadata_file
 LIMIT 1;
 
 SELECT pgiceberg.create_table(
-  'sqlite',
-  '/tmp/pgiceberg_catalog_format_regress.db',
-  '/tmp/pgiceberg_warehouse_format_regress',
+  'format_regress',
   'default',
   'format_v1',
   ARRAY['id'],
   ARRAY['bigint'::regtype],
   ARRAY[true],
   true,
-  'pgiceberg_regress',
   1
 );
 
