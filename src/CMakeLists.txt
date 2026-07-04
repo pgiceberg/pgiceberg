@@ -25,6 +25,8 @@ add_library(pgiceberg MODULE
             functions/register_table.cc)
 target_include_directories(pgiceberg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(pgiceberg PRIVATE PostgreSQL::Server PostgreSQL::Client)
+include(CheckLinkerFlag)
+check_linker_flag(CXX "LINKER:--exclude-libs,ALL" PGICEBERG_HAS_EXCLUDE_LIBS)
 if(APPLE)
   if(NOT POSTGRESQL_SERVER_EXECUTABLE)
     message(FATAL_ERROR "postgres executable is required to link pgiceberg on macOS")
@@ -32,7 +34,14 @@ if(APPLE)
   target_link_options(pgiceberg PRIVATE
                       "LINKER:-bundle_loader,${POSTGRESQL_SERVER_EXECUTABLE}")
 endif()
-set_target_properties(pgiceberg PROPERTIES PREFIX "" OUTPUT_NAME pgiceberg)
+if(PGICEBERG_HAS_EXCLUDE_LIBS)
+  target_link_options(pgiceberg PRIVATE "LINKER:--exclude-libs,ALL")
+endif()
+set_target_properties(pgiceberg
+                      PROPERTIES PREFIX ""
+                                 OUTPUT_NAME pgiceberg
+                                 CXX_VISIBILITY_PRESET hidden
+                                 VISIBILITY_INLINES_HIDDEN ON)
 set_target_properties(pgiceberg PROPERTIES BUILD_RPATH "${POSTGRESQL_LIBRARY_DIR}"
                                            INSTALL_RPATH "${POSTGRESQL_LIBRARY_DIR}")
 
