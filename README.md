@@ -126,8 +126,7 @@ SELECT pgiceberg.add_catalog(
   'dev',
   'sqlite',
   '/tmp/pgiceberg_catalog_dev.db',
-  '/tmp/pgiceberg_warehouse',
-  'pgiceberg_dev'
+  '/tmp/pgiceberg_warehouse'
 );
 
 SELECT pgiceberg.create_table(
@@ -151,7 +150,7 @@ OPTIONS (
   catalog_type 'sqlite',
   catalog_uri '/tmp/pgiceberg_catalog_dev.db',
   warehouse '/tmp/pgiceberg_warehouse',
-  catalog_name 'pgiceberg_dev'
+  catalog_name 'dev'
 );
 
 CREATE FOREIGN TABLE pgiceberg_trip_fixture (
@@ -231,8 +230,7 @@ SELECT pgiceberg.add_catalog(
   'dev',
   'sqlite',
   '/tmp/pgiceberg_catalog_dev.db',
-  '/tmp/pgiceberg_warehouse',
-  'pgiceberg_dev'
+  '/tmp/pgiceberg_warehouse'
 );
 ```
 

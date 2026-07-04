@@ -9,8 +9,7 @@ BEGIN
     'crud_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_crud_regress.db',
-    '/tmp/pgiceberg_warehouse_crud_regress',
-    'pgiceberg_regress'
+    '/tmp/pgiceberg_warehouse_crud_regress'
   );
 
   PERFORM pgiceberg.create_table(
@@ -30,7 +29,7 @@ OPTIONS (
   catalog_type 'sqlite',
   catalog_uri '/tmp/pgiceberg_catalog_crud_regress.db',
   warehouse '/tmp/pgiceberg_warehouse_crud_regress',
-  catalog_name 'pgiceberg_regress'
+  catalog_name 'crud_regress'
 );
 
 CREATE FOREIGN TABLE pgiceberg_trip_fixture (

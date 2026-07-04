@@ -29,7 +29,7 @@ SELECT pgiceberg.add_catalog(
 
 SELECT catalog_type
 FROM pgiceberg.catalogs
-WHERE catalog_alias = 'future_catalog_regress';
+WHERE name = 'future_catalog_regress';
 
 DO $$
 BEGIN
@@ -37,8 +37,7 @@ BEGIN
     'format_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_format_regress.db',
-    '/tmp/pgiceberg_warehouse_format_regress',
-    'pgiceberg_regress'
+    '/tmp/pgiceberg_warehouse_format_regress'
   );
 
   PERFORM pgiceberg.create_table(

@@ -9,16 +9,14 @@ BEGIN
     'register_source_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_register_source_regress.db',
-    '/tmp/pgiceberg_warehouse_register_source_regress',
-    'pgiceberg_regress'
+    '/tmp/pgiceberg_warehouse_register_source_regress'
   );
 
   PERFORM pgiceberg.add_catalog(
     'register_target_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_register_target_regress.db',
-    '/tmp/pgiceberg_warehouse_register_target_regress',
-    'pgiceberg_regress'
+    '/tmp/pgiceberg_warehouse_register_target_regress'
   );
 
   PERFORM pgiceberg.create_table(
@@ -52,7 +50,7 @@ OPTIONS (
   catalog_type 'sqlite',
   catalog_uri '/tmp/pgiceberg_catalog_register_target_regress.db',
   warehouse '/tmp/pgiceberg_warehouse_register_target_regress',
-  catalog_name 'pgiceberg_regress'
+  catalog_name 'register_target_regress'
 );
 
 CREATE SCHEMA registered;

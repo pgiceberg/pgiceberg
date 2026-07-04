@@ -20,7 +20,7 @@ std::string TextArg(FunctionCallInfo fcinfo, int argno) {
 
 pgiceberg::Result<pgiceberg::CatalogOptions> CatalogOptionsArg(FunctionCallInfo fcinfo) {
   PGICEBERG_ASSIGN_OR_RETURN(auto options,
-                             pgiceberg::LoadCatalogOptionsByAlias(TextArg(fcinfo, 0)));
+                             pgiceberg::LoadCatalogOptions(TextArg(fcinfo, 0)));
   options.name_space = TextArg(fcinfo, 1);
   options.table = TextArg(fcinfo, 2);
   return options;

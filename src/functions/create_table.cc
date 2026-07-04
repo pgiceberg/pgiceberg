@@ -215,7 +215,7 @@ PG_FUNCTION_INFO_V1(pgiceberg_create_table);
 extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
     PGICEBERG_ASSIGN_OR_RETURN(auto options,
-                               pgiceberg::LoadCatalogOptionsByAlias(TextArg(fcinfo, 0)));
+                               pgiceberg::LoadCatalogOptions(TextArg(fcinfo, 0)));
     const std::string name_space = TextArg(fcinfo, 1);
     const std::string table_name = TextArg(fcinfo, 2);
     PGICEBERG_ASSIGN_OR_RETURN(auto column_names,

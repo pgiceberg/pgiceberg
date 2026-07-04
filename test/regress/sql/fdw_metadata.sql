@@ -9,8 +9,7 @@ BEGIN
     'metadata_regress',
     'sqlite',
     '/tmp/pgiceberg_catalog_metadata_regress.db',
-    '/tmp/pgiceberg_warehouse_metadata_regress',
-    'pgiceberg_regress'
+    '/tmp/pgiceberg_warehouse_metadata_regress'
   );
 
   PERFORM pgiceberg.create_table(
@@ -31,7 +30,7 @@ OPTIONS (
   catalog_type 'sqlite',
   catalog_uri '/tmp/pgiceberg_catalog_metadata_regress.db',
   warehouse '/tmp/pgiceberg_warehouse_metadata_regress',
-  catalog_name 'pgiceberg_regress'
+  catalog_name 'metadata_regress'
 );
 
 CREATE FOREIGN TABLE metadata_fixture (
