@@ -111,18 +111,18 @@ Status EnsureNamespaceExists(std::shared_ptr<iceberg::sql::SqlCatalog>& catalog,
 
 }  // namespace
 
-Result<CatalogOptions> LoadCatalogOptions(const std::string& catalog_name) {
+Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
   if (SPI_connect() != SPI_OK_CONNECT) {
     return std::unexpected(
         MakeError(ERRCODE_INTERNAL_ERROR, "could not connect to PostgreSQL SPI"));
   }
 
   const char* command =
-      "SELECT catalog_type, catalog_uri, warehouse, name "
+      "SELECT catalog_type, catalog_uri, warehouse, iceberg_catalog_name "
       "FROM pgiceberg.catalogs "
       "WHERE name = $1";
   Oid argtypes[] = {TEXTOID};
-  Datum values[] = {CStringGetTextDatum(catalog_name.c_str())};
+  Datum values[] = {CStringGetTextDatum(name.c_str())};
   const int result =
       SPI_execute_with_args(command, 1, argtypes, values, nullptr, true, 1);
   if (result != SPI_OK_SELECT) {
@@ -133,10 +133,9 @@ Result<CatalogOptions> LoadCatalogOptions(const std::string& catalog_name) {
 
   if (SPI_processed == 0) {
     SPI_finish();
-    return std::unexpected(
-        MakeError(ERRCODE_UNDEFINED_OBJECT,
-                  "pgiceberg catalog \"" + catalog_name + "\" is not registered",
-                  "Register it with pgiceberg.add_catalog(...)."));
+    return std::unexpected(MakeError(
+        ERRCODE_UNDEFINED_OBJECT, "pgiceberg catalog \"" + name + "\" is not registered",
+        "Register it with pgiceberg.add_catalog(...)."));
   }
 
   HeapTuple tuple = SPI_tuptable->vals[0];

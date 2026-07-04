@@ -40,7 +40,7 @@ Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& o
                                                          const char* relation_name);
 Result<TableFilesSummary> LoadIcebergTableFilesSummary(const CatalogOptions& options,
                                                        const char* relation_name);
-Result<CatalogOptions> LoadCatalogOptions(const std::string& catalog_name);
+Result<CatalogOptions> LoadCatalogOptions(const std::string& name);
 Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
     const CatalogOptions& options, const char* relation_name,
     const std::string& metadata_file_location, bool drop_if_exists);

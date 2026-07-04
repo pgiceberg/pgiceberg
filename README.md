@@ -234,6 +234,10 @@ SELECT pgiceberg.add_catalog(
 );
 ```
 
+The first argument is the local `name` used by pgiceberg helper functions.
+pgiceberg uses the same value as the logical Iceberg catalog name unless an
+explicit `iceberg_catalog_name` fifth argument is provided.
+
 Then use the short helper signatures:
 
 ```sql

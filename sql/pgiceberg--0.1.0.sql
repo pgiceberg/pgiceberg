@@ -6,19 +6,22 @@ CREATE TABLE pgiceberg.catalogs (
   name text PRIMARY KEY,
   catalog_type text NOT NULL,
   catalog_uri text NOT NULL,
-  warehouse text NOT NULL
+  warehouse text NOT NULL,
+  iceberg_catalog_name text NOT NULL
 );
 
 COMMENT ON TABLE pgiceberg.catalogs IS
   'Local pgiceberg catalog registry used by helper functions that accept a catalog name.';
 COMMENT ON COLUMN pgiceberg.catalogs.name IS
-  'Catalog name passed to pgiceberg helper functions and to the Iceberg catalog backend.';
+  'Local pgiceberg catalog name passed to helper functions.';
 COMMENT ON COLUMN pgiceberg.catalogs.catalog_type IS
   'Iceberg catalog backend type, such as sql, sqlite, rest, or hms.';
 COMMENT ON COLUMN pgiceberg.catalogs.catalog_uri IS
-  'Connection URI for the Iceberg SQL catalog backend.';
+  'Connection URI for the Iceberg catalog backend.';
 COMMENT ON COLUMN pgiceberg.catalogs.warehouse IS
   'Warehouse location used to create and load Iceberg table files.';
+COMMENT ON COLUMN pgiceberg.catalogs.iceberg_catalog_name IS
+  'Logical Iceberg catalog name used to scope tables in the catalog backend.';
 
 CREATE FUNCTION pgiceberg.fdw_handler()
 RETURNS fdw_handler
@@ -34,26 +37,29 @@ CREATE FUNCTION pgiceberg.add_catalog(
   name text,
   catalog_type text,
   catalog_uri text,
-  warehouse text
+  warehouse text,
+  iceberg_catalog_name text DEFAULT NULL
 )
 RETURNS void
-LANGUAGE sql STRICT
+LANGUAGE sql
 AS $$
   INSERT INTO pgiceberg.catalogs (
     name,
     catalog_type,
     catalog_uri,
-    warehouse
+    warehouse,
+    iceberg_catalog_name
   )
-  VALUES ($1, $2, $3, $4)
+  VALUES ($1, $2, $3, $4, COALESCE($5, $1))
   ON CONFLICT (name) DO UPDATE
   SET catalog_type = EXCLUDED.catalog_type,
       catalog_uri = EXCLUDED.catalog_uri,
-      warehouse = EXCLUDED.warehouse;
+      warehouse = EXCLUDED.warehouse,
+      iceberg_catalog_name = EXCLUDED.iceberg_catalog_name;
 $$;
 
-COMMENT ON FUNCTION pgiceberg.add_catalog(text, text, text, text) IS
-  'Register or replace a local pgiceberg catalog and its Iceberg catalog connection details.';
+COMMENT ON FUNCTION pgiceberg.add_catalog(text, text, text, text, text) IS
+  'Register or replace a local pgiceberg catalog name and its Iceberg catalog connection details.';
 
 CREATE FUNCTION pgiceberg.drop_catalog(name text)
 RETURNS void
