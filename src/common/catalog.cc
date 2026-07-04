@@ -1,6 +1,7 @@
 #include "common/catalog.h"
 
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -174,8 +175,9 @@ Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& o
   return std::string(table->metadata_file_location());
 }
 
-Result<TableFilesSummary> LoadIcebergTableFilesSummary(const CatalogOptions& options,
-                                                       const char* relation_name) {
+Result<TableFilesSummary> LoadIcebergTableFilesSummary(
+    const CatalogOptions& options, const char* relation_name,
+    std::optional<int64_t> snapshot_id) {
   PGICEBERG_ASSIGN_OR_RETURN(auto table, LoadIcebergTable(options, relation_name));
   TableFilesSummary summary{.snapshot_count =
                                 static_cast<int64_t>(table->snapshots().size())};
@@ -184,10 +186,19 @@ Result<TableFilesSummary> LoadIcebergTableFilesSummary(const CatalogOptions& opt
   }
 
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto snapshot,
+      auto current_snapshot,
       FromIcebergResult(table->current_snapshot(), "load current Iceberg snapshot"));
   summary.has_current_snapshot = true;
-  summary.current_snapshot_id = snapshot->snapshot_id;
+  summary.current_snapshot_id = current_snapshot->snapshot_id;
+
+  auto snapshot = current_snapshot;
+  if (snapshot_id.has_value()) {
+    PGICEBERG_ASSIGN_OR_RETURN(snapshot,
+                               FromIcebergResult(table->SnapshotById(*snapshot_id),
+                                                 "load requested Iceberg snapshot"));
+  }
+  summary.has_snapshot = true;
+  summary.snapshot_id = snapshot->snapshot_id;
   if (snapshot->manifest_list.empty()) {
     return summary;
   }

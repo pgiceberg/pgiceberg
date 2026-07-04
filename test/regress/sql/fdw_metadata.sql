@@ -90,13 +90,14 @@ FROM table_metadata, file_metadata;
 
 SELECT
   summary ->> 'snapshot_count' AS snapshot_count,
+  summary ->> 'snapshot_id' = summary ->> 'current_snapshot_id' AS current_snapshot_summary,
   summary ->> 'manifest_count' AS manifest_count,
   summary ->> 'data_manifest_count' AS data_manifest_count,
   summary ->> 'delete_manifest_count' AS delete_manifest_count,
   summary ->> 'data_file_count' AS data_file_count,
   summary ->> 'delete_file_count' AS delete_file_count,
   summary ->> 'deletion_vector_file_count' AS deletion_vector_file_count
-FROM pgiceberg.table_files_summary(
+FROM pgiceberg.table_snapshot_files_summary(
   'metadata_regress',
   'default',
   'metadata_fixture'

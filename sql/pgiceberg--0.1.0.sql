@@ -153,19 +153,20 @@ SET search_path = pg_catalog, pgiceberg
 COMMENT ON FUNCTION pgiceberg.table_metadata_json(text, text, text) IS
   'Return the current Iceberg table metadata as jsonb.';
 
-CREATE FUNCTION pgiceberg.table_files_summary(
+CREATE FUNCTION pgiceberg.table_snapshot_files_summary(
   name text,
   namespace text,
-  table_name text
+  table_name text,
+  snapshot_id bigint DEFAULT NULL
 )
 RETURNS jsonb
-AS 'MODULE_PATHNAME', 'pgiceberg_table_files_summary'
-LANGUAGE C STRICT SECURITY DEFINER
+AS 'MODULE_PATHNAME', 'pgiceberg_table_snapshot_files_summary'
+LANGUAGE C SECURITY DEFINER
 SET search_path = pg_catalog, pgiceberg
 ;
 
-COMMENT ON FUNCTION pgiceberg.table_files_summary(text, text, text) IS
-  'Return snapshot, manifest, data file, delete file, and deletion vector counts for an Iceberg table.';
+COMMENT ON FUNCTION pgiceberg.table_snapshot_files_summary(text, text, text, bigint) IS
+  'Return manifest, data file, delete file, and deletion vector counts for an Iceberg snapshot; use the current snapshot when snapshot_id is NULL.';
 
 CREATE FUNCTION pgiceberg.table_format_version(
   name text,

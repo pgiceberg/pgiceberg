@@ -94,19 +94,20 @@ t
 (1 row)
 SELECT
   summary ->> 'snapshot_count' AS snapshot_count,
+  summary ->> 'snapshot_id' = summary ->> 'current_snapshot_id' AS current_snapshot_summary,
   summary ->> 'manifest_count' AS manifest_count,
   summary ->> 'data_manifest_count' AS data_manifest_count,
   summary ->> 'delete_manifest_count' AS delete_manifest_count,
   summary ->> 'data_file_count' AS data_file_count,
   summary ->> 'delete_file_count' AS delete_file_count,
   summary ->> 'deletion_vector_file_count' AS deletion_vector_file_count
-FROM pgiceberg.table_files_summary(
+FROM pgiceberg.table_snapshot_files_summary(
   'metadata_regress',
   'default',
   'metadata_fixture'
 ) AS summary;
-snapshot_count|manifest_count|data_manifest_count|delete_manifest_count|data_file_count|delete_file_count|deletion_vector_file_count
-1|1|1|0|1|0|0
+snapshot_count|current_snapshot_summary|manifest_count|data_manifest_count|delete_manifest_count|data_file_count|delete_file_count|deletion_vector_file_count
+1|t|1|1|0|1|0|0
 (1 row)
 CREATE ROLE pgiceberg_no_raw;
 GRANT USAGE ON SCHEMA pgiceberg TO pgiceberg_no_raw;

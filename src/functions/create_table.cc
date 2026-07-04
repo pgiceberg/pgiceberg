@@ -210,9 +210,8 @@ pgiceberg::Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateCatalog(
 
 extern "C" {
 PG_FUNCTION_INFO_V1(pgiceberg_create_table);
-}
 
-extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
+Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
     PGICEBERG_ASSIGN_OR_RETURN(auto options,
                                pgiceberg::LoadCatalogOptions(TextArg(fcinfo, 0)));
@@ -283,3 +282,5 @@ extern "C" Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
     return static_cast<Datum>(0);
   });
 }
+
+}  // extern "C"

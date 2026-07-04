@@ -259,7 +259,7 @@ SELECT pgiceberg.table_metadata_json(
   'trip_fixture'
 ) ->> 'table-uuid';
 
-SELECT pgiceberg.table_files_summary(
+SELECT pgiceberg.table_snapshot_files_summary(
   'dev',
   'default',
   'trip_fixture'

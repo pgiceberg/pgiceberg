@@ -2,6 +2,7 @@
 #include "common/pg_error.h"
 
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -34,6 +35,13 @@ std::string FilesSummaryJson(const pgiceberg::TableFilesSummary& summary) {
   std::ostringstream json;
   json << "{";
   json << "\"snapshot_count\":" << summary.snapshot_count << ",";
+  json << "\"snapshot_id\":";
+  if (summary.has_snapshot) {
+    json << summary.snapshot_id;
+  } else {
+    json << "null";
+  }
+  json << ",";
   json << "\"current_snapshot_id\":";
   if (summary.has_current_snapshot) {
     json << summary.current_snapshot_id;
@@ -85,10 +93,9 @@ extern "C" {
 PG_FUNCTION_INFO_V1(pgiceberg_metadata_file_json);
 PG_FUNCTION_INFO_V1(pgiceberg_table_metadata_file_location);
 PG_FUNCTION_INFO_V1(pgiceberg_table_metadata_json);
-PG_FUNCTION_INFO_V1(pgiceberg_table_files_summary);
-}
+PG_FUNCTION_INFO_V1(pgiceberg_table_snapshot_files_summary);
 
-extern "C" Datum pgiceberg_metadata_file_json(PG_FUNCTION_ARGS) {
+Datum pgiceberg_metadata_file_json(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
     const std::string metadata_file_location = TextArg(fcinfo, 0);
     PGICEBERG_ASSIGN_OR_RETURN(auto json, ReadMetadataFile(metadata_file_location));
@@ -96,7 +103,7 @@ extern "C" Datum pgiceberg_metadata_file_json(PG_FUNCTION_ARGS) {
   });
 }
 
-extern "C" Datum pgiceberg_table_metadata_file_location(PG_FUNCTION_ARGS) {
+Datum pgiceberg_table_metadata_file_location(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
     PGICEBERG_ASSIGN_OR_RETURN(auto metadata_file_location,
                                LoadMetadataFileLocation(fcinfo));
@@ -104,7 +111,7 @@ extern "C" Datum pgiceberg_table_metadata_file_location(PG_FUNCTION_ARGS) {
   });
 }
 
-extern "C" Datum pgiceberg_table_metadata_json(PG_FUNCTION_ARGS) {
+Datum pgiceberg_table_metadata_json(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
     PGICEBERG_ASSIGN_OR_RETURN(auto metadata_file_location,
                                LoadMetadataFileLocation(fcinfo));
@@ -113,11 +120,23 @@ extern "C" Datum pgiceberg_table_metadata_json(PG_FUNCTION_ARGS) {
   });
 }
 
-extern "C" Datum pgiceberg_table_files_summary(PG_FUNCTION_ARGS) {
+Datum pgiceberg_table_snapshot_files_summary(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2)) {
+      return std::unexpected(pgiceberg::MakeError(
+          ERRCODE_NULL_VALUE_NOT_ALLOWED,
+          "catalog name, namespace, and table name must not be NULL"));
+    }
     PGICEBERG_ASSIGN_OR_RETURN(auto options, CatalogOptionsArg(fcinfo));
-    PGICEBERG_ASSIGN_OR_RETURN(auto summary, pgiceberg::LoadIcebergTableFilesSummary(
-                                                 options, options.table.c_str()));
+    std::optional<int64_t> snapshot_id;
+    if (!PG_ARGISNULL(3)) {
+      snapshot_id = PG_GETARG_INT64(3);
+    }
+    PGICEBERG_ASSIGN_OR_RETURN(auto summary,
+                               pgiceberg::LoadIcebergTableFilesSummary(
+                                   options, options.table.c_str(), snapshot_id));
     return JsonbDatum(FilesSummaryJson(summary));
   });
 }
+
+}  // extern "C"

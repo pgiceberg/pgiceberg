@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <iceberg/type_fwd.h>
@@ -20,6 +21,8 @@ struct CatalogOptions {
 
 struct TableFilesSummary {
   int64_t snapshot_count = 0;
+  bool has_snapshot = false;
+  int64_t snapshot_id = 0;
   bool has_current_snapshot = false;
   int64_t current_snapshot_id = 0;
   int64_t manifest_count = 0;
@@ -38,8 +41,9 @@ Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& o
                                                          const char* relation_name);
 Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& options,
                                                          const char* relation_name);
-Result<TableFilesSummary> LoadIcebergTableFilesSummary(const CatalogOptions& options,
-                                                       const char* relation_name);
+Result<TableFilesSummary> LoadIcebergTableFilesSummary(
+    const CatalogOptions& options, const char* relation_name,
+    std::optional<int64_t> snapshot_id);
 Result<CatalogOptions> LoadCatalogOptions(const std::string& name);
 Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
     const CatalogOptions& options, const char* relation_name,

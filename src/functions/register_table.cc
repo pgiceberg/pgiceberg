@@ -17,9 +17,8 @@ std::string TextArg(FunctionCallInfo fcinfo, int argno) {
 
 extern "C" {
 PG_FUNCTION_INFO_V1(pgiceberg_register_table);
-}
 
-extern "C" Datum pgiceberg_register_table(PG_FUNCTION_ARGS) {
+Datum pgiceberg_register_table(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
     PGICEBERG_ASSIGN_OR_RETURN(auto options,
                                pgiceberg::LoadCatalogOptions(TextArg(fcinfo, 0)));
@@ -36,3 +35,5 @@ extern "C" Datum pgiceberg_register_table(PG_FUNCTION_ARGS) {
     return static_cast<Datum>(0);
   });
 }
+
+}  // extern "C"

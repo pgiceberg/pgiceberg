@@ -314,9 +314,8 @@ List* PgIcebergImportForeignSchema(ImportForeignSchemaStmt* stmt, Oid server_oid
 extern "C" {
 PG_FUNCTION_INFO_V1(pgiceberg_fdw_handler);
 PG_FUNCTION_INFO_V1(pgiceberg_fdw_validator);
-}
 
-extern "C" Datum pgiceberg_fdw_handler(PG_FUNCTION_ARGS) {
+Datum pgiceberg_fdw_handler(PG_FUNCTION_ARGS) {
   return pgiceberg::PgGuard([]() -> Datum {
     EnsureIcebergRegistrations();
     FdwRoutine* routine = makeNode(FdwRoutine);
@@ -340,7 +339,7 @@ extern "C" Datum pgiceberg_fdw_handler(PG_FUNCTION_ARGS) {
   });
 }
 
-extern "C" Datum pgiceberg_fdw_validator(PG_FUNCTION_ARGS) {
+Datum pgiceberg_fdw_validator(PG_FUNCTION_ARGS) {
   return pgiceberg::PgGuard([&]() -> Datum {
     List* options = untransformRelOptions(PG_GETARG_DATUM(0));
     ListCell* cell = nullptr;
@@ -367,3 +366,5 @@ extern "C" Datum pgiceberg_fdw_validator(PG_FUNCTION_ARGS) {
     PG_RETURN_VOID();
   });
 }
+
+}  // extern "C"
