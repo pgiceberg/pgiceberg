@@ -167,9 +167,9 @@ struct PendingTableChange {
 // that catalog names cannot contain.
 std::string PendingTableKey(const Options& options) {
   std::string key;
-  const std::string_view parts[] = {options.catalog_type, options.catalog_uri,
-                                    options.warehouse,    options.catalog_name,
-                                    options.name_space,   options.table};
+  const std::string_view parts[] = {
+      options.catalog,      options.catalog_type, options.catalog_uri, options.warehouse,
+      options.catalog_name, options.name_space,   options.table};
   for (auto part : parts) {
     key += std::to_string(part.size());
     key += ':';
@@ -810,9 +810,10 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
   state->options = options;
   Relation relation = rinfo->ri_RelationDesc;
   state->tuple_desc = RelationGetDescr(relation);
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
-      state->table, pgiceberg::LoadIcebergTable(ToCatalogOptions(options),
-                                                RelationGetRelationName(relation)));
+      state->table,
+      pgiceberg::LoadIcebergTable(catalog_options, RelationGetRelationName(relation)));
   PGICEBERG_ASSIGN_OR_RETURN(state->read_table,
                              ReadTableForCurrentTransaction(options, state->table));
 

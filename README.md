@@ -160,12 +160,7 @@ SELECT pgiceberg.create_table(
 
 CREATE SERVER iceberg
 FOREIGN DATA WRAPPER pgiceberg
-OPTIONS (
-  catalog_type 'sqlite',
-  catalog_uri '/tmp/pgiceberg_catalog_dev.db',
-  warehouse '/tmp/pgiceberg_warehouse',
-  catalog_name 'dev'
-);
+OPTIONS (catalog 'dev');
 
 CREATE FOREIGN TABLE pgiceberg_trip_fixture (
   vendorid bigint,
@@ -220,7 +215,20 @@ FROM SERVER iceberg
 INTO imported;
 ```
 
-To register an existing Iceberg metadata file into a SQL catalog first, use
+To register an existing Iceberg table location into a SQL catalog first, use
+`pgiceberg.register_table_from_location`:
+
+```sql
+SELECT pgiceberg.register_table_from_location(
+  'dev',
+  'default',
+  'trip_fixture',
+  '/tmp/external_warehouse/default/trip_fixture'
+);
+```
+
+The helper finds the latest `metadata/*.metadata.json` file under the table
+location. If you need to pin a specific metadata file, use
 `pgiceberg.register_table`:
 
 ```sql
@@ -232,9 +240,9 @@ SELECT pgiceberg.register_table(
 );
 ```
 
-The registered metadata location must be readable by pgiceberg's local file IO.
-The function creates the namespace when needed and rejects an existing catalog
-table unless `drop_if_exists` is set to `true`.
+The table location or registered metadata location must be readable by
+pgiceberg's local file IO. The function creates the namespace when needed and
+rejects an existing catalog table unless `drop_if_exists` is set to `true`.
 
 Use the metadata utility functions to inspect the Iceberg metadata file backing
 a catalog table. Register catalog connection details once:

@@ -16,7 +16,9 @@ if(POSTGRESQL_REGRESS)
       fdw_dml
       fdw_import_schema
       fdw_register_table
+      fdw_yellow_trip_dataset
       fdw_metadata)
+  set(PGICEBERG_REGRESS_DATASETS yellow_trip)
   set(PGICEBERG_REGRESS_EXTENSION_DIR "${CMAKE_CURRENT_BINARY_DIR}/extension")
 
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/regress")
@@ -35,26 +37,19 @@ if(POSTGRESQL_REGRESS)
                  "${PGICEBERG_REGRESS_EXTENSION_DIR}/pgiceberg--0.1.0.sql" COPYONLY)
 
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
-       "unix_socket_directories = '${CMAKE_CURRENT_BINARY_DIR}/regress'\n"
-       "listen_addresses = '127.0.0.1'\n")
+       "unix_socket_directories = '/tmp'\n" "listen_addresses = '127.0.0.1'\n")
   if(POSTGRESQL_VERSION VERSION_GREATER_EQUAL "18")
     file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
          "extension_control_path = '${CMAKE_CURRENT_BINARY_DIR}:$system'\n")
   endif()
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/run_regress.cmake.in"
+                 "${CMAKE_CURRENT_BINARY_DIR}/run_regress.cmake" @ONLY)
 
-  add_test(NAME regress_fdw
-           COMMAND "${POSTGRESQL_REGRESS}" --bindir "${POSTGRESQL_BIN_DIR}" --inputdir
-                   "${CMAKE_CURRENT_SOURCE_DIR}/regress" --expecteddir
-                   "${CMAKE_CURRENT_SOURCE_DIR}/regress/expected" --outputdir
-                   "${CMAKE_CURRENT_BINARY_DIR}/regress" --temp-config
-                   "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf" --temp-instance
-                   "${CMAKE_CURRENT_BINARY_DIR}/tmp_check" ${PGICEBERG_REGRESS_TESTS})
+  add_test(NAME regress_fdw COMMAND "${CMAKE_COMMAND}" -P
+                                    "${CMAKE_CURRENT_BINARY_DIR}/run_regress.cmake")
   set_tests_properties(regress_fdw
-                       PROPERTIES WORKING_DIRECTORY
-                                  "${CMAKE_CURRENT_BINARY_DIR}/regress"
-                                  ENVIRONMENT
-                                  "PG_REGRESS_SOCK_DIR=${CMAKE_CURRENT_BINARY_DIR}/regress"
-  )
+                       PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/regress"
+                                  ENVIRONMENT "PG_REGRESS_SOCK_DIR=/tmp")
 else()
   message(STATUS "pg_regress not found; regression tests are not registered")
 endif()

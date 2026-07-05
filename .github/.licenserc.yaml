@@ -31,11 +31,11 @@ header:
 
   paths-ignore:
     - '.git/**'
-    - '.cache/**'
-    - '.ccache/**'
-    - 'build/**'
     - 'LICENSE'
     - 'NOTICE'
-    - 'test/regress/expected/**'
+    - 'test/datasets/**/SHA256SUMS'
+    - 'test/datasets/**/*.avro'
+    - 'test/datasets/**/*.metadata.json'
+    - 'test/datasets/**/*.parquet'
 
   comment: on-failure

@@ -37,12 +37,7 @@ END $$;
 
 CREATE SERVER iceberg
 FOREIGN DATA WRAPPER pgiceberg
-OPTIONS (
-  catalog_type 'sqlite',
-  catalog_uri '/tmp/pgiceberg_catalog_crud_regress.db',
-  warehouse '/tmp/pgiceberg_warehouse_crud_regress',
-  catalog_name 'crud_regress'
-);
+OPTIONS (catalog 'crud_regress');
 
 CREATE FOREIGN TABLE pgiceberg_trip_fixture (
   vendorid bigint,

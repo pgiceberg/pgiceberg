@@ -42,28 +42,17 @@ BEGIN
   );
 END $$;
 
-SELECT pgiceberg.register_table(
+SELECT pgiceberg.register_table_from_location(
   'register_target_regress',
   'default',
   'registered_trip_fixture',
-  (
-    SELECT '/tmp/pgiceberg_warehouse_register_source_regress/default/trip_fixture/metadata/' || metadata_file
-    FROM pg_ls_dir('/tmp/pgiceberg_warehouse_register_source_regress/default/trip_fixture/metadata') AS metadata_file
-    WHERE metadata_file LIKE '%.metadata.json'
-    ORDER BY metadata_file DESC
-    LIMIT 1
-  ),
+  '/tmp/pgiceberg_warehouse_register_source_regress/default/trip_fixture',
   true
 );
 
 CREATE SERVER registered_iceberg
 FOREIGN DATA WRAPPER pgiceberg
-OPTIONS (
-  catalog_type 'sqlite',
-  catalog_uri '/tmp/pgiceberg_catalog_register_target_regress.db',
-  warehouse '/tmp/pgiceberg_warehouse_register_target_regress',
-  catalog_name 'register_target_regress'
-);
+OPTIONS (catalog 'register_target_regress');
 
 CREATE SCHEMA registered;
 

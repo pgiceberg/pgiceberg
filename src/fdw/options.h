@@ -23,6 +23,7 @@ struct List;
 namespace pgiceberg::fdw {
 
 struct Options {
+  std::string catalog;
   std::string catalog_type = "sql";
   std::string catalog_uri;
   std::string warehouse;
@@ -37,6 +38,6 @@ Status ValidateCatalogType(const char* value);
 void ApplyOption(Options& options, DefElem* def);
 void ApplyOptions(Options& options, List* option_list);
 Options OptionsForForeignTable(unsigned int foreigntableid, const char* relation_name);
-pgiceberg::CatalogOptions ToCatalogOptions(const Options& options);
+pgiceberg::Result<pgiceberg::CatalogOptions> ToCatalogOptions(const Options& options);
 
 }  // namespace pgiceberg::fdw
