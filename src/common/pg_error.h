@@ -61,7 +61,7 @@ inline char* CopyPrefixedCStringForReport(const char* prefix,
   if (copy == nullptr) {
     return CopyCStringForReport(prefix);
   }
-  std::memcpy(copy, prefix, prefix_size);
+  std::memcpy(copy, prefix, prefix_size + 1);
   std::memcpy(copy + prefix_size, value, value_size + 1);
   return copy;
 }
