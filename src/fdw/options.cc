@@ -26,9 +26,9 @@ extern "C" {
 namespace pgiceberg::fdw {
 namespace {
 
-constexpr std::array<const char*, 8> kValidOptions = {
-    "catalog_type", "catalog_uri", "warehouse",   "namespace",
-    "table",        "snapshot_id", "config_file", "catalog_name"};
+constexpr std::array<const char*, 9> kValidOptions = {
+    "catalog", "catalog_type", "catalog_uri", "warehouse",   "namespace",
+    "table",   "snapshot_id",  "config_file", "catalog_name"};
 
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
 constexpr const char* kValidCatalogTypes = "sql, sqlite, rest";
@@ -82,7 +82,9 @@ Status ValidateCatalogType(const char* value) {
 
 void ApplyOption(Options& options, DefElem* def) {
   const char* value = defGetString(def);
-  if (std::strcmp(def->defname, "catalog_type") == 0) {
+  if (std::strcmp(def->defname, "catalog") == 0) {
+    options.catalog = value;
+  } else if (std::strcmp(def->defname, "catalog_type") == 0) {
     options.catalog_type = value;
   } else if (std::strcmp(def->defname, "catalog_uri") == 0) {
     options.catalog_uri = value;
@@ -117,15 +119,20 @@ Options OptionsForForeignTable(unsigned int foreigntableid, const char* relation
   return options;
 }
 
-pgiceberg::CatalogOptions ToCatalogOptions(const Options& options) {
-  return pgiceberg::CatalogOptions{
-      .catalog_type = options.catalog_type,
-      .catalog_uri = options.catalog_uri,
-      .warehouse = options.warehouse,
-      .catalog_name = options.catalog_name,
-      .name_space = options.name_space,
-      .table = options.table,
-  };
+pgiceberg::Result<pgiceberg::CatalogOptions> ToCatalogOptions(const Options& options) {
+  pgiceberg::CatalogOptions catalog_options;
+  if (!options.catalog.empty()) {
+    PGICEBERG_ASSIGN_OR_RETURN(catalog_options,
+                               pgiceberg::LoadCatalogOptions(options.catalog));
+  } else {
+    catalog_options.catalog_type = options.catalog_type;
+    catalog_options.catalog_uri = options.catalog_uri;
+    catalog_options.warehouse = options.warehouse;
+    catalog_options.catalog_name = options.catalog_name;
+  }
+  catalog_options.name_space = options.name_space;
+  catalog_options.table = options.table;
+  return catalog_options;
 }
 
 }  // namespace pgiceberg::fdw

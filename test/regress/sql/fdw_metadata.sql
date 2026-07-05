@@ -38,12 +38,7 @@ END $$;
 
 CREATE SERVER metadata_iceberg
 FOREIGN DATA WRAPPER pgiceberg
-OPTIONS (
-  catalog_type 'sqlite',
-  catalog_uri '/tmp/pgiceberg_catalog_metadata_regress.db',
-  warehouse '/tmp/pgiceberg_warehouse_metadata_regress',
-  catalog_name 'metadata_regress'
-);
+OPTIONS (catalog 'metadata_regress');
 
 CREATE FOREIGN TABLE metadata_fixture (
   id bigint,

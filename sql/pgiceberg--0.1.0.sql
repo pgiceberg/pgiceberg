@@ -126,6 +126,47 @@ SET search_path = pg_catalog, pgiceberg
 COMMENT ON FUNCTION pgiceberg.register_table(text, text, text, text, boolean) IS
   'Register an existing Iceberg metadata file as a table through a registered pgiceberg catalog name.';
 
+CREATE FUNCTION pgiceberg.register_table_from_location(
+  name text,
+  namespace text,
+  table_name text,
+  table_location text,
+  drop_if_exists boolean DEFAULT false
+)
+RETURNS void
+LANGUAGE plpgsql STRICT SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg
+AS $$
+DECLARE
+  metadata_dir text := regexp_replace(table_location, '/+$', '') || '/metadata';
+  metadata_file text;
+BEGIN
+  SELECT file_name
+  INTO metadata_file
+  FROM pg_ls_dir(metadata_dir) AS file_name
+  WHERE file_name LIKE '%.metadata.json'
+  ORDER BY file_name DESC
+  LIMIT 1;
+
+  IF metadata_file IS NULL THEN
+    RAISE EXCEPTION 'no Iceberg metadata file found in %', metadata_dir
+      USING ERRCODE = '58P01',
+            DETAIL = 'Expected at least one file matching %.metadata.json.';
+  END IF;
+
+  PERFORM pgiceberg.register_table(
+    name,
+    namespace,
+    table_name,
+    metadata_dir || '/' || metadata_file,
+    drop_if_exists
+  );
+END;
+$$;
+
+COMMENT ON FUNCTION pgiceberg.register_table_from_location(text, text, text, text, boolean) IS
+  'Register an existing Iceberg table by finding the latest metadata JSON under a table location.';
+
 -- Metadata inspection helpers.
 CREATE FUNCTION pgiceberg.metadata_file_json(
   metadata_file_location text

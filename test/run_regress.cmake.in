@@ -1,0 +1,61 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set(PGICEBERG_REGRESS_TESTS "@PGICEBERG_REGRESS_TESTS@")
+set(PGICEBERG_REGRESS_DATASETS "@PGICEBERG_REGRESS_DATASETS@")
+
+foreach(PGICEBERG_DATASET IN LISTS PGICEBERG_REGRESS_DATASETS)
+  set(PGICEBERG_DATASET_SOURCE
+      "@CMAKE_CURRENT_SOURCE_DIR@/datasets/${PGICEBERG_DATASET}")
+  set(PGICEBERG_DATASET_RUNTIME "/tmp/pgiceberg_${PGICEBERG_DATASET}_dataset_regress")
+
+  file(STRINGS "${PGICEBERG_DATASET_SOURCE}/SHA256SUMS" PGICEBERG_DATASET_SHA256S)
+  foreach(PGICEBERG_DATASET_SHA256 IN LISTS PGICEBERG_DATASET_SHA256S)
+    if(PGICEBERG_DATASET_SHA256 STREQUAL "")
+      continue()
+    endif()
+    string(REGEX MATCH "^([0-9a-f]+)  (.+)$" PGICEBERG_SHA_MATCH
+                 "${PGICEBERG_DATASET_SHA256}")
+    if(NOT PGICEBERG_SHA_MATCH)
+      message(FATAL_ERROR "invalid dataset checksum line: ${PGICEBERG_DATASET_SHA256}")
+    endif()
+
+    set(PGICEBERG_EXPECTED_SHA256 "${CMAKE_MATCH_1}")
+    set(PGICEBERG_DATASET_PATH "${PGICEBERG_DATASET_SOURCE}/${CMAKE_MATCH_2}")
+    file(SHA256 "${PGICEBERG_DATASET_PATH}" PGICEBERG_ACTUAL_SHA256)
+    if(NOT PGICEBERG_ACTUAL_SHA256 STREQUAL PGICEBERG_EXPECTED_SHA256)
+      message(FATAL_ERROR "dataset checksum mismatch: ${PGICEBERG_DATASET_PATH}")
+    endif()
+  endforeach()
+
+  file(REMOVE_RECURSE "${PGICEBERG_DATASET_RUNTIME}")
+  file(REMOVE "/tmp/pgiceberg_catalog_${PGICEBERG_DATASET}_dataset_regress.db")
+  file(MAKE_DIRECTORY "${PGICEBERG_DATASET_RUNTIME}/default")
+  file(COPY "${PGICEBERG_DATASET_SOURCE}" DESTINATION
+            "${PGICEBERG_DATASET_RUNTIME}/default")
+endforeach()
+
+execute_process(
+  COMMAND
+    "@CMAKE_COMMAND@" -E env
+    "PG_REGRESS_SOCK_DIR=/tmp"
+    "@POSTGRESQL_REGRESS@" --bindir "@POSTGRESQL_BIN_DIR@" --inputdir
+    "@CMAKE_CURRENT_SOURCE_DIR@/regress" --expecteddir
+    "@CMAKE_CURRENT_SOURCE_DIR@/regress/expected" --outputdir
+    "@CMAKE_CURRENT_BINARY_DIR@/regress" --temp-config
+    "@CMAKE_CURRENT_BINARY_DIR@/pg_regress.conf" --temp-instance
+    "@CMAKE_CURRENT_BINARY_DIR@/tmp_check" ${PGICEBERG_REGRESS_TESTS}
+  WORKING_DIRECTORY "@CMAKE_CURRENT_BINARY_DIR@/regress"
+  RESULT_VARIABLE PGICEBERG_REGRESS_RESULT)
+if(NOT PGICEBERG_REGRESS_RESULT EQUAL 0)
+  message(FATAL_ERROR "pg_regress failed with exit code ${PGICEBERG_REGRESS_RESULT}")
+endif()

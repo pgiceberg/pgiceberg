@@ -37,12 +37,7 @@ END $$;
 
 CREATE SERVER iceberg
 FOREIGN DATA WRAPPER pgiceberg
-OPTIONS (
-  catalog_type 'sqlite',
-  catalog_uri '/tmp/pgiceberg_catalog_import_regress.db',
-  warehouse '/tmp/pgiceberg_warehouse_import_regress',
-  catalog_name 'import_regress'
-);
+OPTIONS (catalog 'import_regress');
 
 CREATE SCHEMA imported;
 

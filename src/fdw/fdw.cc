@@ -109,8 +109,10 @@ pgiceberg::Status PgIcebergBeginForeignScanImpl(ForeignScanState* node, int efla
   Relation relation = node->ss.ss_currentRelation;
   auto options = pgiceberg::fdw::OptionsForForeignTable(
       RelationGetRelid(relation), RelationGetRelationName(relation));
-  PGICEBERG_RETURN_NOT_OK(
-      pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+  if (options.catalog.empty()) {
+    PGICEBERG_RETURN_NOT_OK(
+        pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+  }
   PGICEBERG_ASSIGN_OR_RETURN(auto scan, pgiceberg::fdw::BeginScan(relation, options));
   node->fdw_state = scan;
   return pgiceberg::Ok();
@@ -159,8 +161,10 @@ pgiceberg::Status PgIcebergBeginForeignModifyImpl(ModifyTableState* mtstate,
   Relation relation = rinfo->ri_RelationDesc;
   auto options = pgiceberg::fdw::OptionsForForeignTable(
       RelationGetRelid(relation), RelationGetRelationName(relation));
-  PGICEBERG_RETURN_NOT_OK(
-      pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+  if (options.catalog.empty()) {
+    PGICEBERG_RETURN_NOT_OK(
+        pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+  }
   PGICEBERG_ASSIGN_OR_RETURN(auto state,
                              pgiceberg::fdw::BeginModify(mtstate, rinfo, options));
   rinfo->ri_FdwState = state;
@@ -254,12 +258,15 @@ pgiceberg::Result<List*> PgIcebergImportForeignSchemaImpl(ImportForeignSchemaStm
   }
   PGICEBERG_ASSIGN_OR_RETURN(auto table_name, TableNameFromImport(options, stmt));
   options.table = std::move(table_name);
-  PGICEBERG_RETURN_NOT_OK(
-      pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+  if (options.catalog.empty()) {
+    PGICEBERG_RETURN_NOT_OK(
+        pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+  }
 
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options,
+                             pgiceberg::fdw::ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto table, pgiceberg::LoadIcebergTable(pgiceberg::fdw::ToCatalogOptions(options),
-                                              options.table.c_str()));
+      auto table, pgiceberg::LoadIcebergTable(catalog_options, options.table.c_str()));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto schema, pgiceberg::FromIcebergResult(table->schema(), "load schema"));
 
