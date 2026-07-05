@@ -90,6 +90,34 @@ CREATE FOREIGN DATA WRAPPER pgiceberg
 HANDLER pgiceberg.fdw_handler
 VALIDATOR pgiceberg.fdw_validator;
 
+CREATE FUNCTION pgiceberg.parquet_fdw_handler()
+RETURNS fdw_handler
+AS 'MODULE_PATHNAME', 'pgiceberg_parquet_fdw_handler'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pgiceberg.parquet_fdw_validator(text[], oid)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_parquet_fdw_validator'
+LANGUAGE C STRICT;
+
+CREATE FOREIGN DATA WRAPPER pgiceberg_parquet
+HANDLER pgiceberg.parquet_fdw_handler
+VALIDATOR pgiceberg.parquet_fdw_validator;
+
+CREATE FUNCTION pgiceberg.avro_fdw_handler()
+RETURNS fdw_handler
+AS 'MODULE_PATHNAME', 'pgiceberg_avro_fdw_handler'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pgiceberg.avro_fdw_validator(text[], oid)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_avro_fdw_validator'
+LANGUAGE C STRICT;
+
+CREATE FOREIGN DATA WRAPPER pgiceberg_avro
+HANDLER pgiceberg.avro_fdw_handler
+VALIDATOR pgiceberg.avro_fdw_validator;
+
 -- Table lifecycle helpers.
 CREATE FUNCTION pgiceberg.create_table(
   name text,

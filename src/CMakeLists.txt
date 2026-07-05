@@ -22,7 +22,9 @@ add_library(pgiceberg MODULE
             fdw/scan_state.cc
             functions/create_table.cc
             functions/metadata.cc
-            functions/register_table.cc)
+            functions/register_table.cc
+            utilities/avro_fdw.cc
+            utilities/parquet_fdw.cc)
 target_include_directories(pgiceberg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(pgiceberg PRIVATE PostgreSQL::Server PostgreSQL::Client)
 include(CheckLinkerFlag)
