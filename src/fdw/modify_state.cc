@@ -339,89 +339,84 @@ Status CommitPendingModifyChanges() {
   return Ok();
 }
 
-void XactCallback(XactEvent event, void*) {
-  try {
-    switch (event) {
-      case XACT_EVENT_PRE_COMMIT: {
-        auto status = CommitPendingModifyChanges();
-        if (!status) {
-          pgiceberg::ReportError(status.error());
-        }
-        break;
+Status XactCallbackImpl(XactEvent event) {
+  switch (event) {
+    case XACT_EVENT_PRE_COMMIT:
+      return CommitPendingModifyChanges();
+    case XACT_EVENT_PRE_PREPARE:
+      if (!PendingTableChanges().empty()) {
+        // Prepared transactions would require durable pending Iceberg change
+        // state across backend exit and crash recovery.  This queue is only
+        // backend-local, so fail before PostgreSQL prepares.
+        return std::unexpected(
+            MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                      "pgiceberg DML does not support prepared transactions"));
       }
-      case XACT_EVENT_PRE_PREPARE:
-        if (!PendingTableChanges().empty()) {
-          // Prepared transactions would require durable pending Iceberg change
-          // state across backend exit and crash recovery.  This queue is only
-          // backend-local, so fail before PostgreSQL prepares.
-          ereport(ERROR,
-                  (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                   errmsg("pgiceberg DML does not support prepared transactions")));
-        }
-        break;
-      case XACT_EVENT_ABORT:
-      case XACT_EVENT_PARALLEL_ABORT:
-        ClearPendingTableChanges(true);
-        break;
-      default:
-        break;
-    }
-  } catch (...) {
-    pgiceberg::ReportCurrentException();
+      break;
+    case XACT_EVENT_ABORT:
+    case XACT_EVENT_PARALLEL_ABORT:
+      ClearPendingTableChanges(true);
+      break;
+    default:
+      break;
   }
+  return Ok();
+}
+
+void XactCallback(XactEvent event, void*) {
+  PgStatusGuard([&]() { return XactCallbackImpl(event); });
+}
+
+Status SubXactCallbackImpl(SubXactEvent event, SubTransactionId my_subid,
+                           SubTransactionId parent_subid) {
+  auto& table_changes = PendingTableChanges();
+  switch (event) {
+    case SUBXACT_EVENT_COMMIT_SUB:
+      for (auto& table_change : table_changes) {
+        for (auto& change : table_change.changes) {
+          if (change.subtransaction_id == my_subid) {
+            // PostgreSQL promotes a committed subtransaction's effects to
+            // its parent.  The Iceberg metadata update must follow that same
+            // ownership so a later parent abort can still find it.
+            change.subtransaction_id = parent_subid;
+          }
+        }
+      }
+      break;
+    case SUBXACT_EVENT_ABORT_SUB:
+      for (auto& table_change : table_changes) {
+        std::vector<std::string> aborted_paths;
+        for (const auto& change : table_change.changes) {
+          if (change.subtransaction_id == my_subid) {
+            auto paths = change.change->NewDataFilePaths();
+            aborted_paths.insert(aborted_paths.end(), paths.begin(), paths.end());
+          }
+        }
+        CleanupDataFiles(table_change.base_table, aborted_paths);
+        std::erase_if(table_change.changes,
+                      [my_subid](const PendingModifyChange& change) {
+                        return change.subtransaction_id == my_subid;
+                      });
+        if (!table_change.changes.empty()) {
+          // The transaction already saw the aborted subtransaction's Iceberg
+          // update.  Replaying only the survivors is simpler and safer than
+          // depending on update-specific undo support.
+          PGICEBERG_RETURN_NOT_OK(RebuildPendingTransaction(table_change));
+        }
+      }
+      std::erase_if(table_changes, [](const PendingTableChange& table_change) {
+        return table_change.changes.empty();
+      });
+      break;
+    default:
+      break;
+  }
+  return Ok();
 }
 
 void SubXactCallback(SubXactEvent event, SubTransactionId my_subid,
                      SubTransactionId parent_subid, void*) {
-  try {
-    auto& table_changes = PendingTableChanges();
-    switch (event) {
-      case SUBXACT_EVENT_COMMIT_SUB:
-        for (auto& table_change : table_changes) {
-          for (auto& change : table_change.changes) {
-            if (change.subtransaction_id == my_subid) {
-              // PostgreSQL promotes a committed subtransaction's effects to
-              // its parent.  The Iceberg metadata update must follow that same
-              // ownership so a later parent abort can still find it.
-              change.subtransaction_id = parent_subid;
-            }
-          }
-        }
-        break;
-      case SUBXACT_EVENT_ABORT_SUB:
-        for (auto& table_change : table_changes) {
-          std::vector<std::string> aborted_paths;
-          for (const auto& change : table_change.changes) {
-            if (change.subtransaction_id == my_subid) {
-              auto paths = change.change->NewDataFilePaths();
-              aborted_paths.insert(aborted_paths.end(), paths.begin(), paths.end());
-            }
-          }
-          CleanupDataFiles(table_change.base_table, aborted_paths);
-          std::erase_if(table_change.changes,
-                        [my_subid](const PendingModifyChange& change) {
-                          return change.subtransaction_id == my_subid;
-                        });
-          if (!table_change.changes.empty()) {
-            // The transaction already saw the aborted subtransaction's Iceberg
-            // update.  Replaying only the survivors is simpler and safer than
-            // depending on update-specific undo support.
-            auto status = RebuildPendingTransaction(table_change);
-            if (!status) {
-              pgiceberg::ReportError(status.error());
-            }
-          }
-        }
-        std::erase_if(table_changes, [](const PendingTableChange& table_change) {
-          return table_change.changes.empty();
-        });
-        break;
-      default:
-        break;
-    }
-  } catch (...) {
-    pgiceberg::ReportCurrentException();
-  }
+  PgStatusGuard([&]() { return SubXactCallbackImpl(event, my_subid, parent_subid); });
 }
 
 // Rows copied out of executor slots must own their Datums.  PostgreSQL is free
