@@ -44,6 +44,7 @@
 #include "common/catalog.h"
 #include "common/datum_convert.h"
 #include "common/pg_error.h"
+#include "common/pg_memory_context.h"
 #include "common/status.h"
 #include "fdw/iceberg_scan.h"
 
@@ -472,19 +473,8 @@ Status AppendValue(arrow::ArrayBuilder& builder, const Value& value,
   return pgiceberg::AppendDatum(builder, value.datum, value.is_null, type);
 }
 
-class ScopedMemoryContext {
- public:
-  explicit ScopedMemoryContext(MemoryContext context)
-      : previous_(MemoryContextSwitchTo(context)) {}
-
-  ~ScopedMemoryContext() { MemoryContextSwitchTo(previous_); }
-
- private:
-  MemoryContext previous_;
-};
-
 Row CopyRowFromSlot(TupleTableSlot* slot, TupleDesc desc, MemoryContext memory_context) {
-  ScopedMemoryContext context(memory_context);
+  ScopedPgMemoryContext context(memory_context);
   Row row(desc->natts);
   slot_getallattrs(slot);
   for (int i = 0; i < desc->natts; i++) {
@@ -500,7 +490,7 @@ Row CopyRowFromSlot(TupleTableSlot* slot, TupleDesc desc, MemoryContext memory_c
 
 Row CopyRowFromHeapTupleDatum(Datum tuple_datum, TupleDesc desc,
                               MemoryContext memory_context) {
-  ScopedMemoryContext context(memory_context);
+  ScopedPgMemoryContext context(memory_context);
   HeapTupleHeader header = DatumGetHeapTupleHeader(tuple_datum);
   HeapTupleData tuple;
   tuple.t_len = HeapTupleHeaderGetDatumLength(header);
