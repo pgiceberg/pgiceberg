@@ -13,6 +13,24 @@
 
 set -euo pipefail
 
+retry() {
+  local max_attempts="$1"
+  local delay="$2"
+  shift 2
+
+  local attempt=1
+  until "$@"; do
+    if ((attempt >= max_attempts)); then
+      return 1
+    fi
+
+    echo "command failed, retrying in ${delay}s: $*" >&2
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
 case "$(uname -s)" in
   Linux)
     sudo apt-get update
@@ -51,8 +69,8 @@ case "$(uname -s)" in
     sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
     ;;
   Darwin)
-    brew update
-    brew install \
+    retry 3 10 brew update
+    retry 3 10 brew install \
       autoconf \
       bison \
       ccache \
