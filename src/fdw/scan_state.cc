@@ -22,6 +22,7 @@
 
 #include "common/catalog.h"
 #include "common/datum_convert.h"
+#include "common/pg_interrupt.h"
 #include "common/status.h"
 #include "fdw/iceberg_scan.h"
 #include "fdw/modify_state.h"
@@ -60,6 +61,7 @@ namespace {
 
 Result<bool> LoadNextBatch(ScanState* state) {
   while (state->batch == nullptr || state->row >= state->batch->num_rows()) {
+    PGICEBERG_RETURN_NOT_OK(pgiceberg::CheckForInterrupts());
     std::shared_ptr<arrow::RecordBatch> batch;
     PGICEBERG_ASSIGN_OR_RETURN(auto has_batch, state->cursor->NextBatch(&batch));
     if (!has_batch) {

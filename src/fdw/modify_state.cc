@@ -44,6 +44,7 @@
 #include "common/catalog.h"
 #include "common/datum_convert.h"
 #include "common/pg_error.h"
+#include "common/pg_interrupt.h"
 #include "common/pg_memory_context.h"
 #include "common/status.h"
 #include "fdw/iceberg_scan.h"
@@ -936,6 +937,7 @@ Status EndModify(ModifyState* state) {
 
   std::shared_ptr<arrow::RecordBatch> batch;
   while (true) {
+    PGICEBERG_RETURN_NOT_OK(pgiceberg::CheckForInterrupts());
     PGICEBERG_ASSIGN_OR_RETURN(auto has_batch, current.NextBatch(&batch));
     if (!has_batch) {
       break;
