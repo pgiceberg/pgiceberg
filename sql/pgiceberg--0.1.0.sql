@@ -21,7 +21,7 @@ CREATE TABLE pgiceberg.catalogs (
   catalog_uri text NOT NULL,
   warehouse text NOT NULL,
   iceberg_catalog_name text NOT NULL
-);
+) USING heap;
 
 COMMENT ON TABLE pgiceberg.catalogs IS
   'Local pgiceberg catalog registry used by helper functions that accept a catalog name.';
@@ -35,6 +35,30 @@ COMMENT ON COLUMN pgiceberg.catalogs.warehouse IS
   'Warehouse location used to create and load Iceberg table files.';
 COMMENT ON COLUMN pgiceberg.catalogs.iceberg_catalog_name IS
   'Logical Iceberg catalog name used to scope tables in the catalog backend.';
+
+CREATE TABLE pgiceberg.table_bindings (
+  relid oid PRIMARY KEY,
+  catalog text NOT NULL,
+  namespace text NOT NULL,
+  table_name text NOT NULL,
+  format_version integer NOT NULL,
+  metadata_location text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+) USING heap;
+
+COMMENT ON TABLE pgiceberg.table_bindings IS
+  'Native table access method binding from a PostgreSQL relation to an Iceberg catalog table.';
+COMMENT ON COLUMN pgiceberg.table_bindings.relid IS
+  'OID of the PostgreSQL relation that uses the pgiceberg iceberg table access method.';
+COMMENT ON COLUMN pgiceberg.table_bindings.catalog IS
+  'Local pgiceberg catalog name from pgiceberg.catalogs.';
+COMMENT ON COLUMN pgiceberg.table_bindings.namespace IS
+  'Iceberg namespace used to load the table.';
+COMMENT ON COLUMN pgiceberg.table_bindings.table_name IS
+  'Iceberg table name used to load the table.';
+COMMENT ON COLUMN pgiceberg.table_bindings.metadata_location IS
+  'Metadata file location returned when the Iceberg table was created.';
 
 CREATE FUNCTION pgiceberg.add_catalog(
   name text,
@@ -89,6 +113,16 @@ LANGUAGE C STRICT;
 CREATE FOREIGN DATA WRAPPER pgiceberg
 HANDLER pgiceberg.fdw_handler
 VALIDATOR pgiceberg.fdw_validator;
+
+CREATE FUNCTION pgiceberg.table_am_handler(internal)
+RETURNS table_am_handler
+AS 'MODULE_PATHNAME', 'pgiceberg_table_am_handler'
+LANGUAGE C STRICT;
+
+CREATE ACCESS METHOD iceberg TYPE TABLE HANDLER pgiceberg.table_am_handler;
+
+COMMENT ON ACCESS METHOD iceberg IS
+  'Native pgiceberg table access method for Apache Iceberg tables.';
 
 CREATE FUNCTION pgiceberg.parquet_fdw_handler()
 RETURNS fdw_handler

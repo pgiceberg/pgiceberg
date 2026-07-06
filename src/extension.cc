@@ -11,6 +11,25 @@
 // limitations under the License.
 
 #include "fdw/modify_state.h"
+#include "tableam/tableam.h"
+
+#include <iceberg/arrow/arrow_register.h>
+#include <iceberg/avro/avro_register.h>
+#include <iceberg/parquet/parquet_register.h>
+
+namespace {
+
+void EnsureIcebergRegistrations() {
+  static const bool registered = [] {
+    iceberg::arrow::RegisterAll();
+    iceberg::parquet::RegisterAll();
+    iceberg::avro::RegisterAll();
+    return true;
+  }();
+  (void)registered;
+}
+
+}  // namespace
 
 extern "C" {
 #include "postgres.h"
@@ -22,5 +41,9 @@ PG_MODULE_MAGIC;
 // FDW executor callback, because a backend can run multiple statements in one
 // PostgreSQL transaction and all of them have to share the same pending
 // Iceberg commit state.
-void _PG_init(void) { pgiceberg::fdw::RegisterTransactionCallbacks(); }
+void _PG_init(void) {
+  EnsureIcebergRegistrations();
+  pgiceberg::fdw::RegisterTransactionCallbacks();
+  pgiceberg::tableam::RegisterTableAmHooks();
+}
 }

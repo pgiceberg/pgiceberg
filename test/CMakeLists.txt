@@ -15,6 +15,7 @@ if(POSTGRESQL_REGRESS)
       fdw_options
       fdw_dml
       fdw_import_schema
+      tableam_native
       fdw_parquet
       fdw_avro
       fdw_register_table
