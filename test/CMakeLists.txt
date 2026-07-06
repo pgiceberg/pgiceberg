@@ -15,6 +15,8 @@ if(POSTGRESQL_REGRESS)
       fdw_options
       fdw_dml
       fdw_import_schema
+      fdw_parquet
+      fdw_avro
       fdw_register_table
       fdw_yellow_trip_dataset
       fdw_metadata)
