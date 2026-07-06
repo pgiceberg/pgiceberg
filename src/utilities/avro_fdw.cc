@@ -14,7 +14,6 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -362,14 +361,15 @@ class AvroCursor final {
     for (int i = 0; i < desc_->natts; i++) {
       slot->tts_isnull[i] = true;
       slot->tts_values[i] = static_cast<Datum>(0);
-      if (!columns_[i].has_value()) {
+      const auto& column = columns_[i];
+      if (column.field_index < 0) {
         continue;
       }
 
       Form_pg_attribute attr = TupleDescAttr(desc_, i);
-      PGICEBERG_ASSIGN_OR_RETURN(
-          slot->tts_values[i], ConvertAvroValue(record.fieldAt(columns_[i]->field_index),
-                                                attr->atttypid, slot->tts_isnull[i]));
+      PGICEBERG_ASSIGN_OR_RETURN(slot->tts_values[i],
+                                 ConvertAvroValue(record.fieldAt(column.field_index),
+                                                  attr->atttypid, slot->tts_isnull[i]));
     }
 
     ExecStoreVirtualTuple(slot);
@@ -415,7 +415,7 @@ class AvroCursor final {
   TupleDesc desc_;
   std::unique_ptr<avro::DataFileReader<avro::GenericDatum>> reader_;
   avro::NodePtr root_;
-  std::vector<std::optional<ColumnState>> columns_;
+  std::vector<ColumnState> columns_;
 };
 
 struct AvroScanState {
@@ -525,7 +525,7 @@ void EndForeignScan(ForeignScanState* node) {
 
 pgiceberg::Status AppendImportColumns(StringInfo sql, const std::string& filename) {
   PGICEBERG_ASSIGN_OR_RETURN(auto schema, ReadAvroSchema(filename));
-  auto root = schema.root();
+  const auto& root = schema.root();
   if (root->type() != avro::AVRO_RECORD) {
     return std::unexpected(pgiceberg::MakeError(
         ERRCODE_FDW_ERROR, "Avro file root schema must be a record"));
@@ -572,7 +572,8 @@ pgiceberg::Result<List*> ImportForeignSchemaImpl(ImportForeignSchemaStmt* stmt,
       continue;
     }
 
-    std::string path = import_dir + "/" + filename;
+    std::string path = import_dir;
+    path.append("/").append(filename);
     StringInfo sql = makeStringInfo();
     appendStringInfo(sql, "CREATE FOREIGN TABLE %s.%s (",
                      quote_identifier(stmt->local_schema),

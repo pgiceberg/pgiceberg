@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -241,11 +240,12 @@ class ParquetCursor final {
     for (int i = 0; i < desc_->natts; i++) {
       slot->tts_isnull[i] = true;
       slot->tts_values[i] = static_cast<Datum>(0);
-      if (!columns_[i].has_value()) {
+      const auto& column = columns_[i];
+      if (column.field_index < 0) {
         continue;
       }
 
-      auto array = batch_->column(columns_[i]->field_index);
+      auto array = batch_->column(column.field_index);
       Form_pg_attribute attr = TupleDescAttr(desc_, i);
       PGICEBERG_ASSIGN_OR_RETURN(
           slot->tts_values[i],
@@ -315,7 +315,7 @@ class ParquetCursor final {
   std::unique_ptr<parquet::arrow::FileReader> reader_;
   std::unique_ptr<arrow::RecordBatchReader> batch_reader_;
   std::shared_ptr<arrow::RecordBatch> batch_;
-  std::vector<std::optional<ColumnState>> columns_;
+  std::vector<ColumnState> columns_;
   std::int64_t row_ = 0;
 };
 
@@ -466,7 +466,8 @@ pgiceberg::Result<List*> ImportForeignSchemaImpl(ImportForeignSchemaStmt* stmt,
       continue;
     }
 
-    std::string path = import_dir + "/" + filename;
+    std::string path = import_dir;
+    path.append("/").append(filename);
     StringInfo sql = makeStringInfo();
     appendStringInfo(sql, "CREATE FOREIGN TABLE %s.%s (",
                      quote_identifier(stmt->local_schema),
