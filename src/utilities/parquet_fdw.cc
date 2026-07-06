@@ -24,6 +24,7 @@
 
 #include "common/datum_convert.h"
 #include "common/pg_error.h"
+#include "common/pg_interrupt.h"
 #include "common/status.h"
 
 extern "C" {
@@ -297,6 +298,7 @@ class ParquetCursor final {
 
   pgiceberg::Result<bool> LoadNextBatch() {
     while (batch_ == nullptr || row_ >= batch_->num_rows()) {
+      PGICEBERG_RETURN_NOT_OK(pgiceberg::CheckForInterrupts());
       std::shared_ptr<arrow::RecordBatch> batch;
       PGICEBERG_RETURN_NOT_OK(pgiceberg::FromArrowStatus(batch_reader_->ReadNext(&batch),
                                                          "read Parquet record batch"));

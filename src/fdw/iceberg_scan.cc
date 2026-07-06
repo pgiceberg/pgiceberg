@@ -21,6 +21,7 @@
 #include <iceberg/table.h>
 #include <iceberg/table_scan.h>
 
+#include "common/pg_interrupt.h"
 #include "common/status.h"
 
 namespace pgiceberg::fdw {
@@ -95,6 +96,7 @@ Result<bool> IcebergScanCursor::OpenCurrentTask() {
 Result<bool> IcebergScanCursor::NextBatch(std::shared_ptr<arrow::RecordBatch>* batch) {
   *batch = nullptr;
   while (true) {
+    PGICEBERG_RETURN_NOT_OK(pgiceberg::CheckForInterrupts());
     if (batch_reader_ == nullptr) {
       PGICEBERG_ASSIGN_OR_RETURN(auto opened, OpenCurrentTask());
       if (!opened) {

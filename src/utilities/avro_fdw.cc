@@ -23,6 +23,7 @@
 #include <avro/Generic.hh>
 
 #include "common/pg_error.h"
+#include "common/pg_interrupt.h"
 #include "common/status.h"
 
 extern "C" {
@@ -348,6 +349,7 @@ class AvroCursor final {
 
   pgiceberg::Result<TupleTableSlot*> Iterate(TupleTableSlot* slot) {
     ExecClearTuple(slot);
+    PGICEBERG_RETURN_NOT_OK(pgiceberg::CheckForInterrupts());
     avro::GenericDatum datum(root_);
     if (!reader_->read(datum)) {
       return slot;
