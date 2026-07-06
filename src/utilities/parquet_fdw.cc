@@ -111,33 +111,31 @@ pgiceberg::Status ValidateFileOptions(const FileOptions& options,
   return pgiceberg::Ok();
 }
 
-void ValidateUtilityOptions(PG_FUNCTION_ARGS, const char* fdw_name) {
-  pgiceberg::PgStatusGuard([&]() -> pgiceberg::Status {
-    List* options = untransformRelOptions(PG_GETARG_DATUM(0));
-    Oid catalog = PG_GETARG_OID(1);
-    FileOptions parsed_options;
+pgiceberg::Status ValidateUtilityOptions(Datum raw_options, Oid catalog,
+                                         const char* fdw_name) {
+  List* options = untransformRelOptions(raw_options);
+  FileOptions parsed_options;
 
-    ListCell* cell = nullptr;
-    foreach (cell, options) {
-      auto* def = static_cast<DefElem*>(lfirst(cell));
-      const bool valid_option = (catalog == ForeignTableRelationId &&
-                                 std::strcmp(def->defname, "filename") == 0) ||
-                                (catalog == ForeignServerRelationId &&
-                                 std::strcmp(def->defname, "dirname") == 0);
-      if (!valid_option) {
-        return std::unexpected(pgiceberg::MakeError(
-            ERRCODE_FDW_INVALID_OPTION_NAME,
-            std::string("invalid ") + fdw_name + " option \"" + def->defname + "\"",
-            "Valid options are: dirname on servers, filename on foreign tables."));
-      }
-      ApplyOption(parsed_options, def);
+  ListCell* cell = nullptr;
+  foreach (cell, options) {
+    auto* def = static_cast<DefElem*>(lfirst(cell));
+    const bool valid_option =
+        (catalog == ForeignTableRelationId &&
+         std::strcmp(def->defname, "filename") == 0) ||
+        (catalog == ForeignServerRelationId && std::strcmp(def->defname, "dirname") == 0);
+    if (!valid_option) {
+      return std::unexpected(pgiceberg::MakeError(
+          ERRCODE_FDW_INVALID_OPTION_NAME,
+          std::string("invalid ") + fdw_name + " option \"" + def->defname + "\"",
+          "Valid options are: dirname on servers, filename on foreign tables."));
     }
+    ApplyOption(parsed_options, def);
+  }
 
-    if (catalog == ForeignTableRelationId) {
-      PGICEBERG_RETURN_NOT_OK(ValidateFileOptions(parsed_options, fdw_name));
-    }
-    return pgiceberg::Ok();
-  });
+  if (catalog == ForeignTableRelationId) {
+    PGICEBERG_RETURN_NOT_OK(ValidateFileOptions(parsed_options, fdw_name));
+  }
+  return pgiceberg::Ok();
 }
 
 bool ImportFilterMatches(ImportForeignSchemaStmt* stmt, const std::string& table_name) {
@@ -494,6 +492,20 @@ List* ImportForeignSchema(ImportForeignSchemaStmt* stmt, Oid server_oid) {
       [&]() { return ImportForeignSchemaImpl(stmt, server_oid); });
 }
 
+pgiceberg::Result<Datum> ParquetFdwHandlerImpl() {
+  FdwRoutine* routine = makeNode(FdwRoutine);
+  routine->GetForeignRelSize = GetForeignRelSize;
+  routine->GetForeignPaths = GetForeignPaths;
+  routine->GetForeignPlan = GetForeignPlan;
+  routine->BeginForeignScan = BeginForeignScan;
+  routine->IterateForeignScan = IterateForeignScan;
+  routine->ReScanForeignScan = ReScanForeignScan;
+  routine->EndForeignScan = EndForeignScan;
+  routine->IsForeignRelUpdatable = IsForeignRelUpdatable;
+  routine->ImportForeignSchema = ImportForeignSchema;
+  return PointerGetDatum(routine);
+}
+
 }  // namespace
 
 extern "C" {
@@ -501,23 +513,15 @@ PG_FUNCTION_INFO_V1(pgiceberg_parquet_fdw_handler);
 PG_FUNCTION_INFO_V1(pgiceberg_parquet_fdw_validator);
 
 Datum pgiceberg_parquet_fdw_handler(PG_FUNCTION_ARGS) {
-  return pgiceberg::PgGuard([]() -> Datum {
-    FdwRoutine* routine = makeNode(FdwRoutine);
-    routine->GetForeignRelSize = GetForeignRelSize;
-    routine->GetForeignPaths = GetForeignPaths;
-    routine->GetForeignPlan = GetForeignPlan;
-    routine->BeginForeignScan = BeginForeignScan;
-    routine->IterateForeignScan = IterateForeignScan;
-    routine->ReScanForeignScan = ReScanForeignScan;
-    routine->EndForeignScan = EndForeignScan;
-    routine->IsForeignRelUpdatable = IsForeignRelUpdatable;
-    routine->ImportForeignSchema = ImportForeignSchema;
-    PG_RETURN_POINTER(routine);
-  });
+  return pgiceberg::PgResultGuard([]() { return ParquetFdwHandlerImpl(); });
 }
 
 Datum pgiceberg_parquet_fdw_validator(PG_FUNCTION_ARGS) {
-  ValidateUtilityOptions(fcinfo, "pgiceberg_parquet");
+  Datum raw_options = PG_GETARG_DATUM(0);
+  Oid catalog = PG_GETARG_OID(1);
+  pgiceberg::PgStatusGuard([=]() {
+    return ValidateUtilityOptions(raw_options, catalog, "pgiceberg_parquet");
+  });
   PG_RETURN_VOID();
 }
 
