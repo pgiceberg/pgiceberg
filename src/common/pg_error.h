@@ -20,7 +20,6 @@
 
 extern "C" {
 #include "postgres.h"
-#include "fmgr.h"
 #include "utils/elog.h"
 #include "utils/errcodes.h"
 }
@@ -88,11 +87,6 @@ inline PgErrorReportData CopyErrorForReport(const PgError& error) noexcept {
 
 }  // namespace detail
 
-[[noreturn]] inline void ReportError(const PgError& error) {
-  const detail::PgErrorReportData report = detail::CopyErrorForReport(error);
-  detail::ReportErrorData(report);
-}
-
 [[noreturn]] inline void ReportCurrentException() {
   detail::PgErrorReportData report;
   try {
@@ -107,17 +101,6 @@ inline PgErrorReportData CopyErrorForReport(const PgError& error) noexcept {
   }
 
   detail::ReportErrorData(report);
-}
-
-template <typename Fn>
-Datum PgGuard(Fn&& fn) {
-  try {
-    return fn();
-  } catch (...) {
-    ReportCurrentException();
-  }
-
-  return static_cast<Datum>(0);
 }
 
 template <typename Fn>

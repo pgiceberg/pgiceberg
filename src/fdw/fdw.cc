@@ -298,6 +298,52 @@ List* PgIcebergImportForeignSchema(ImportForeignSchemaStmt* stmt, Oid server_oid
       [&]() { return PgIcebergImportForeignSchemaImpl(stmt, server_oid); });
 }
 
+pgiceberg::Result<Datum> PgIcebergFdwHandlerImpl() {
+  EnsureIcebergRegistrations();
+  FdwRoutine* routine = makeNode(FdwRoutine);
+  routine->GetForeignRelSize = PgIcebergGetForeignRelSize;
+  routine->GetForeignPaths = PgIcebergGetForeignPaths;
+  routine->GetForeignPlan = PgIcebergGetForeignPlan;
+  routine->BeginForeignScan = PgIcebergBeginForeignScan;
+  routine->IterateForeignScan = PgIcebergIterateForeignScan;
+  routine->ReScanForeignScan = PgIcebergReScanForeignScan;
+  routine->EndForeignScan = PgIcebergEndForeignScan;
+  routine->AddForeignUpdateTargets = PgIcebergAddForeignUpdateTargets;
+  routine->PlanForeignModify = PgIcebergPlanForeignModify;
+  routine->BeginForeignModify = PgIcebergBeginForeignModify;
+  routine->ExecForeignInsert = PgIcebergExecForeignInsert;
+  routine->ExecForeignUpdate = PgIcebergExecForeignUpdate;
+  routine->ExecForeignDelete = PgIcebergExecForeignDelete;
+  routine->EndForeignModify = PgIcebergEndForeignModify;
+  routine->IsForeignRelUpdatable = PgIcebergIsForeignRelUpdatable;
+  routine->ImportForeignSchema = PgIcebergImportForeignSchema;
+  return PointerGetDatum(routine);
+}
+
+pgiceberg::Status PgIcebergFdwValidatorImpl(Datum raw_options) {
+  List* options = untransformRelOptions(raw_options);
+  ListCell* cell = nullptr;
+  pgiceberg::fdw::Options parsed_options;
+
+  foreach (cell, options) {
+    DefElem* def = static_cast<DefElem*>(lfirst(cell));
+    if (!pgiceberg::fdw::IsValidOption(def->defname)) {
+      const std::string valid_options = pgiceberg::fdw::ValidOptionsText();
+      return std::unexpected(pgiceberg::MakeError(
+          ERRCODE_FDW_INVALID_OPTION_NAME,
+          std::string("invalid pgiceberg option \"") + def->defname + "\"",
+          std::string("Valid options are: ") + valid_options + "."));
+    }
+
+    if (std::strcmp(def->defname, "catalog_type") == 0) {
+      PGICEBERG_RETURN_NOT_OK(pgiceberg::fdw::ValidateCatalogType(defGetString(def)));
+    }
+    pgiceberg::fdw::ApplyOption(parsed_options, def);
+  }
+
+  return pgiceberg::Ok();
+}
+
 }  // namespace
 
 extern "C" {
@@ -305,53 +351,12 @@ PG_FUNCTION_INFO_V1(pgiceberg_fdw_handler);
 PG_FUNCTION_INFO_V1(pgiceberg_fdw_validator);
 
 Datum pgiceberg_fdw_handler(PG_FUNCTION_ARGS) {
-  return pgiceberg::PgGuard([]() -> Datum {
-    EnsureIcebergRegistrations();
-    FdwRoutine* routine = makeNode(FdwRoutine);
-    routine->GetForeignRelSize = PgIcebergGetForeignRelSize;
-    routine->GetForeignPaths = PgIcebergGetForeignPaths;
-    routine->GetForeignPlan = PgIcebergGetForeignPlan;
-    routine->BeginForeignScan = PgIcebergBeginForeignScan;
-    routine->IterateForeignScan = PgIcebergIterateForeignScan;
-    routine->ReScanForeignScan = PgIcebergReScanForeignScan;
-    routine->EndForeignScan = PgIcebergEndForeignScan;
-    routine->AddForeignUpdateTargets = PgIcebergAddForeignUpdateTargets;
-    routine->PlanForeignModify = PgIcebergPlanForeignModify;
-    routine->BeginForeignModify = PgIcebergBeginForeignModify;
-    routine->ExecForeignInsert = PgIcebergExecForeignInsert;
-    routine->ExecForeignUpdate = PgIcebergExecForeignUpdate;
-    routine->ExecForeignDelete = PgIcebergExecForeignDelete;
-    routine->EndForeignModify = PgIcebergEndForeignModify;
-    routine->IsForeignRelUpdatable = PgIcebergIsForeignRelUpdatable;
-    routine->ImportForeignSchema = PgIcebergImportForeignSchema;
-    PG_RETURN_POINTER(routine);
-  });
+  return pgiceberg::PgResultGuard([]() { return PgIcebergFdwHandlerImpl(); });
 }
 
 Datum pgiceberg_fdw_validator(PG_FUNCTION_ARGS) {
-  pgiceberg::PgStatusGuard([&]() -> pgiceberg::Status {
-    List* options = untransformRelOptions(PG_GETARG_DATUM(0));
-    ListCell* cell = nullptr;
-    pgiceberg::fdw::Options parsed_options;
-
-    foreach (cell, options) {
-      DefElem* def = static_cast<DefElem*>(lfirst(cell));
-      if (!pgiceberg::fdw::IsValidOption(def->defname)) {
-        const std::string valid_options = pgiceberg::fdw::ValidOptionsText();
-        return std::unexpected(pgiceberg::MakeError(
-            ERRCODE_FDW_INVALID_OPTION_NAME,
-            std::string("invalid pgiceberg option \"") + def->defname + "\"",
-            std::string("Valid options are: ") + valid_options + "."));
-      }
-
-      if (std::strcmp(def->defname, "catalog_type") == 0) {
-        PGICEBERG_RETURN_NOT_OK(pgiceberg::fdw::ValidateCatalogType(defGetString(def)));
-      }
-      pgiceberg::fdw::ApplyOption(parsed_options, def);
-    }
-
-    return pgiceberg::Ok();
-  });
+  Datum raw_options = PG_GETARG_DATUM(0);
+  pgiceberg::PgStatusGuard([=]() { return PgIcebergFdwValidatorImpl(raw_options); });
   PG_RETURN_VOID();
 }
 
