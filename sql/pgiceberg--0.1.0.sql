@@ -138,6 +138,8 @@ SET search_path = pg_catalog, pgiceberg
 COMMENT ON FUNCTION pgiceberg.create_table(text, text, text, text[], regtype[], boolean[], boolean, integer) IS
   'Create an Iceberg table through a registered pgiceberg catalog name.';
 
+REVOKE EXECUTE ON FUNCTION pgiceberg.create_table(text, text, text, text[], regtype[], boolean[], boolean, integer) FROM PUBLIC;
+
 CREATE FUNCTION pgiceberg.register_table(
   name text,
   namespace text,
@@ -153,6 +155,8 @@ SET search_path = pg_catalog, pgiceberg
 
 COMMENT ON FUNCTION pgiceberg.register_table(text, text, text, text, boolean) IS
   'Register an existing Iceberg metadata file as a table through a registered pgiceberg catalog name.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.register_table(text, text, text, text, boolean) FROM PUBLIC;
 
 CREATE FUNCTION pgiceberg.register_table_from_location(
   name text,
@@ -194,6 +198,8 @@ $$;
 
 COMMENT ON FUNCTION pgiceberg.register_table_from_location(text, text, text, text, boolean) IS
   'Register an existing Iceberg table by finding the latest metadata JSON under a table location.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.register_table_from_location(text, text, text, text, boolean) FROM PUBLIC;
 
 -- Metadata inspection helpers.
 CREATE FUNCTION pgiceberg.metadata_file_json(

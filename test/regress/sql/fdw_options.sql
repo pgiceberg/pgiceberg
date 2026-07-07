@@ -70,6 +70,42 @@ WHERE metadata_file LIKE '00000-%.metadata.json'
 ORDER BY metadata_file
 LIMIT 1;
 
+CREATE ROLE pgiceberg_no_lifecycle;
+GRANT USAGE ON SCHEMA pgiceberg TO pgiceberg_no_lifecycle;
+
+SET ROLE pgiceberg_no_lifecycle;
+
+SELECT pgiceberg.create_table(
+  'format_regress',
+  'default',
+  'unauthorized_create',
+  ARRAY['id'],
+  ARRAY['bigint'::regtype],
+  ARRAY[true],
+  true
+);
+
+SELECT pgiceberg.register_table(
+  'format_regress',
+  'default',
+  'unauthorized_register',
+  '/tmp/pgiceberg_warehouse_format_regress/default/format_v3/metadata/00000-does-not-matter.metadata.json',
+  true
+);
+
+SELECT pgiceberg.register_table_from_location(
+  'format_regress',
+  'default',
+  'unauthorized_register_from_location',
+  '/tmp/pgiceberg_warehouse_format_regress/default/format_v3',
+  true
+);
+
+RESET ROLE;
+
+DROP OWNED BY pgiceberg_no_lifecycle;
+DROP ROLE pgiceberg_no_lifecycle;
+
 SELECT pgiceberg.create_table(
   'format_regress',
   'default',
