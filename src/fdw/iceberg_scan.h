@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <arrow/record_batch.h>
@@ -32,7 +33,9 @@ namespace pgiceberg::fdw {
 
 class IcebergScanCursor {
  public:
-  explicit IcebergScanCursor(std::shared_ptr<iceberg::Table> table);
+  explicit IcebergScanCursor(
+      std::shared_ptr<iceberg::Table> table,
+      std::optional<std::vector<std::string>> selected_columns = std::nullopt);
   ~IcebergScanCursor();
 
   IcebergScanCursor(const IcebergScanCursor&) = delete;
@@ -51,6 +54,7 @@ class IcebergScanCursor {
   Result<bool> OpenCurrentTask();
 
   std::shared_ptr<iceberg::Table> table_;
+  std::optional<std::vector<std::string>> selected_columns_;
   std::shared_ptr<arrow::Schema> arrow_schema_;
   std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks_;
   std::vector<std::shared_ptr<iceberg::DataFile>> data_files_;

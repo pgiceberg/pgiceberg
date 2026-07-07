@@ -19,6 +19,7 @@ add_library(pgiceberg MODULE
             fdw/iceberg_scan.cc
             fdw/modify_state.cc
             fdw/options.cc
+            fdw/scan_projection.cc
             fdw/scan_state.cc
             functions/create_table.cc
             functions/metadata.cc

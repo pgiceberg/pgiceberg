@@ -25,6 +25,7 @@
 #include "common/pg_error.h"
 #include "common/pg_interrupt.h"
 #include "common/status.h"
+#include "fdw/scan_projection.h"
 
 extern "C" {
 #include "postgres.h"
@@ -339,8 +340,10 @@ pgiceberg::Result<Datum> ConvertAvroValue(const avro::GenericDatum& datum, Oid p
 
 class AvroCursor final {
  public:
-  AvroCursor(std::string filename, TupleDesc desc)
-      : filename_(std::move(filename)), desc_(desc) {}
+  AvroCursor(std::string filename, TupleDesc desc, std::vector<int> projected_attnums)
+      : filename_(std::move(filename)),
+        desc_(desc),
+        projected_attnums_(std::move(projected_attnums)) {}
 
   pgiceberg::Status Init() { return Open(); }
   pgiceberg::Status ReScan() { return Open(); }
@@ -394,7 +397,11 @@ class AvroCursor final {
 
     columns_.clear();
     columns_.resize(desc_->natts);
-    for (int i = 0; i < desc_->natts; i++) {
+    for (const auto attnum : projected_attnums_) {
+      if (attnum <= 0 || attnum > desc_->natts) {
+        continue;
+      }
+      const int i = attnum - 1;
       Form_pg_attribute attr = TupleDescAttr(desc_, i);
       if (attr->attisdropped) {
         continue;
@@ -413,6 +420,7 @@ class AvroCursor final {
 
   std::string filename_;
   TupleDesc desc_;
+  std::vector<int> projected_attnums_;
   std::unique_ptr<avro::DataFileReader<avro::GenericDatum>> reader_;
   avro::NodePtr root_;
   std::vector<ColumnState> columns_;
@@ -465,7 +473,9 @@ void GetForeignPaths(PlannerInfo* root, RelOptInfo* baserel, Oid) {
 ForeignScan* GetForeignPlan(PlannerInfo*, RelOptInfo* baserel, Oid, ForeignPath*,
                             List* tlist, List* scan_clauses, Plan* outer_plan) {
   scan_clauses = extract_actual_clauses(scan_clauses, false);
-  return make_foreignscan(tlist, scan_clauses, baserel->relid, NIL, NIL, NIL, NIL,
+  auto* fdw_private =
+      pgiceberg::fdw::BuildFdwScanProjectionPrivate(baserel, tlist, scan_clauses);
+  return make_foreignscan(tlist, scan_clauses, baserel->relid, NIL, fdw_private, NIL, NIL,
                           outer_plan);
 }
 
@@ -481,8 +491,10 @@ pgiceberg::Status BeginForeignScanImpl(ForeignScanState* node, int eflags) {
   PGICEBERG_RETURN_NOT_OK(ValidateFileOptions(options, "pgiceberg_avro"));
 
   auto state = std::make_unique<AvroScanState>();
+  auto* plan = castNode(ForeignScan, node->ss.ps.plan);
   auto cursor =
-      std::make_unique<AvroCursor>(options.filename, RelationGetDescr(relation));
+      std::make_unique<AvroCursor>(options.filename, RelationGetDescr(relation),
+                                   pgiceberg::fdw::FdwScanProjectionFromPlan(plan));
   PGICEBERG_RETURN_NOT_OK(cursor->Init());
   state->cursor = std::move(cursor);
 

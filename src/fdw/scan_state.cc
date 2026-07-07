@@ -14,6 +14,8 @@
 
 #include <memory>
 #include <optional>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <arrow/array.h>
@@ -76,6 +78,26 @@ Result<bool> LoadNextBatch(ScanState* state) {
 
 }  // namespace
 
+std::vector<std::string> ProjectedColumnNames(TupleDesc desc,
+                                              const std::vector<int>& attnums) {
+  std::vector<std::string> names;
+  names.reserve(attnums.size());
+  for (const auto attnum : attnums) {
+    if (attnum <= 0 || attnum > desc->natts) {
+      continue;
+    }
+    Form_pg_attribute attr = TupleDescAttr(desc, attnum - 1);
+    if (!attr->attisdropped) {
+      names.emplace_back(NameStr(attr->attname));
+    }
+  }
+  return names;
+}
+
+std::unordered_set<int> ProjectedAttributeSet(const std::vector<int>& attnums) {
+  return std::unordered_set<int>(attnums.begin(), attnums.end());
+}
+
 void DeleteScanState(void* arg) { delete static_cast<ScanState*>(arg); }
 
 void RegisterMemoryContextCleanup(ScanState* state) {
@@ -94,7 +116,8 @@ void DetachMemoryContextCleanup(ScanState* state) {
   }
 }
 
-Result<ScanState*> BeginScan(Relation relation, const Options& options) {
+Result<ScanState*> BeginScan(Relation relation, const Options& options,
+                             const std::vector<int>& projected_attnums) {
   auto state = std::make_unique<ScanState>();
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -105,14 +128,16 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options) {
   // read-your-writes rule than PostgreSQL users expect.
   PGICEBERG_ASSIGN_OR_RETURN(state->table,
                              ReadTableForCurrentTransaction(options, state->table));
-  state->cursor = std::make_unique<IcebergScanCursor>(state->table);
+  TupleDesc desc = RelationGetDescr(relation);
+  state->cursor = std::make_unique<IcebergScanCursor>(
+      state->table, ProjectedColumnNames(desc, projected_attnums));
   PGICEBERG_RETURN_NOT_OK(state->cursor->Init());
 
-  TupleDesc desc = RelationGetDescr(relation);
+  auto projected = ProjectedAttributeSet(projected_attnums);
   state->columns.resize(desc->natts);
   for (int i = 0; i < desc->natts; i++) {
     Form_pg_attribute attr = TupleDescAttr(desc, i);
-    if (attr->attisdropped) {
+    if (attr->attisdropped || !projected.contains(i + 1)) {
       continue;
     }
     const int column_index =
@@ -120,7 +145,7 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options) {
     if (column_index < 0) {
       return std::unexpected(
           MakeError(ERRCODE_FDW_ERROR, std::string("column \"") + NameStr(attr->attname) +
-                                           "\" does not exist in Parquet file"));
+                                           "\" does not exist in Iceberg table"));
     }
     state->columns[i] = ColumnState{.batch_column_index = column_index};
   }

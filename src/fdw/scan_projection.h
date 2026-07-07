@@ -14,21 +14,18 @@
 
 #include <vector>
 
-#include "common/status.h"
-#include "fdw/options.h"
+extern "C" {
+#include "postgres.h"
+#include "nodes/pg_list.h"
+}
 
-struct RelationData;
-using Relation = RelationData*;
-struct TupleTableSlot;
+struct ForeignScan;
+struct RelOptInfo;
 
 namespace pgiceberg::fdw {
 
-struct ScanState;
-
-Result<ScanState*> BeginScan(Relation relation, const Options& options,
-                             const std::vector<int>& projected_attnums);
-Result<TupleTableSlot*> IterateScan(ScanState* state, TupleTableSlot* slot);
-void ReScan(ScanState* state);
-void EndScan(ScanState* state);
+List* BuildFdwScanProjectionPrivate(RelOptInfo* baserel, List* target_list,
+                                    List* scan_clauses);
+std::vector<int> FdwScanProjectionFromPlan(const ForeignScan* plan);
 
 }  // namespace pgiceberg::fdw

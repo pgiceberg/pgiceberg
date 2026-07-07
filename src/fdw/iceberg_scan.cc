@@ -17,6 +17,7 @@
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/file_scan_task_reader.h>
+#include <iceberg/schema.h>
 #include <iceberg/schema_internal.h>
 #include <iceberg/table.h>
 #include <iceberg/table_scan.h>
@@ -37,13 +38,14 @@ Result<std::shared_ptr<arrow::Schema>> ArrowSchemaFor(const iceberg::Schema& sch
 
 }  // namespace
 
-IcebergScanCursor::IcebergScanCursor(std::shared_ptr<iceberg::Table> table)
-    : table_(std::move(table)) {}
+IcebergScanCursor::IcebergScanCursor(
+    std::shared_ptr<iceberg::Table> table,
+    std::optional<std::vector<std::string>> selected_columns)
+    : table_(std::move(table)), selected_columns_(std::move(selected_columns)) {}
 
 Status IcebergScanCursor::Init() {
   PGICEBERG_ASSIGN_OR_RETURN(auto schema,
                              FromIcebergResult(table_->schema(), "load schema"));
-  PGICEBERG_ASSIGN_OR_RETURN(arrow_schema_, ArrowSchemaFor(*schema));
 
   std::vector<std::shared_ptr<iceberg::Schema>> schemas;
   auto all_schemas = table_->schemas();
@@ -55,8 +57,18 @@ Status IcebergScanCursor::Init() {
 
   PGICEBERG_ASSIGN_OR_RETURN(auto scan_builder,
                              FromIcebergResult(table_->NewScan(), "create table scan"));
+  if (selected_columns_.has_value()) {
+    if (selected_columns_->empty()) {
+      scan_builder->Project(iceberg::Schema::EmptySchema());
+    } else {
+      scan_builder->Select(*selected_columns_);
+    }
+  }
   PGICEBERG_ASSIGN_OR_RETURN(
       auto scan, FromIcebergResult(scan_builder->Build(), "build table scan"));
+  PGICEBERG_ASSIGN_OR_RETURN(auto projected_schema,
+                             FromIcebergResult(scan->schema(), "load scan schema"));
+  PGICEBERG_ASSIGN_OR_RETURN(arrow_schema_, ArrowSchemaFor(*projected_schema));
   PGICEBERG_ASSIGN_OR_RETURN(tasks_,
                              FromIcebergResult(scan->PlanFiles(), "plan scan files"));
 
@@ -69,7 +81,7 @@ Status IcebergScanCursor::Init() {
       .io = table_->io(),
       .table_schema = schema,
       .schemas = std::move(schemas),
-      .projected_schema = schema,
+      .projected_schema = std::move(projected_schema),
       .properties = table_->properties().configs(),
   });
   PGICEBERG_ASSIGN_OR_RETURN(
