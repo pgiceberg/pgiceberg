@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,11 +22,14 @@
 #include <arrow/api.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/metadata.h>
+#include <parquet/schema.h>
 
 #include "common/datum_convert.h"
 #include "common/pg_error.h"
 #include "common/pg_interrupt.h"
 #include "common/status.h"
+#include "fdw/scan_projection.h"
 
 extern "C" {
 #include "postgres.h"
@@ -223,8 +227,10 @@ pgiceberg::Result<std::shared_ptr<arrow::Schema>> ReadParquetSchema(
 
 class ParquetCursor final {
  public:
-  ParquetCursor(std::string filename, TupleDesc desc)
-      : filename_(std::move(filename)), desc_(desc) {}
+  ParquetCursor(std::string filename, TupleDesc desc, std::vector<int> projected_attnums)
+      : filename_(std::move(filename)),
+        desc_(desc),
+        projected_attnums_(std::move(projected_attnums)) {}
 
   pgiceberg::Status Init() { return Open(); }
   pgiceberg::Status ReScan() { return Open(); }
@@ -269,13 +275,28 @@ class ParquetCursor final {
     std::shared_ptr<arrow::Schema> schema;
     PGICEBERG_RETURN_NOT_OK(
         pgiceberg::FromArrowStatus(reader_->GetSchema(&schema), "read Parquet schema"));
-    PGICEBERG_ASSIGN_OR_RETURN(batch_reader_,
-                               pgiceberg::FromArrowResult(reader_->GetRecordBatchReader(),
-                                                          "create Parquet batch reader"));
+
+    // GetRecordBatchReader() takes Parquet leaf-column indices, not top-level
+    // field indices, and the two only coincide for flat schemas.  Group the
+    // leaves under their root field so top-level selections stay correct when
+    // the file also contains nested columns.
+    const auto* parquet_schema = reader_->parquet_reader()->metadata()->schema();
+    const auto* root_group = parquet_schema->group_node();
+    std::vector<std::vector<int>> field_leaves(root_group->field_count());
+    for (int leaf = 0; leaf < parquet_schema->num_columns(); leaf++) {
+      const int root_field = root_group->FieldIndex(*parquet_schema->GetColumnRoot(leaf));
+      field_leaves[root_field].push_back(leaf);
+    }
 
     columns_.clear();
     columns_.resize(desc_->natts);
-    for (int i = 0; i < desc_->natts; i++) {
+    std::vector<int> column_indices;
+    int selected_fields = 0;
+    for (const auto attnum : projected_attnums_) {
+      if (attnum <= 0 || attnum > desc_->natts) {
+        continue;
+      }
+      const int i = attnum - 1;
       Form_pg_attribute attr = TupleDescAttr(desc_, i);
       if (attr->attisdropped) {
         continue;
@@ -286,8 +307,19 @@ class ParquetCursor final {
             ERRCODE_FDW_ERROR, std::string("column \"") + NameStr(attr->attname) +
                                    "\" does not exist in Parquet file"));
       }
-      columns_[i] = ColumnState{.field_index = field_index};
+      // The reader emits one batch column per selected root field, ordered by
+      // first appearance in column_indices, so count fields rather than leaves.
+      columns_[i] = ColumnState{.field_index = selected_fields++};
+      column_indices.insert(column_indices.end(), field_leaves[field_index].begin(),
+                            field_leaves[field_index].end());
     }
+
+    std::vector<int> row_groups(reader_->num_row_groups());
+    std::iota(row_groups.begin(), row_groups.end(), 0);
+    PGICEBERG_ASSIGN_OR_RETURN(
+        batch_reader_, pgiceberg::FromArrowResult(
+                           reader_->GetRecordBatchReader(row_groups, column_indices),
+                           "create Parquet batch reader"));
 
     batch_.reset();
     row_ = 0;
@@ -312,6 +344,7 @@ class ParquetCursor final {
 
   std::string filename_;
   TupleDesc desc_;
+  std::vector<int> projected_attnums_;
   std::unique_ptr<parquet::arrow::FileReader> reader_;
   std::unique_ptr<arrow::RecordBatchReader> batch_reader_;
   std::shared_ptr<arrow::RecordBatch> batch_;
@@ -342,7 +375,26 @@ void DetachMemoryContextCleanup(ParquetScanState* state) {
   }
 }
 
-void GetForeignRelSize(PlannerInfo*, RelOptInfo* baserel, Oid) { baserel->rows = 1000; }
+pgiceberg::Status GetForeignRelSizeImpl(RelOptInfo* baserel, Oid relation_oid) {
+  baserel->rows = 1000;
+  auto options = OptionsForForeignTable(relation_oid);
+  PGICEBERG_RETURN_NOT_OK(ValidateFileOptions(options, "pgiceberg_parquet"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto input,
+      pgiceberg::FromArrowResult(arrow::io::ReadableFile::Open(options.filename),
+                                 "open Parquet file"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto reader, pgiceberg::FromArrowResult(
+                       parquet::arrow::OpenFile(input, arrow::default_memory_pool()),
+                       "open Parquet reader"));
+  baserel->rows = static_cast<double>(reader->parquet_reader()->metadata()->num_rows());
+  return pgiceberg::Ok();
+}
+
+void GetForeignRelSize(PlannerInfo*, RelOptInfo* baserel, Oid relation_oid) {
+  pgiceberg::PgStatusGuard(
+      [&]() { return GetForeignRelSizeImpl(baserel, relation_oid); });
+}
 
 ForeignPath* CreateForeignScanPath(PlannerInfo* root, RelOptInfo* baserel) {
   const auto rows = baserel->rows;
@@ -366,7 +418,9 @@ void GetForeignPaths(PlannerInfo* root, RelOptInfo* baserel, Oid) {
 ForeignScan* GetForeignPlan(PlannerInfo*, RelOptInfo* baserel, Oid, ForeignPath*,
                             List* tlist, List* scan_clauses, Plan* outer_plan) {
   scan_clauses = extract_actual_clauses(scan_clauses, false);
-  return make_foreignscan(tlist, scan_clauses, baserel->relid, NIL, NIL, NIL, NIL,
+  auto* fdw_private =
+      pgiceberg::fdw::BuildFdwScanProjectionPrivate(baserel, tlist, scan_clauses);
+  return make_foreignscan(tlist, scan_clauses, baserel->relid, NIL, fdw_private, NIL, NIL,
                           outer_plan);
 }
 
@@ -382,8 +436,10 @@ pgiceberg::Status BeginForeignScanImpl(ForeignScanState* node, int eflags) {
   PGICEBERG_RETURN_NOT_OK(ValidateFileOptions(options, "pgiceberg_parquet"));
 
   auto state = std::make_unique<ParquetScanState>();
+  auto* plan = castNode(ForeignScan, node->ss.ps.plan);
   auto cursor =
-      std::make_unique<ParquetCursor>(options.filename, RelationGetDescr(relation));
+      std::make_unique<ParquetCursor>(options.filename, RelationGetDescr(relation),
+                                      pgiceberg::fdw::FdwScanProjectionFromPlan(plan));
   PGICEBERG_RETURN_NOT_OK(cursor->Init());
   state->cursor = std::move(cursor);
 

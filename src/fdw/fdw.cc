@@ -13,12 +13,14 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 
 #include <iceberg/arrow/arrow_register.h>
 #include <iceberg/avro/avro_register.h>
 #include <iceberg/parquet/parquet_register.h>
 #include <iceberg/schema.h>
+#include <iceberg/snapshot.h>
 #include <iceberg/table.h>
 #include <iceberg/type.h>
 
@@ -26,6 +28,7 @@
 #include "common/type_mapping.h"
 #include "fdw/modify_state.h"
 #include "fdw/options.h"
+#include "fdw/scan_projection.h"
 #include "fdw/scan_state.h"
 
 extern "C" {
@@ -47,6 +50,7 @@ extern "C" {
 #include "optimizer/restrictinfo.h"
 #include "utils/builtins.h"
 #include "utils/errcodes.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 }
 
@@ -67,8 +71,41 @@ void EnsureIcebergRegistrations() {
   (void)registered;
 }
 
-void PgIcebergGetForeignRelSize(PlannerInfo*, RelOptInfo* baserel, Oid) {
+pgiceberg::Status PgIcebergGetForeignRelSizeImpl(RelOptInfo* baserel, Oid relation_oid) {
   baserel->rows = 1000;
+  auto options =
+      pgiceberg::fdw::OptionsForForeignTable(relation_oid, get_rel_name(relation_oid));
+  if (options.catalog.empty()) {
+    return pgiceberg::Ok();
+  }
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options,
+                             pgiceberg::fdw::ToCatalogOptions(options));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto table, pgiceberg::LoadIcebergTable(catalog_options, options.table.c_str()));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      table, pgiceberg::fdw::ReadTableForCurrentTransaction(options, table));
+  auto snapshot_result =
+      pgiceberg::FromIcebergResult(table->current_snapshot(), "load current snapshot");
+  if (!snapshot_result.has_value()) {
+    return pgiceberg::Ok();
+  }
+  const auto& snapshot = *snapshot_result;
+  auto total_records =
+      snapshot->summary.find(iceberg::SnapshotSummaryFields::kTotalRecords);
+  if (total_records == snapshot->summary.end()) {
+    return pgiceberg::Ok();
+  }
+  char* end = nullptr;
+  const double rows = std::strtod(total_records->second.c_str(), &end);
+  if (end != total_records->second.c_str() && rows >= 0) {
+    baserel->rows = rows;
+  }
+  return pgiceberg::Ok();
+}
+
+void PgIcebergGetForeignRelSize(PlannerInfo*, RelOptInfo* baserel, Oid relation_oid) {
+  pgiceberg::PgStatusGuard(
+      [&]() { return PgIcebergGetForeignRelSizeImpl(baserel, relation_oid); });
 }
 
 ForeignPath* CreateIcebergForeignScanPath(PlannerInfo* root, RelOptInfo* baserel) {
@@ -97,7 +134,9 @@ void PgIcebergGetForeignPaths(PlannerInfo* root, RelOptInfo* baserel, Oid) {
 ForeignScan* PgIcebergGetForeignPlan(PlannerInfo*, RelOptInfo* baserel, Oid, ForeignPath*,
                                      List* tlist, List* scan_clauses, Plan* outer_plan) {
   scan_clauses = extract_actual_clauses(scan_clauses, false);
-  return make_foreignscan(tlist, scan_clauses, baserel->relid, NIL, NIL, NIL, NIL,
+  auto* fdw_private =
+      pgiceberg::fdw::BuildFdwScanProjectionPrivate(baserel, tlist, scan_clauses);
+  return make_foreignscan(tlist, scan_clauses, baserel->relid, NIL, fdw_private, NIL, NIL,
                           outer_plan);
 }
 
@@ -113,7 +152,10 @@ pgiceberg::Status PgIcebergBeginForeignScanImpl(ForeignScanState* node, int efla
     PGICEBERG_RETURN_NOT_OK(
         pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
   }
-  PGICEBERG_ASSIGN_OR_RETURN(auto scan, pgiceberg::fdw::BeginScan(relation, options));
+  auto* plan = castNode(ForeignScan, node->ss.ps.plan);
+  auto projected_attnums = pgiceberg::fdw::FdwScanProjectionFromPlan(plan);
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto scan, pgiceberg::fdw::BeginScan(relation, options, projected_attnums));
   node->fdw_state = scan;
   return pgiceberg::Ok();
 }
