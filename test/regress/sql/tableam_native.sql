@@ -10,6 +10,9 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
+\! rm -f /tmp/pgiceberg_catalog_tableam_regress.db
+\! rm -rf /tmp/pgiceberg_warehouse_tableam_regress
+
 CREATE EXTENSION pgiceberg;
 
 \pset format unaligned
@@ -84,6 +87,43 @@ DROP TABLE native_trip;
 SELECT count(*) AS remaining_bindings
 FROM pgiceberg.table_bindings
 WHERE table_name = 'native_trip';
+
+CREATE TABLE native_trip (
+  vendorid bigint
+) USING iceberg;
+
+DROP TABLE native_trip;
+
+CREATE TABLE native_trip (
+  vendorid bigint
+) USING iceberg;
+
+DROP TABLE native_trip;
+
+BEGIN;
+CREATE TABLE rollback_trip (
+  vendorid bigint
+) USING iceberg;
+ROLLBACK;
+
+CREATE TABLE rollback_trip (
+  vendorid bigint
+) USING iceberg;
+
+ALTER TABLE rollback_trip ADD COLUMN passenger_count bigint;
+
+CREATE TABLE ctas_trip
+USING iceberg
+AS SELECT 1::bigint AS vendorid;
+
+SET default_table_access_method = iceberg;
+
+CREATE TABLE ctas_default_trip
+AS SELECT 1::bigint AS vendorid;
+
+RESET default_table_access_method;
+
+DROP TABLE rollback_trip;
 
 \set VERBOSITY default
 

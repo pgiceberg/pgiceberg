@@ -822,9 +822,9 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
 
   PGICEBERG_ASSIGN_OR_RETURN(auto builders, MakeBuilders(*arrow_schema));
   for (int i = 0; i < nslots; i++) {
-    PGICEBERG_RETURN_NOT_OK(AppendRow(
-        builders, *arrow_schema, attr_numbers,
-        CopyRowFromSlot(slots[i], tuple_desc, CurrentMemoryContext)));
+    auto row = CopyRowFromSlot(slots[i], tuple_desc, CurrentMemoryContext);
+    PGICEBERG_RETURN_NOT_OK(
+        AppendRow(builders, *arrow_schema, attr_numbers, tuple_desc, row));
   }
 
   PGICEBERG_ASSIGN_OR_RETURN(

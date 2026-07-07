@@ -98,6 +98,21 @@ struct SpiConnection {
   }
 };
 
+struct ActiveSnapshotGuard {
+  bool pushed = false;
+
+  ActiveSnapshotGuard() {
+    PushActiveSnapshot(GetTransactionSnapshot());
+    pushed = true;
+  }
+
+  ~ActiveSnapshotGuard() {
+    if (pushed) {
+      PopActiveSnapshot();
+    }
+  }
+};
+
 struct IcebergScanDesc {
   TableScanDescData base;
   pgiceberg::fdw::ScanState* state = nullptr;
@@ -110,6 +125,22 @@ struct Binding {
   std::string table_name;
   int format_version = 2;
 };
+
+enum class PendingCatalogChangeKind {
+  kCreate,
+  kDrop,
+};
+
+struct PendingCatalogChange {
+  PendingCatalogChangeKind kind = PendingCatalogChangeKind::kCreate;
+  SubTransactionId subtransaction_id = InvalidSubTransactionId;
+  Binding binding;
+};
+
+std::vector<PendingCatalogChange>& PendingCatalogChanges() {
+  static auto* changes = new std::vector<PendingCatalogChange>();
+  return *changes;
+}
 
 std::vector<std::string> SplitNamespace(const std::string& name_space) {
   std::vector<std::string> levels;
@@ -198,10 +229,17 @@ Result<std::shared_ptr<iceberg::Schema>> SchemaFromRelation(Relation relation) {
   return std::make_shared<iceberg::Schema>(std::move(fields), 1);
 }
 
+iceberg::TableIdentifier TableIdentifierForBinding(const Binding& binding) {
+  return iceberg::TableIdentifier{
+      .ns = iceberg::Namespace{.levels = SplitNamespace(binding.name_space)},
+      .name = binding.table_name};
+}
+
 Result<std::string> CreateIcebergCatalogTable(const Binding& binding, Relation relation) {
   PGICEBERG_ASSIGN_OR_RETURN(auto options, LoadCatalogOptions(binding.catalog));
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
-  iceberg::Namespace ns{.levels = SplitNamespace(binding.name_space)};
+  const auto ident = TableIdentifierForBinding(binding);
+  const auto& ns = ident.ns;
   PGICEBERG_ASSIGN_OR_RETURN(auto ns_exists,
                              FromIcebergResult(catalog->NamespaceExists(ns),
                                                "check Iceberg namespace"));
@@ -210,7 +248,6 @@ Result<std::string> CreateIcebergCatalogTable(const Binding& binding, Relation r
         FromIcebergStatus(catalog->CreateNamespace(ns, {}), "create Iceberg namespace"));
   }
 
-  iceberg::TableIdentifier ident{.ns = ns, .name = binding.table_name};
   PGICEBERG_ASSIGN_OR_RETURN(auto table_exists,
                              FromIcebergResult(catalog->TableExists(ident),
                                                "check Iceberg table"));
@@ -247,6 +284,19 @@ Result<std::string> CreateIcebergCatalogTable(const Binding& binding, Relation r
   return std::string(table->metadata_file_location());
 }
 
+Status DropIcebergCatalogTable(const Binding& binding) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto options, LoadCatalogOptions(binding.catalog));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
+  const auto ident = TableIdentifierForBinding(binding);
+  PGICEBERG_ASSIGN_OR_RETURN(auto table_exists,
+                             FromIcebergResult(catalog->TableExists(ident),
+                                               "check Iceberg table"));
+  if (!table_exists) {
+    return Ok();
+  }
+  return FromIcebergStatus(catalog->DropTable(ident, false), "drop Iceberg table");
+}
+
 Status InsertBinding(const Binding& binding, const std::string& metadata_location) {
   SpiConnection spi;
   PGICEBERG_RETURN_NOT_OK(spi.Connect());
@@ -272,27 +322,7 @@ Status InsertBinding(const Binding& binding, const std::string& metadata_locatio
   return Ok();
 }
 
-Status DeleteBindings(const std::vector<Oid>& relids) {
-  if (relids.empty()) {
-    return Ok();
-  }
-  SpiConnection spi;
-  PGICEBERG_RETURN_NOT_OK(spi.Connect());
-  for (Oid relid : relids) {
-    const char* sql = "DELETE FROM pgiceberg.table_bindings WHERE relid = $1";
-    Oid argtypes[] = {OIDOID};
-    Datum values[] = {ObjectIdGetDatum(relid)};
-    const int result = SPI_execute_with_args(sql, 1, argtypes, values, nullptr, false, 0);
-    if (result != SPI_OK_DELETE) {
-      return std::unexpected(
-          MakeError(ERRCODE_INTERNAL_ERROR, "could not delete pgiceberg table binding"));
-    }
-  }
-  return Ok();
-}
-
-Result<Binding> LoadBinding(Relation relation) {
-  const Oid relid = RelationGetRelid(relation);
+Result<Binding> LoadBinding(Oid relid) {
   SpiConnection spi;
   PGICEBERG_RETURN_NOT_OK(spi.Connect());
   const char* sql =
@@ -308,8 +338,8 @@ Result<Binding> LoadBinding(Relation relation) {
   if (SPI_processed == 0) {
     return std::unexpected(
         MakeError(ERRCODE_UNDEFINED_OBJECT,
-                  "pgiceberg table binding does not exist for relation \"" +
-                      std::string(RelationGetRelationName(relation)) + "\""));
+                  "pgiceberg table binding does not exist for relation " +
+                      std::to_string(relid)));
   }
 
   HeapTuple tuple = SPI_tuptable->vals[0];
@@ -338,6 +368,30 @@ Result<Binding> LoadBinding(Relation relation) {
   return binding;
 }
 
+Status DeleteBindings(const std::vector<Oid>& relids) {
+  if (relids.empty()) {
+    return Ok();
+  }
+  SpiConnection spi;
+  PGICEBERG_RETURN_NOT_OK(spi.Connect());
+  for (Oid relid : relids) {
+    const char* sql = "DELETE FROM pgiceberg.table_bindings WHERE relid = $1";
+    Oid argtypes[] = {OIDOID};
+    Datum values[] = {ObjectIdGetDatum(relid)};
+    const int result = SPI_execute_with_args(sql, 1, argtypes, values, nullptr, false, 0);
+    if (result != SPI_OK_DELETE) {
+      return std::unexpected(
+          MakeError(ERRCODE_INTERNAL_ERROR, "could not delete pgiceberg table binding"));
+    }
+  }
+  return Ok();
+}
+
+Result<Binding> LoadBinding(Relation relation) {
+  const Oid relid = RelationGetRelid(relation);
+  return LoadBinding(relid);
+}
+
 Result<fdw::Options> OptionsFromBinding(Relation relation) {
   PGICEBERG_ASSIGN_OR_RETURN(auto binding, LoadBinding(relation));
   fdw::Options options;
@@ -354,6 +408,16 @@ bool IsIcebergAccessMethodName(const char* access_method) {
 bool IsIcebergCreateStmt(CreateStmt* stmt) {
   if (stmt->accessMethod != nullptr) {
     return IsIcebergAccessMethodName(stmt->accessMethod);
+  }
+  return IsIcebergAccessMethodName(default_table_access_method);
+}
+
+bool IsIcebergCreateTableAsStmt(CreateTableAsStmt* stmt) {
+  if (stmt->objtype != OBJECT_TABLE || stmt->into == nullptr) {
+    return false;
+  }
+  if (stmt->into->accessMethod != nullptr) {
+    return IsIcebergAccessMethodName(stmt->into->accessMethod);
   }
   return IsIcebergAccessMethodName(default_table_access_method);
 }
@@ -391,7 +455,7 @@ void ValidateCreateStmt(CreateStmt* stmt) {
   PgStatusGuard([&]() { return ValidateFormatVersion(DefaultFormatVersion); });
 }
 
-Status FinishCreateTable(CreateStmt* stmt) {
+Status QueueCreateTable(CreateStmt* stmt) {
   Oid relid = RangeVarGetRelid(stmt->relation, NoLock, false);
   Relation relation = table_open(relid, AccessShareLock);
   struct RelationGuard {
@@ -412,10 +476,28 @@ Status FinishCreateTable(CreateStmt* stmt) {
       .table_name = RelationGetRelationName(relation),
       .format_version = DefaultFormatVersion,
   };
+  PendingCatalogChanges().push_back(PendingCatalogChange{
+      .kind = PendingCatalogChangeKind::kCreate,
+      .subtransaction_id = GetCurrentSubTransactionId(),
+      .binding = std::move(binding),
+  });
+  return Ok();
+}
+
+Status CommitCreateTable(const Binding& binding) {
+  Relation relation = table_open(binding.relid, AccessShareLock);
+  struct RelationGuard {
+    Relation relation;
+    ~RelationGuard() {
+      if (relation != nullptr) {
+        table_close(relation, AccessShareLock);
+      }
+    }
+  } relation_guard{relation};
+
   PGICEBERG_ASSIGN_OR_RETURN(auto metadata_location,
                              CreateIcebergCatalogTable(binding, relation));
-  PGICEBERG_RETURN_NOT_OK(InsertBinding(binding, metadata_location));
-  return Ok();
+  return InsertBinding(binding, metadata_location);
 }
 
 std::vector<Oid> DropRelationOids(DropStmt* stmt) {
@@ -435,6 +517,36 @@ std::vector<Oid> DropRelationOids(DropStmt* stmt) {
   return relids;
 }
 
+std::vector<Binding> LoadExistingBindings(const std::vector<Oid>& relids) {
+  std::vector<Binding> bindings;
+  for (Oid relid : relids) {
+    if (!RelationUsesIcebergTableAm(relid)) {
+      continue;
+    }
+    auto binding = PgResultGuard([&]() { return LoadBinding(relid); });
+    bindings.push_back(std::move(binding));
+  }
+  return bindings;
+}
+
+void RemovePendingCreates(const std::vector<Oid>& relids) {
+  auto& changes = PendingCatalogChanges();
+  std::erase_if(changes, [&](const PendingCatalogChange& change) {
+    return change.kind == PendingCatalogChangeKind::kCreate &&
+           std::find(relids.begin(), relids.end(), change.binding.relid) != relids.end();
+  });
+}
+
+void QueueDropTables(std::vector<Binding> bindings) {
+  for (auto& binding : bindings) {
+    PendingCatalogChanges().push_back(PendingCatalogChange{
+        .kind = PendingCatalogChangeKind::kDrop,
+        .subtransaction_id = GetCurrentSubTransactionId(),
+        .binding = std::move(binding),
+    });
+  }
+}
+
 void ValidateTruncateStmt(TruncateStmt* stmt) {
   ListCell* cell = nullptr;
   foreach (cell, stmt->relations) {
@@ -446,6 +558,84 @@ void ValidateTruncateStmt(TruncateStmt* stmt) {
   }
 }
 
+void ValidateAlterTableStmt(AlterTableStmt* stmt) {
+  if (stmt->objtype != OBJECT_TABLE || stmt->relation == nullptr) {
+    return;
+  }
+  Oid relid = RangeVarGetRelid(stmt->relation, NoLock, stmt->missing_ok);
+  if (OidIsValid(relid) && RelationUsesIcebergTableAm(relid)) {
+    ErrorUnsupported("ALTER TABLE");
+  }
+}
+
+Status CommitPendingCatalogChanges() {
+  ActiveSnapshotGuard snapshot;
+  for (const auto& change : PendingCatalogChanges()) {
+    switch (change.kind) {
+      case PendingCatalogChangeKind::kCreate:
+        PGICEBERG_RETURN_NOT_OK(CommitCreateTable(change.binding));
+        break;
+      case PendingCatalogChangeKind::kDrop:
+        PGICEBERG_RETURN_NOT_OK(DropIcebergCatalogTable(change.binding));
+        break;
+    }
+  }
+  PendingCatalogChanges().clear();
+  return Ok();
+}
+
+Status XactCallbackImpl(XactEvent event) {
+  switch (event) {
+    case XACT_EVENT_PRE_COMMIT:
+      return CommitPendingCatalogChanges();
+    case XACT_EVENT_PRE_PREPARE:
+      if (!PendingCatalogChanges().empty()) {
+        return std::unexpected(
+            MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                      "pgiceberg table access method does not support prepared transactions"));
+      }
+      break;
+    case XACT_EVENT_ABORT:
+    case XACT_EVENT_PARALLEL_ABORT:
+      PendingCatalogChanges().clear();
+      break;
+    default:
+      break;
+  }
+  return Ok();
+}
+
+void XactCallback(XactEvent event, void*) {
+  PgStatusGuard([&]() { return XactCallbackImpl(event); });
+}
+
+Status SubXactCallbackImpl(SubXactEvent event, SubTransactionId my_subid,
+                           SubTransactionId parent_subid) {
+  auto& changes = PendingCatalogChanges();
+  switch (event) {
+    case SUBXACT_EVENT_COMMIT_SUB:
+      for (auto& change : changes) {
+        if (change.subtransaction_id == my_subid) {
+          change.subtransaction_id = parent_subid;
+        }
+      }
+      break;
+    case SUBXACT_EVENT_ABORT_SUB:
+      std::erase_if(changes, [my_subid](const PendingCatalogChange& change) {
+        return change.subtransaction_id == my_subid;
+      });
+      break;
+    default:
+      break;
+  }
+  return Ok();
+}
+
+void SubXactCallback(SubXactEvent event, SubTransactionId my_subid,
+                     SubTransactionId parent_subid, void*) {
+  PgStatusGuard([&]() { return SubXactCallbackImpl(event, my_subid, parent_subid); });
+}
+
 void PgIcebergProcessUtility(PlannedStmt* pstmt, const char* query_string,
                              bool read_only_tree, ProcessUtilityContext context,
                              ParamListInfo params, QueryEnvironment* query_env,
@@ -453,14 +643,22 @@ void PgIcebergProcessUtility(PlannedStmt* pstmt, const char* query_string,
   Node* utility = pstmt->utilityStmt;
   CreateStmt* iceberg_create = nullptr;
   std::vector<Oid> drop_relids;
+  std::vector<Binding> drop_bindings;
   if (IsA(utility, CreateStmt)) {
     auto* stmt = reinterpret_cast<CreateStmt*>(utility);
     if (IsIcebergCreateStmt(stmt)) {
       ValidateCreateStmt(stmt);
       iceberg_create = stmt;
     }
+  } else if (IsA(utility, CreateTableAsStmt)) {
+    if (IsIcebergCreateTableAsStmt(reinterpret_cast<CreateTableAsStmt*>(utility))) {
+      ErrorUnsupported("CREATE TABLE AS");
+    }
+  } else if (IsA(utility, AlterTableStmt)) {
+    ValidateAlterTableStmt(reinterpret_cast<AlterTableStmt*>(utility));
   } else if (IsA(utility, DropStmt)) {
     drop_relids = DropRelationOids(reinterpret_cast<DropStmt*>(utility));
+    drop_bindings = LoadExistingBindings(drop_relids);
   } else if (IsA(utility, TruncateStmt)) {
     ValidateTruncateStmt(reinterpret_cast<TruncateStmt*>(utility));
   }
@@ -474,10 +672,12 @@ void PgIcebergProcessUtility(PlannedStmt* pstmt, const char* query_string,
   }
 
   if (iceberg_create != nullptr) {
-    PgStatusGuard([&]() { return FinishCreateTable(iceberg_create); });
+    PgStatusGuard([&]() { return QueueCreateTable(iceberg_create); });
     CommandCounterIncrement();
   }
   if (!drop_relids.empty()) {
+    RemovePendingCreates(drop_relids);
+    QueueDropTables(std::move(drop_bindings));
     PgStatusGuard([&]() { return DeleteBindings(drop_relids); });
   }
 }
@@ -643,7 +843,13 @@ void IcebergRelationVacuum(Relation, VacuumParams*, BufferAccessStrategy) {
   ErrorUnsupported("VACUUM");
 }
 
+#if PG_VERSION_NUM >= 170000
 bool IcebergScanAnalyzeNextBlock(TableScanDesc, ReadStream*) { return false; }
+#else
+bool IcebergScanAnalyzeNextBlock(TableScanDesc, BlockNumber, BufferAccessStrategy) {
+  return false;
+}
+#endif
 
 bool IcebergScanAnalyzeNextTuple(TableScanDesc, TransactionId, double*, double*,
                                  TupleTableSlot*) {
@@ -741,6 +947,8 @@ void RegisterTableAmHooks() {
                           nullptr, nullptr);
   PreviousProcessUtilityHook = ProcessUtility_hook;
   ProcessUtility_hook = PgIcebergProcessUtility;
+  RegisterXactCallback(XactCallback, nullptr);
+  RegisterSubXactCallback(SubXactCallback, nullptr);
 }
 
 }  // namespace pgiceberg::tableam
