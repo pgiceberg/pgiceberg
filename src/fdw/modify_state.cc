@@ -27,6 +27,7 @@
 #include <arrow/array.h>
 #include <arrow/array/builder_base.h>
 #include <arrow/c/bridge.h>
+#include <arrow/extension_type.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/data_writer.h>
 #include <iceberg/file_io.h>
@@ -455,18 +456,40 @@ Result<std::vector<std::unique_ptr<arrow::ArrayBuilder>>> MakeBuilders(
   std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
   builders.reserve(schema.num_fields());
   for (int i = 0; i < schema.num_fields(); i++) {
+    auto type = schema.field(i)->type();
+    if (type->id() == arrow::Type::EXTENSION) {
+      type = static_cast<const arrow::ExtensionType&>(*type).storage_type();
+    }
     PGICEBERG_ASSIGN_OR_RETURN(
-        auto builder, FromArrowResult(arrow::MakeBuilder(schema.field(i)->type(),
-                                                         arrow::default_memory_pool()),
-                                      "make Arrow builder"));
+        auto builder,
+        FromArrowResult(arrow::MakeBuilder(type, arrow::default_memory_pool()),
+                        "make Arrow builder"));
     builders.push_back(std::move(builder));
   }
   return builders;
 }
 
-Status AppendValue(arrow::ArrayBuilder& builder, const Value& value,
+std::shared_ptr<arrow::DataType> StorageTypeForValues(
+    const std::shared_ptr<arrow::DataType>& type) {
+  if (type->id() == arrow::Type::EXTENSION) {
+    return static_cast<const arrow::ExtensionType&>(*type).storage_type();
+  }
+  return type;
+}
+
+Result<std::shared_ptr<arrow::Array>> FinishArray(
+    const std::shared_ptr<arrow::DataType>& type, arrow::ArrayBuilder& builder) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto array,
+                             FromArrowResult(builder.Finish(), "finish Arrow array"));
+  if (type->id() != arrow::Type::EXTENSION) {
+    return array;
+  }
+  return std::make_shared<arrow::ExtensionArray>(type, std::move(array));
+}
+
+Status AppendValue(arrow::ArrayBuilder& builder, const Value& value, Oid pg_type,
                    const arrow::DataType& type) {
-  return pgiceberg::AppendDatum(builder, value.datum, value.is_null, type);
+  return pgiceberg::AppendDatum(builder, value.datum, pg_type, value.is_null, type);
 }
 
 Row CopyRowFromSlot(TupleTableSlot* slot, TupleDesc desc, MemoryContext memory_context) {
@@ -552,10 +575,12 @@ Result<bool> RowEquals(const Row& left, const Row& right, TupleDesc desc) {
 
 Status AppendRow(std::vector<std::unique_ptr<arrow::ArrayBuilder>>& builders,
                  const arrow::Schema& schema, const std::vector<int>& attr_numbers,
-                 const Row& row) {
+                 TupleDesc desc, const Row& row) {
   for (int i = 0; i < schema.num_fields(); i++) {
+    Form_pg_attribute attr = TupleDescAttr(desc, attr_numbers[i] - 1);
+    auto value_type = StorageTypeForValues(schema.field(i)->type());
     PGICEBERG_RETURN_NOT_OK(
-        AppendValue(*builders[i], row[attr_numbers[i] - 1], *schema.field(i)->type()));
+        AppendValue(*builders[i], row[attr_numbers[i] - 1], attr->atttypid, *value_type));
   }
   return Ok();
 }
@@ -571,9 +596,9 @@ Result<std::shared_ptr<iceberg::DataFile>> WriteRows(
 
   std::vector<std::shared_ptr<arrow::Array>> arrays;
   arrays.reserve(builders.size());
-  for (auto& builder : builders) {
+  for (int i = 0; i < arrow_schema->num_fields(); i++) {
     PGICEBERG_ASSIGN_OR_RETURN(auto array,
-                               FromArrowResult(builder->Finish(), "finish Arrow array"));
+                               FinishArray(arrow_schema->field(i)->type(), *builders[i]));
     arrays.push_back(std::move(array));
   }
 
@@ -614,9 +639,10 @@ class RowBatchWriter {
                            std::move(arrow_schema), std::move(builders)));
   }
 
-  Status Append(const std::vector<int>& attr_numbers, const Row& row) {
+  Status Append(const std::vector<int>& attr_numbers, TupleDesc desc, const Row& row) {
     PGICEBERG_RETURN_NOT_OK(EnsureWriter());
-    PGICEBERG_RETURN_NOT_OK(AppendRow(builders_, *arrow_schema_, attr_numbers, row));
+    PGICEBERG_RETURN_NOT_OK(
+        AppendRow(builders_, *arrow_schema_, attr_numbers, desc, row));
     rows_in_batch_++;
     if (rows_in_batch_ >= kDmlRewriteBatchRows) {
       PGICEBERG_RETURN_NOT_OK(Flush());
@@ -675,9 +701,9 @@ class RowBatchWriter {
 
     std::vector<std::shared_ptr<arrow::Array>> arrays;
     arrays.reserve(builders_.size());
-    for (auto& builder : builders_) {
+    for (int i = 0; i < arrow_schema_->num_fields(); i++) {
       PGICEBERG_ASSIGN_OR_RETURN(
-          auto array, FromArrowResult(builder->Finish(), "finish Arrow array"));
+          auto array, FinishArray(arrow_schema_->field(i)->type(), *builders_[i]));
       arrays.push_back(std::move(array));
     }
 
@@ -866,9 +892,9 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
 }
 
 Result<TupleTableSlot*> ExecInsert(ModifyState* state, TupleTableSlot* slot) {
-  PGICEBERG_RETURN_NOT_OK(
-      AppendRow(state->builders, *state->arrow_schema, state->attr_numbers,
-                CopyRowFromSlot(slot, state->tuple_desc, CurrentMemoryContext)));
+  PGICEBERG_RETURN_NOT_OK(AppendRow(
+      state->builders, *state->arrow_schema, state->attr_numbers, state->tuple_desc,
+      CopyRowFromSlot(slot, state->tuple_desc, CurrentMemoryContext)));
   state->rows++;
   return slot;
 }
@@ -959,10 +985,11 @@ Status EndModify(ModifyState* state) {
       }
 
       if (!matched_change.has_value()) {
-        PGICEBERG_RETURN_NOT_OK(rewrite_writer->Append(state->attr_numbers, current_row));
+        PGICEBERG_RETURN_NOT_OK(
+            rewrite_writer->Append(state->attr_numbers, state->tuple_desc, current_row));
       } else if (state->operation == CMD_UPDATE) {
-        PGICEBERG_RETURN_NOT_OK(rewrite_writer->Append(state->attr_numbers,
-                                                       state->new_rows[*matched_change]));
+        PGICEBERG_RETURN_NOT_OK(rewrite_writer->Append(
+            state->attr_numbers, state->tuple_desc, state->new_rows[*matched_change]));
       }
     }
   }

@@ -84,8 +84,14 @@ Result<std::shared_ptr<iceberg::Type>> PostgresTypeToIcebergType(Oid pg_type,
       PGICEBERG_ASSIGN_OR_RETURN(auto decimal, DecodeNumericTypmod(typmod));
       return iceberg::decimal(decimal.precision, decimal.scale);
     }
+    case BYTEAOID:
+      return iceberg::binary();
+    case UUIDOID:
+      return iceberg::uuid();
     case DATEOID:
       return iceberg::date();
+    case TIMEOID:
+      return iceberg::time();
     case TIMESTAMPOID:
       return iceberg::timestamp();
     case TIMESTAMPTZOID:
@@ -117,15 +123,18 @@ std::string IcebergTypeToSql(const iceberg::Type& type) {
     case iceberg::TypeId::kDecimal:
       return DecimalSql(type);
     case iceberg::TypeId::kString:
-    case iceberg::TypeId::kUuid:
       return "text";
+    case iceberg::TypeId::kUuid:
+      return "uuid";
     case iceberg::TypeId::kDate:
       return "date";
     case iceberg::TypeId::kTime:
       return "time";
     case iceberg::TypeId::kTimestamp:
+    case iceberg::TypeId::kTimestampNs:
       return "timestamp";
     case iceberg::TypeId::kTimestampTz:
+    case iceberg::TypeId::kTimestampTzNs:
       return "timestamptz";
     case iceberg::TypeId::kBinary:
     case iceberg::TypeId::kFixed:
