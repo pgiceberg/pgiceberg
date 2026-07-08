@@ -41,8 +41,6 @@ CREATE TABLE pgiceberg.table_bindings (
   catalog text NOT NULL,
   namespace text NOT NULL,
   table_name text NOT NULL,
-  format_version integer NOT NULL,
-  metadata_location text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 ) USING heap;
@@ -57,8 +55,6 @@ COMMENT ON COLUMN pgiceberg.table_bindings.namespace IS
   'Iceberg namespace used to load the table.';
 COMMENT ON COLUMN pgiceberg.table_bindings.table_name IS
   'Iceberg table name used to load the table.';
-COMMENT ON COLUMN pgiceberg.table_bindings.metadata_location IS
-  'Metadata file location returned when the Iceberg table was created.';
 
 CREATE FUNCTION pgiceberg.add_catalog(
   name text,

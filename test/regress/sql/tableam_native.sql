@@ -50,9 +50,7 @@ WHERE cls.oid = 'native_trip'::regclass;
 
 SELECT catalog,
        namespace,
-       table_name,
-       format_version,
-       metadata_location LIKE '/tmp/pgiceberg_warehouse_tableam_regress/native/native_trip/metadata/%.metadata.json' AS has_metadata
+       table_name
 FROM pgiceberg.table_bindings
 WHERE relid = 'native_trip'::regclass;
 

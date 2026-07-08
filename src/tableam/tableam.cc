@@ -123,7 +123,6 @@ struct Binding {
   std::string catalog;
   std::string name_space;
   std::string table_name;
-  int format_version = 2;
 };
 
 enum class PendingCatalogChangeKind {
@@ -135,6 +134,7 @@ struct PendingCatalogChange {
   PendingCatalogChangeKind kind = PendingCatalogChangeKind::kCreate;
   SubTransactionId subtransaction_id = InvalidSubTransactionId;
   Binding binding;
+  int format_version = 2;
 };
 
 std::vector<PendingCatalogChange>& PendingCatalogChanges() {
@@ -235,7 +235,8 @@ iceberg::TableIdentifier TableIdentifierForBinding(const Binding& binding) {
       .name = binding.table_name};
 }
 
-Result<std::string> CreateIcebergCatalogTable(const Binding& binding, Relation relation) {
+Status CreateIcebergCatalogTable(const Binding& binding, Relation relation,
+                                 int format_version) {
   PGICEBERG_ASSIGN_OR_RETURN(auto options, LoadCatalogOptions(binding.catalog));
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
   const auto ident = TableIdentifierForBinding(binding);
@@ -275,13 +276,14 @@ Result<std::string> CreateIcebergCatalogTable(const Binding& binding, Relation r
   PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(
       properties_update
           ->Set(iceberg::TableProperties::kFormatVersion.key(),
-                std::to_string(binding.format_version))
+                std::to_string(format_version))
           .Commit(),
       "set table format version"));
   PGICEBERG_ASSIGN_OR_RETURN(auto table,
                              FromIcebergResult(staged_table->Commit(),
                                                "create Iceberg table"));
-  return std::string(table->metadata_file_location());
+  (void)table;
+  return Ok();
 }
 
 Status DropIcebergCatalogTable(const Binding& binding) {
@@ -297,24 +299,21 @@ Status DropIcebergCatalogTable(const Binding& binding) {
   return FromIcebergStatus(catalog->DropTable(ident, false), "drop Iceberg table");
 }
 
-Status InsertBinding(const Binding& binding, const std::string& metadata_location) {
+Status InsertBinding(const Binding& binding) {
   SpiConnection spi;
   PGICEBERG_RETURN_NOT_OK(spi.Connect());
   const char* sql =
       "INSERT INTO pgiceberg.table_bindings "
-      "(relid, catalog, namespace, table_name, format_version, metadata_location, "
-      " created_at, updated_at) "
-      "VALUES ($1, $2, $3, $4, $5, $6, now(), now())";
-  Oid argtypes[] = {OIDOID, TEXTOID, TEXTOID, TEXTOID, INT4OID, TEXTOID};
+      "(relid, catalog, namespace, table_name, created_at, updated_at) "
+      "VALUES ($1, $2, $3, $4, now(), now())";
+  Oid argtypes[] = {OIDOID, TEXTOID, TEXTOID, TEXTOID};
   Datum values[] = {
       ObjectIdGetDatum(binding.relid),
       CStringGetTextDatum(binding.catalog.c_str()),
       CStringGetTextDatum(binding.name_space.c_str()),
       CStringGetTextDatum(binding.table_name.c_str()),
-      Int32GetDatum(binding.format_version),
-      CStringGetTextDatum(metadata_location.c_str()),
   };
-  const int result = SPI_execute_with_args(sql, 6, argtypes, values, nullptr, false, 1);
+  const int result = SPI_execute_with_args(sql, 4, argtypes, values, nullptr, false, 1);
   if (result != SPI_OK_INSERT) {
     return std::unexpected(
         MakeError(ERRCODE_INTERNAL_ERROR, "could not insert pgiceberg table binding"));
@@ -326,7 +325,7 @@ Result<Binding> LoadBinding(Oid relid) {
   SpiConnection spi;
   PGICEBERG_RETURN_NOT_OK(spi.Connect());
   const char* sql =
-      "SELECT catalog, namespace, table_name, format_version "
+      "SELECT catalog, namespace, table_name "
       "FROM pgiceberg.table_bindings WHERE relid = $1";
   Oid argtypes[] = {OIDOID};
   Datum values[] = {ObjectIdGetDatum(relid)};
@@ -354,17 +353,10 @@ Result<Binding> LoadBinding(Oid relid) {
     return std::string(TextDatumGetCString(value));
   };
 
-  bool is_null = false;
   Binding binding{.relid = relid};
   PGICEBERG_ASSIGN_OR_RETURN(binding.catalog, text_column(1));
   PGICEBERG_ASSIGN_OR_RETURN(binding.name_space, text_column(2));
   PGICEBERG_ASSIGN_OR_RETURN(binding.table_name, text_column(3));
-  Datum format = SPI_getbinval(tuple, desc, 4, &is_null);
-  if (is_null) {
-    return std::unexpected(MakeError(ERRCODE_NULL_VALUE_NOT_ALLOWED,
-                                     "pgiceberg table binding contains NULL"));
-  }
-  binding.format_version = DatumGetInt32(format);
   return binding;
 }
 
@@ -474,17 +466,17 @@ Status QueueCreateTable(CreateStmt* stmt) {
                         ? "default"
                         : DefaultNamespace,
       .table_name = RelationGetRelationName(relation),
-      .format_version = DefaultFormatVersion,
   };
   PendingCatalogChanges().push_back(PendingCatalogChange{
       .kind = PendingCatalogChangeKind::kCreate,
       .subtransaction_id = GetCurrentSubTransactionId(),
       .binding = std::move(binding),
+      .format_version = DefaultFormatVersion,
   });
   return Ok();
 }
 
-Status CommitCreateTable(const Binding& binding) {
+Status CommitCreateTable(const Binding& binding, int format_version) {
   Relation relation = table_open(binding.relid, AccessShareLock);
   struct RelationGuard {
     Relation relation;
@@ -495,9 +487,8 @@ Status CommitCreateTable(const Binding& binding) {
     }
   } relation_guard{relation};
 
-  PGICEBERG_ASSIGN_OR_RETURN(auto metadata_location,
-                             CreateIcebergCatalogTable(binding, relation));
-  return InsertBinding(binding, metadata_location);
+  PGICEBERG_RETURN_NOT_OK(CreateIcebergCatalogTable(binding, relation, format_version));
+  return InsertBinding(binding);
 }
 
 std::vector<Oid> DropRelationOids(DropStmt* stmt) {
@@ -573,7 +564,7 @@ Status CommitPendingCatalogChanges() {
   for (const auto& change : PendingCatalogChanges()) {
     switch (change.kind) {
       case PendingCatalogChangeKind::kCreate:
-        PGICEBERG_RETURN_NOT_OK(CommitCreateTable(change.binding));
+        PGICEBERG_RETURN_NOT_OK(CommitCreateTable(change.binding, change.format_version));
         break;
       case PendingCatalogChangeKind::kDrop:
         PGICEBERG_RETURN_NOT_OK(DropIcebergCatalogTable(change.binding));

@@ -50,13 +50,11 @@ iceberg
 (1 row)
 SELECT catalog,
        namespace,
-       table_name,
-       format_version,
-       metadata_location LIKE '/tmp/pgiceberg_warehouse_tableam_regress/native/native_trip/metadata/%.metadata.json' AS has_metadata
+       table_name
 FROM pgiceberg.table_bindings
 WHERE relid = 'native_trip'::regclass;
-catalog|namespace|table_name|format_version|has_metadata
-tableam_regress|native|native_trip|2|t
+catalog|namespace|table_name
+tableam_regress|native|native_trip
 (1 row)
 SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
 FROM native_trip
