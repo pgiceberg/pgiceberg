@@ -775,6 +775,72 @@ Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
   return StaticTableForPendingChange(*pending);
 }
 
+Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** slots,
+                   int nslots) {
+  if (nslots <= 0) {
+    return Ok();
+  }
+
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto table,
+      pgiceberg::LoadIcebergTable(catalog_options, RelationGetRelationName(relation)));
+  PGICEBERG_ASSIGN_OR_RETURN(auto read_table,
+                             ReadTableForCurrentTransaction(options, table));
+
+  PGICEBERG_ASSIGN_OR_RETURN(auto iceberg_schema,
+                             FromIcebergResult(read_table->schema(), "load schema"));
+  PGICEBERG_ASSIGN_OR_RETURN(auto arrow_schema, ArrowSchemaFor(*iceberg_schema));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto spec, FromIcebergResult(read_table->spec(), "load partition spec"));
+  if (!spec->fields().empty()) {
+    return std::unexpected(
+        MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                  "pgiceberg table access method currently supports only "
+                  "unpartitioned Iceberg tables"));
+  }
+
+  TupleDesc tuple_desc = RelationGetDescr(relation);
+  std::vector<int> attr_numbers;
+  attr_numbers.reserve(arrow_schema->num_fields());
+  for (int i = 0; i < arrow_schema->num_fields(); i++) {
+    const auto& field = arrow_schema->field(i);
+    auto attr_number = InvalidAttrNumber;
+    for (int j = 0; j < tuple_desc->natts; j++) {
+      Form_pg_attribute attr = TupleDescAttr(tuple_desc, j);
+      if (!attr->attisdropped && field->name() == NameStr(attr->attname)) {
+        attr_number = attr->attnum;
+        break;
+      }
+    }
+    if (attr_number == InvalidAttrNumber) {
+      return std::unexpected(
+          MakeError(ERRCODE_FDW_ERROR,
+                    "Iceberg field \"" + field->name() + "\" does not exist in table"));
+    }
+    attr_numbers.push_back(attr_number);
+  }
+
+  PGICEBERG_ASSIGN_OR_RETURN(auto builders, MakeBuilders(*arrow_schema));
+  for (int i = 0; i < nslots; i++) {
+    auto row = CopyRowFromSlot(slots[i], tuple_desc, CurrentMemoryContext);
+    PGICEBERG_RETURN_NOT_OK(
+        AppendRow(builders, *arrow_schema, attr_numbers, tuple_desc, row));
+  }
+
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto data_file,
+      WriteRows(*table, iceberg_schema, spec, arrow_schema, std::move(builders), nslots));
+  auto pending_table_result = EnsurePendingTableChange(options, table);
+  if (!pending_table_result) {
+    CleanupDataFiles(table, NewDataFilePaths(data_file));
+    return std::unexpected(pending_table_result.error());
+  }
+  return QueuePendingModifyChange(
+      **pending_table_result,
+      std::make_unique<PendingAppendChange>(std::move(data_file)));
+}
+
 // ModifyState is statement-local executor state.  It owns transient row and
 // Arrow builder state, but never owns the final Iceberg commit decision; that
 // belongs to the backend-local pending queue above.

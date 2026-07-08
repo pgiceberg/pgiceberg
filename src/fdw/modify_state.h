@@ -23,6 +23,8 @@ struct EState;
 struct ModifyTableState;
 struct ResultRelInfo;
 struct TupleTableSlot;
+struct RelationData;
+using Relation = RelationData*;
 
 namespace pgiceberg::fdw {
 
@@ -38,6 +40,8 @@ Result<TupleTableSlot*> ExecUpdate(ModifyState* state, TupleTableSlot* slot,
 Result<TupleTableSlot*> ExecDelete(ModifyState* state, TupleTableSlot* slot,
                                    TupleTableSlot* plan_slot);
 Status EndModify(ModifyState* state);
+Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** slots,
+                   int nslots);
 void RegisterTransactionCallbacks();
 
 }  // namespace pgiceberg::fdw
