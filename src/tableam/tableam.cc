@@ -516,7 +516,7 @@ bool RelationUsesIcebergTableAm(Oid relid) {
     return false;
   }
 
-  auto* pg_class = static_cast<Form_pg_class>(GETSTRUCT(tuple));
+  auto* pg_class = reinterpret_cast<Form_pg_class>(GETSTRUCT(tuple));
   Oid relam = pg_class->relam;
   ReleaseSysCache(tuple);
   return relam == iceberg_am;
