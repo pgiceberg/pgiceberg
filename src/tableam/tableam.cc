@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -34,6 +35,7 @@
 
 #include "common/catalog.h"
 #include "common/pg_error.h"
+#include "common/pg_relation.h"
 #include "common/status.h"
 #include "common/type_mapping.h"
 #include "fdw/modify_state.h"
@@ -125,6 +127,13 @@ struct Binding {
   std::string table_name;
 };
 
+struct NativeCreateOptions {
+  std::string catalog;
+  std::string name_space = "default";
+  std::string table_name;
+  int format_version = 2;
+};
+
 enum class PendingCatalogChangeKind {
   kCreate,
   kDrop,
@@ -161,21 +170,21 @@ Status ValidateFormatVersion(int format_version) {
   if (format_version == 2 || format_version == 3) {
     return Ok();
   }
-  return std::unexpected(MakeError(
-      ERRCODE_INVALID_PARAMETER_VALUE,
-      "unsupported pgiceberg.default_format_version " + std::to_string(format_version),
-      "Iceberg format version 1 is not supported; valid values are 2 and 3."));
+  return std::unexpected(
+      MakeError(ERRCODE_INVALID_PARAMETER_VALUE,
+                "unsupported Iceberg format version " + std::to_string(format_version),
+                "Iceberg format version 1 is not supported; valid values are 2 and 3."));
 }
 
 Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
     const CatalogOptions& options) {
   if (options.catalog_uri.empty()) {
-    return std::unexpected(MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
-                                     "pgiceberg catalog_uri is required"));
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_INVALID_OPTION_NAME, "pgiceberg catalog_uri is required"));
   }
   if (options.warehouse.empty()) {
-    return std::unexpected(MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
-                                     "pgiceberg warehouse is required"));
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_INVALID_OPTION_NAME, "pgiceberg warehouse is required"));
   }
 
   std::shared_ptr<iceberg::FileIO> file_io(
@@ -192,8 +201,9 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
                              "create SQLite catalog");
   }
   if (options.catalog_type == "sql") {
-    return FromIcebergResult(iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io),
-                             "create PostgreSQL catalog");
+    return FromIcebergResult(
+        iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io),
+        "create PostgreSQL catalog");
   }
   return std::unexpected(MakeError(
       ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -211,8 +221,8 @@ Result<std::shared_ptr<iceberg::Schema>> SchemaFromRelation(Relation relation) {
     if (attr->attisdropped) {
       continue;
     }
-    PGICEBERG_ASSIGN_OR_RETURN(auto type,
-                               PostgresTypeToIcebergType(attr->atttypid, attr->atttypmod));
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto type, PostgresTypeToIcebergType(attr->atttypid, attr->atttypmod));
     if (attr->attnotnull) {
       fields.push_back(
           iceberg::SchemaField::MakeRequired(field_id, NameStr(attr->attname), type));
@@ -223,8 +233,9 @@ Result<std::shared_ptr<iceberg::Schema>> SchemaFromRelation(Relation relation) {
     field_id++;
   }
   if (fields.empty()) {
-    return std::unexpected(MakeError(ERRCODE_INVALID_TABLE_DEFINITION,
-                                     "pgiceberg iceberg tables require at least one column"));
+    return std::unexpected(
+        MakeError(ERRCODE_INVALID_TABLE_DEFINITION,
+                  "pgiceberg iceberg tables require at least one column"));
   }
   return std::make_shared<iceberg::Schema>(std::move(fields), 1);
 }
@@ -241,22 +252,21 @@ Status CreateIcebergCatalogTable(const Binding& binding, Relation relation,
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
   const auto ident = TableIdentifierForBinding(binding);
   const auto& ns = ident.ns;
-  PGICEBERG_ASSIGN_OR_RETURN(auto ns_exists,
-                             FromIcebergResult(catalog->NamespaceExists(ns),
-                                               "check Iceberg namespace"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto ns_exists,
+      FromIcebergResult(catalog->NamespaceExists(ns), "check Iceberg namespace"));
   if (!ns_exists) {
     PGICEBERG_RETURN_NOT_OK(
         FromIcebergStatus(catalog->CreateNamespace(ns, {}), "create Iceberg namespace"));
   }
 
-  PGICEBERG_ASSIGN_OR_RETURN(auto table_exists,
-                             FromIcebergResult(catalog->TableExists(ident),
-                                               "check Iceberg table"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto table_exists,
+      FromIcebergResult(catalog->TableExists(ident), "check Iceberg table"));
   if (table_exists) {
     return std::unexpected(
-        MakeError(ERRCODE_DUPLICATE_TABLE,
-                  "Iceberg table \"" + binding.name_space + "." + binding.table_name +
-                      "\" already exists"));
+        MakeError(ERRCODE_DUPLICATE_TABLE, "Iceberg table \"" + binding.name_space + "." +
+                                               binding.table_name + "\" already exists"));
   }
 
   PGICEBERG_ASSIGN_OR_RETURN(auto schema, SchemaFromRelation(relation));
@@ -273,15 +283,14 @@ Status CreateIcebergCatalogTable(const Binding& binding, Relation relation,
   PGICEBERG_ASSIGN_OR_RETURN(auto properties_update,
                              FromIcebergResult(staged_table->NewUpdateProperties(),
                                                "create table properties update"));
-  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(
-      properties_update
-          ->Set(iceberg::TableProperties::kFormatVersion.key(),
-                std::to_string(format_version))
-          .Commit(),
-      "set table format version"));
-  PGICEBERG_ASSIGN_OR_RETURN(auto table,
-                             FromIcebergResult(staged_table->Commit(),
-                                               "create Iceberg table"));
+  PGICEBERG_RETURN_NOT_OK(
+      FromIcebergStatus(properties_update
+                            ->Set(iceberg::TableProperties::kFormatVersion.key(),
+                                  std::to_string(format_version))
+                            .Commit(),
+                        "set table format version"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto table, FromIcebergResult(staged_table->Commit(), "create Iceberg table"));
   (void)table;
   return Ok();
 }
@@ -290,9 +299,9 @@ Status DropIcebergCatalogTable(const Binding& binding) {
   PGICEBERG_ASSIGN_OR_RETURN(auto options, LoadCatalogOptions(binding.catalog));
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
   const auto ident = TableIdentifierForBinding(binding);
-  PGICEBERG_ASSIGN_OR_RETURN(auto table_exists,
-                             FromIcebergResult(catalog->TableExists(ident),
-                                               "check Iceberg table"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto table_exists,
+      FromIcebergResult(catalog->TableExists(ident), "check Iceberg table"));
   if (!table_exists) {
     return Ok();
   }
@@ -321,7 +330,7 @@ Status InsertBinding(const Binding& binding) {
   return Ok();
 }
 
-Result<Binding> LoadBinding(Oid relid) {
+Result<std::optional<Binding>> LoadBindingIfExists(Oid relid) {
   SpiConnection spi;
   PGICEBERG_RETURN_NOT_OK(spi.Connect());
   const char* sql =
@@ -335,10 +344,7 @@ Result<Binding> LoadBinding(Oid relid) {
         MakeError(ERRCODE_INTERNAL_ERROR, "could not read pgiceberg table binding"));
   }
   if (SPI_processed == 0) {
-    return std::unexpected(
-        MakeError(ERRCODE_UNDEFINED_OBJECT,
-                  "pgiceberg table binding does not exist for relation " +
-                      std::to_string(relid)));
+    return std::nullopt;
   }
 
   HeapTuple tuple = SPI_tuptable->vals[0];
@@ -381,7 +387,13 @@ Status DeleteBindings(const std::vector<Oid>& relids) {
 
 Result<Binding> LoadBinding(Relation relation) {
   const Oid relid = RelationGetRelid(relation);
-  return LoadBinding(relid);
+  PGICEBERG_ASSIGN_OR_RETURN(auto binding, LoadBindingIfExists(relid));
+  if (!binding.has_value()) {
+    return std::unexpected(MakeError(
+        ERRCODE_UNDEFINED_OBJECT,
+        "pgiceberg table binding does not exist for relation " + std::to_string(relid)));
+  }
+  return *binding;
 }
 
 Result<fdw::Options> OptionsFromBinding(Relation relation) {
@@ -404,6 +416,69 @@ bool IsIcebergCreateStmt(CreateStmt* stmt) {
   return IsIcebergAccessMethodName(default_table_access_method);
 }
 
+bool IsNativeCreateOption(const char* name) {
+  return std::strcmp(name, "catalog") == 0 || std::strcmp(name, "namespace") == 0 ||
+         std::strcmp(name, "table") == 0 || std::strcmp(name, "table_name") == 0 ||
+         std::strcmp(name, "format_version") == 0;
+}
+
+Status CheckDuplicateOption(bool& seen, const char* name) {
+  if (seen) {
+    return std::unexpected(MakeError(
+        ERRCODE_SYNTAX_ERROR,
+        std::string("pgiceberg option \"") + name + "\" specified more than once"));
+  }
+  seen = true;
+  return Ok();
+}
+
+Result<NativeCreateOptions> ParseAndRemoveNativeCreateOptions(CreateStmt* stmt) {
+  NativeCreateOptions options{
+      .catalog = DefaultCatalog == nullptr ? "" : DefaultCatalog,
+      .name_space = DefaultNamespace == nullptr || DefaultNamespace[0] == '\0'
+                        ? "default"
+                        : DefaultNamespace,
+      .format_version = DefaultFormatVersion,
+  };
+
+  bool seen_catalog = false;
+  bool seen_namespace = false;
+  bool seen_table = false;
+  bool seen_format_version = false;
+  List* remaining = NIL;
+
+  // TODO: Replace this ProcessUtility preprocessing with real table AM
+  // reloptions once PostgreSQL exposes reloption validation for table access
+  // methods.  Until then, remove pgiceberg-private options before core
+  // reloptions validation sees them.
+  ListCell* cell = nullptr;
+  foreach (cell, stmt->options) {
+    auto* def = static_cast<DefElem*>(lfirst(cell));
+    if (!IsNativeCreateOption(def->defname)) {
+      remaining = lappend(remaining, def);
+      continue;
+    }
+
+    if (std::strcmp(def->defname, "catalog") == 0) {
+      PGICEBERG_RETURN_NOT_OK(CheckDuplicateOption(seen_catalog, def->defname));
+      options.catalog = defGetString(def);
+    } else if (std::strcmp(def->defname, "namespace") == 0) {
+      PGICEBERG_RETURN_NOT_OK(CheckDuplicateOption(seen_namespace, def->defname));
+      options.name_space = defGetString(def);
+    } else if (std::strcmp(def->defname, "table") == 0 ||
+               std::strcmp(def->defname, "table_name") == 0) {
+      PGICEBERG_RETURN_NOT_OK(CheckDuplicateOption(seen_table, def->defname));
+      options.table_name = defGetString(def);
+    } else if (std::strcmp(def->defname, "format_version") == 0) {
+      PGICEBERG_RETURN_NOT_OK(CheckDuplicateOption(seen_format_version, def->defname));
+      options.format_version = defGetInt32(def);
+    }
+  }
+
+  stmt->options = remaining;
+  return options;
+}
+
 bool IsIcebergCreateTableAsStmt(CreateTableAsStmt* stmt) {
   if (stmt->objtype != OBJECT_TABLE || stmt->into == nullptr) {
     return false;
@@ -420,72 +495,62 @@ bool RelationUsesIcebergTableAm(Oid relid) {
 }
 
 void ErrorUnsupported(const char* operation) {
-  ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                  errmsg("pgiceberg table access method does not support %s", operation)));
+  ereport(ERROR,
+          (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+           errmsg("pgiceberg table access method does not support %s", operation)));
 }
 
-void ValidateCreateStmt(CreateStmt* stmt) {
+void ValidateCreateStmt(CreateStmt* stmt, const NativeCreateOptions& options) {
   if (stmt->if_not_exists) {
     ErrorUnsupported("CREATE TABLE IF NOT EXISTS");
   }
   if (stmt->relation->relpersistence != RELPERSISTENCE_PERMANENT) {
     ErrorUnsupported("temporary or unlogged tables");
   }
-  if (stmt->inhRelations != NIL || stmt->partbound != nullptr || stmt->partspec != nullptr) {
+  if (stmt->inhRelations != NIL || stmt->partbound != nullptr ||
+      stmt->partspec != nullptr) {
     ErrorUnsupported("inheritance or partitioning");
   }
   if (stmt->ofTypename != nullptr) {
     ErrorUnsupported("typed tables");
   }
-  if (DefaultCatalog == nullptr || DefaultCatalog[0] == '\0') {
-    ereport(ERROR,
-            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-             errmsg("pgiceberg.default_catalog must be set before creating an iceberg table"),
-             errhint("Register a catalog with pgiceberg.add_catalog(...) and run SET "
-                     "pgiceberg.default_catalog = '<name>'.")));
+  if (options.catalog.empty()) {
+    ereport(
+        ERROR,
+        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+         errmsg("pgiceberg catalog must be specified before creating an iceberg table"),
+         errhint("Register a catalog with pgiceberg.add_catalog(...) and run SET "
+                 "pgiceberg.default_catalog = '<name>', or use WITH (catalog = "
+                 "'<name>').")));
   }
-  PgStatusGuard([&]() { return ValidateFormatVersion(DefaultFormatVersion); });
+  PgStatusGuard([&]() { return ValidateFormatVersion(options.format_version); });
 }
 
-Status QueueCreateTable(CreateStmt* stmt) {
+Status QueueCreateTable(CreateStmt* stmt, const NativeCreateOptions& create_options) {
   Oid relid = RangeVarGetRelid(stmt->relation, NoLock, false);
   Relation relation = table_open(relid, AccessShareLock);
-  struct RelationGuard {
-    Relation relation;
-    ~RelationGuard() {
-      if (relation != nullptr) {
-        table_close(relation, AccessShareLock);
-      }
-    }
-  } relation_guard{relation};
+  RelationLockGuard relation_guard(relation, AccessShareLock);
 
   Binding binding{
       .relid = relid,
-      .catalog = DefaultCatalog == nullptr ? "" : DefaultCatalog,
-      .name_space = DefaultNamespace == nullptr || DefaultNamespace[0] == '\0'
-                        ? "default"
-                        : DefaultNamespace,
-      .table_name = RelationGetRelationName(relation),
+      .catalog = create_options.catalog,
+      .name_space =
+          create_options.name_space.empty() ? "default" : create_options.name_space,
+      .table_name = create_options.table_name.empty() ? RelationGetRelationName(relation)
+                                                      : create_options.table_name,
   };
   PendingCatalogChanges().push_back(PendingCatalogChange{
       .kind = PendingCatalogChangeKind::kCreate,
       .subtransaction_id = GetCurrentSubTransactionId(),
       .binding = std::move(binding),
-      .format_version = DefaultFormatVersion,
+      .format_version = create_options.format_version,
   });
   return Ok();
 }
 
 Status CommitCreateTable(const Binding& binding, int format_version) {
   Relation relation = table_open(binding.relid, AccessShareLock);
-  struct RelationGuard {
-    Relation relation;
-    ~RelationGuard() {
-      if (relation != nullptr) {
-        table_close(relation, AccessShareLock);
-      }
-    }
-  } relation_guard{relation};
+  RelationLockGuard relation_guard(relation, AccessShareLock);
 
   PGICEBERG_RETURN_NOT_OK(CreateIcebergCatalogTable(binding, relation, format_version));
   return InsertBinding(binding);
@@ -514,8 +579,13 @@ std::vector<Binding> LoadExistingBindings(const std::vector<Oid>& relids) {
     if (!RelationUsesIcebergTableAm(relid)) {
       continue;
     }
-    auto binding = PgResultGuard([&]() { return LoadBinding(relid); });
-    bindings.push_back(std::move(binding));
+    // Tables created in the current transaction have a queued create instead
+    // of a binding row (the row is only inserted at pre-commit), so a missing
+    // binding is not an error here.
+    auto binding = PgResultGuard([&]() { return LoadBindingIfExists(relid); });
+    if (binding.has_value()) {
+      bindings.push_back(std::move(*binding));
+    }
   }
   return bindings;
 }
@@ -581,9 +651,9 @@ Status XactCallbackImpl(XactEvent event) {
       return CommitPendingCatalogChanges();
     case XACT_EVENT_PRE_PREPARE:
       if (!PendingCatalogChanges().empty()) {
-        return std::unexpected(
-            MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
-                      "pgiceberg table access method does not support prepared transactions"));
+        return std::unexpected(MakeError(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            "pgiceberg table access method does not support prepared transactions"));
       }
       break;
     case XACT_EVENT_ABORT:
@@ -633,12 +703,24 @@ void PgIcebergProcessUtility(PlannedStmt* pstmt, const char* query_string,
                              DestReceiver* dest, QueryCompletion* qc) {
   Node* utility = pstmt->utilityStmt;
   CreateStmt* iceberg_create = nullptr;
+  NativeCreateOptions iceberg_create_options;
   std::vector<Oid> drop_relids;
   std::vector<Binding> drop_bindings;
   if (IsA(utility, CreateStmt)) {
     auto* stmt = reinterpret_cast<CreateStmt*>(utility);
     if (IsIcebergCreateStmt(stmt)) {
-      ValidateCreateStmt(stmt);
+      // ParseAndRemoveNativeCreateOptions mutates stmt->options.  A read-only
+      // tree comes from the plan cache and must stay intact for later
+      // executions, so mutate a copy and execute that instead.
+      if (read_only_tree) {
+        pstmt = castNode(PlannedStmt, copyObjectImpl(pstmt));
+        read_only_tree = false;
+        stmt = castNode(CreateStmt, pstmt->utilityStmt);
+      }
+      iceberg_create_options = PgResultGuard([&]() -> Result<NativeCreateOptions> {
+        return ParseAndRemoveNativeCreateOptions(stmt);
+      });
+      ValidateCreateStmt(stmt, iceberg_create_options);
       iceberg_create = stmt;
     }
   } else if (IsA(utility, CreateTableAsStmt)) {
@@ -655,15 +737,16 @@ void PgIcebergProcessUtility(PlannedStmt* pstmt, const char* query_string,
   }
 
   if (PreviousProcessUtilityHook != nullptr) {
-    PreviousProcessUtilityHook(pstmt, query_string, read_only_tree, context, params, query_env,
-                               dest, qc);
+    PreviousProcessUtilityHook(pstmt, query_string, read_only_tree, context, params,
+                               query_env, dest, qc);
   } else {
-    standard_ProcessUtility(pstmt, query_string, read_only_tree, context, params, query_env,
-                            dest, qc);
+    standard_ProcessUtility(pstmt, query_string, read_only_tree, context, params,
+                            query_env, dest, qc);
   }
 
   if (iceberg_create != nullptr) {
-    PgStatusGuard([&]() { return QueueCreateTable(iceberg_create); });
+    PgStatusGuard(
+        [&]() { return QueueCreateTable(iceberg_create, iceberg_create_options); });
     CommandCounterIncrement();
   }
   if (!drop_relids.empty()) {
@@ -675,8 +758,9 @@ void PgIcebergProcessUtility(PlannedStmt* pstmt, const char* query_string,
 
 const TupleTableSlotOps* IcebergSlotCallbacks(Relation) { return &TTSOpsVirtual; }
 
-TableScanDesc IcebergScanBegin(Relation rel, Snapshot snapshot, int nkeys, ScanKeyData* key,
-                               ParallelTableScanDesc pscan, uint32 flags) {
+TableScanDesc IcebergScanBegin(Relation rel, Snapshot snapshot, int nkeys,
+                               ScanKeyData* key, ParallelTableScanDesc pscan,
+                               uint32 flags) {
   if (pscan != nullptr) {
     ErrorUnsupported("parallel scans");
   }
@@ -755,7 +839,9 @@ bool IcebergTupleFetchRowVersion(Relation, ItemPointer, Snapshot, TupleTableSlot
 
 bool IcebergTupleTidValid(TableScanDesc, ItemPointer) { return false; }
 
-void IcebergTupleGetLatestTid(TableScanDesc, ItemPointer) { ErrorUnsupported("TID lookup"); }
+void IcebergTupleGetLatestTid(TableScanDesc, ItemPointer) {
+  ErrorUnsupported("TID lookup");
+}
 
 bool IcebergTupleSatisfiesSnapshot(Relation, TupleTableSlot*, Snapshot) { return true; }
 
@@ -783,8 +869,8 @@ void IcebergTupleCompleteSpeculative(Relation, TupleTableSlot*, uint32, bool) {
   ErrorUnsupported("speculative insert");
 }
 
-void IcebergMultiInsert(Relation rel, TupleTableSlot** slots, int nslots, CommandId,
-                        int, BulkInsertStateData*) {
+void IcebergMultiInsert(Relation rel, TupleTableSlot** slots, int nslots, CommandId, int,
+                        BulkInsertStateData*) {
   PgStatusGuard([&]() -> Status {
     PGICEBERG_ASSIGN_OR_RETURN(auto options, OptionsFromBinding(rel));
     return fdw::AppendSlots(rel, options, slots, nslots);
@@ -800,8 +886,8 @@ TM_Result IcebergTupleDelete(Relation, ItemPointer, CommandId, Snapshot, Snapsho
   return TM_Ok;
 }
 
-TM_Result IcebergTupleUpdate(Relation, ItemPointer, TupleTableSlot*, CommandId,
-                             Snapshot, Snapshot, bool, TM_FailureData*, LockTupleMode*,
+TM_Result IcebergTupleUpdate(Relation, ItemPointer, TupleTableSlot*, CommandId, Snapshot,
+                             Snapshot, bool, TM_FailureData*, LockTupleMode*,
                              TU_UpdateIndexes*) {
   ErrorUnsupported("UPDATE");
   return TM_Ok;
@@ -826,7 +912,8 @@ void IcebergRelationCopyData(Relation, const RelFileLocator*) {
 }
 
 void IcebergRelationCopyForCluster(Relation, Relation, Relation, bool, TransactionId,
-                                   TransactionId*, MultiXactId*, double*, double*, double*) {
+                                   TransactionId*, MultiXactId*, double*, double*,
+                                   double*) {
   ErrorUnsupported("CLUSTER or VACUUM FULL");
 }
 
@@ -854,7 +941,8 @@ double IcebergIndexBuildRangeScan(Relation, Relation, IndexInfo*, bool, bool, bo
   return 0;
 }
 
-void IcebergIndexValidateScan(Relation, Relation, IndexInfo*, Snapshot, ValidateIndexState*) {
+void IcebergIndexValidateScan(Relation, Relation, IndexInfo*, Snapshot,
+                              ValidateIndexState*) {
   ErrorUnsupported("index validation");
 }
 
@@ -924,18 +1012,17 @@ const TableAmRoutine IcebergTableAmRoutine = {
 }  // namespace
 
 void RegisterTableAmHooks() {
-  DefineCustomStringVariable("pgiceberg.default_catalog",
-                             "Catalog name used by CREATE TABLE ... USING iceberg.",
-                             nullptr, &DefaultCatalog, "", PGC_USERSET, 0, nullptr,
-                             nullptr, nullptr);
+  DefineCustomStringVariable(
+      "pgiceberg.default_catalog", "Catalog name used by CREATE TABLE ... USING iceberg.",
+      nullptr, &DefaultCatalog, "", PGC_USERSET, 0, nullptr, nullptr, nullptr);
   DefineCustomStringVariable("pgiceberg.default_namespace",
                              "Iceberg namespace used by CREATE TABLE ... USING iceberg.",
-                             nullptr, &DefaultNamespace, "default", PGC_USERSET, 0, nullptr,
-                             nullptr, nullptr);
-  DefineCustomIntVariable("pgiceberg.default_format_version",
-                          "Iceberg format version used by CREATE TABLE ... USING iceberg.",
-                          nullptr, &DefaultFormatVersion, 2, 2, 3, PGC_USERSET, 0, nullptr,
-                          nullptr, nullptr);
+                             nullptr, &DefaultNamespace, "default", PGC_USERSET, 0,
+                             nullptr, nullptr, nullptr);
+  DefineCustomIntVariable(
+      "pgiceberg.default_format_version",
+      "Iceberg format version used by CREATE TABLE ... USING iceberg.", nullptr,
+      &DefaultFormatVersion, 2, 2, 3, PGC_USERSET, 0, nullptr, nullptr, nullptr);
   PreviousProcessUtilityHook = ProcessUtility_hook;
   ProcessUtility_hook = PgIcebergProcessUtility;
   RegisterXactCallback(XactCallback, nullptr);

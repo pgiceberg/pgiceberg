@@ -23,7 +23,7 @@ iceberg
 CREATE TABLE missing_catalog (
   id bigint
 ) USING iceberg;
-ERROR:  pgiceberg.default_catalog must be set before creating an iceberg table
+ERROR:  pgiceberg catalog must be specified before creating an iceberg table
 SELECT pgiceberg.add_catalog(
   'tableam_regress',
   'sqlite',
@@ -33,6 +33,24 @@ SELECT pgiceberg.add_catalog(
 add_catalog
 
 (1 row)
+CREATE TABLE native_with_options (
+  id bigint
+) USING iceberg
+WITH (
+  catalog = 'tableam_regress',
+  namespace = 'native_options',
+  table_name = 'native_with_options_iceberg',
+  format_version = 2
+);
+SELECT catalog,
+       namespace,
+       table_name
+FROM pgiceberg.table_bindings
+WHERE relid = 'native_with_options'::regclass;
+catalog|namespace|table_name
+tableam_regress|native_options|native_with_options_iceberg
+(1 row)
+DROP TABLE native_with_options;
 SET pgiceberg.default_catalog = 'tableam_regress';
 SET pgiceberg.default_namespace = 'native';
 CREATE TABLE native_trip (
@@ -126,5 +144,46 @@ AS SELECT 1::bigint AS vendorid;
 ERROR:  pgiceberg table access method does not support CREATE TABLE AS
 RESET default_table_access_method;
 DROP TABLE rollback_trip;
+BEGIN;
+CREATE TABLE txn_trip (
+  vendorid bigint
+) USING iceberg;
+DROP TABLE txn_trip;
+COMMIT;
+CREATE TABLE txn_trip (
+  vendorid bigint
+) USING iceberg;
+DROP TABLE txn_trip;
+CREATE FUNCTION create_cached_trip() RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  CREATE TABLE cached_trip (
+    vendorid bigint
+  ) USING iceberg
+  WITH (namespace = 'cached', table_name = 'cached_trip_iceberg');
+END $$;
+SELECT create_cached_trip();
+create_cached_trip
+
+(1 row)
+SELECT namespace, table_name
+FROM pgiceberg.table_bindings
+WHERE relid = 'cached_trip'::regclass;
+namespace|table_name
+cached|cached_trip_iceberg
+(1 row)
+DROP TABLE cached_trip;
+SELECT create_cached_trip();
+create_cached_trip
+
+(1 row)
+SELECT namespace, table_name
+FROM pgiceberg.table_bindings
+WHERE relid = 'cached_trip'::regclass;
+namespace|table_name
+cached|cached_trip_iceberg
+(1 row)
+DROP TABLE cached_trip;
+DROP FUNCTION create_cached_trip();
 \set VERBOSITY default
 DROP EXTENSION pgiceberg;

@@ -33,6 +33,24 @@ SELECT pgiceberg.add_catalog(
   '/tmp/pgiceberg_warehouse_tableam_regress'
 );
 
+CREATE TABLE native_with_options (
+  id bigint
+) USING iceberg
+WITH (
+  catalog = 'tableam_regress',
+  namespace = 'native_options',
+  table_name = 'native_with_options_iceberg',
+  format_version = 2
+);
+
+SELECT catalog,
+       namespace,
+       table_name
+FROM pgiceberg.table_bindings
+WHERE relid = 'native_with_options'::regclass;
+
+DROP TABLE native_with_options;
+
 SET pgiceberg.default_catalog = 'tableam_regress';
 SET pgiceberg.default_namespace = 'native';
 
@@ -122,6 +140,45 @@ AS SELECT 1::bigint AS vendorid;
 RESET default_table_access_method;
 
 DROP TABLE rollback_trip;
+
+BEGIN;
+CREATE TABLE txn_trip (
+  vendorid bigint
+) USING iceberg;
+DROP TABLE txn_trip;
+COMMIT;
+
+CREATE TABLE txn_trip (
+  vendorid bigint
+) USING iceberg;
+
+DROP TABLE txn_trip;
+
+CREATE FUNCTION create_cached_trip() RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  CREATE TABLE cached_trip (
+    vendorid bigint
+  ) USING iceberg
+  WITH (namespace = 'cached', table_name = 'cached_trip_iceberg');
+END $$;
+
+SELECT create_cached_trip();
+
+SELECT namespace, table_name
+FROM pgiceberg.table_bindings
+WHERE relid = 'cached_trip'::regclass;
+
+DROP TABLE cached_trip;
+
+SELECT create_cached_trip();
+
+SELECT namespace, table_name
+FROM pgiceberg.table_bindings
+WHERE relid = 'cached_trip'::regclass;
+
+DROP TABLE cached_trip;
+DROP FUNCTION create_cached_trip();
 
 \set VERBOSITY default
 
