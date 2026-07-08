@@ -17,6 +17,26 @@ WHERE fdwname = 'pgiceberg';
 fdwname
 pgiceberg
 (1 row)
+SHOW pgiceberg.arrow_cpu_threads;
+pgiceberg.arrow_cpu_threads
+0
+(1 row)
+SHOW pgiceberg.arrow_io_threads;
+pgiceberg.arrow_io_threads
+0
+(1 row)
+SET pgiceberg.arrow_cpu_threads = 1;
+SET pgiceberg.arrow_io_threads = 1;
+SHOW pgiceberg.arrow_cpu_threads;
+pgiceberg.arrow_cpu_threads
+1
+(1 row)
+SHOW pgiceberg.arrow_io_threads;
+pgiceberg.arrow_io_threads
+1
+(1 row)
+RESET pgiceberg.arrow_cpu_threads;
+RESET pgiceberg.arrow_io_threads;
 \set VERBOSITY terse
 CREATE SERVER invalid_option
 FOREIGN DATA WRAPPER pgiceberg

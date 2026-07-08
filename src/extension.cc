@@ -13,11 +13,28 @@
 #include "fdw/modify_state.h"
 #include "tableam/tableam.h"
 
+#include <string>
+
+#include <arrow/io/interfaces.h>
+#include <arrow/util/thread_pool.h>
 #include <iceberg/arrow/arrow_register.h>
 #include <iceberg/avro/avro_register.h>
 #include <iceberg/parquet/parquet_register.h>
 
+extern "C" {
+#include "postgres.h"
+#include "fmgr.h"
+#include "utils/guc.h"
+}
+
 namespace {
+
+constexpr int kArrowThreadPoolMaxCapacity = 1024;
+
+int ArrowCpuThreadPoolCapacity = 0;
+int ArrowIoThreadPoolCapacity = 0;
+int DefaultArrowCpuThreadPoolCapacity = 0;
+int DefaultArrowIoThreadPoolCapacity = 0;
 
 void EnsureIcebergRegistrations() {
   static const bool registered = [] {
@@ -29,12 +46,71 @@ void EnsureIcebergRegistrations() {
   (void)registered;
 }
 
+void CaptureArrowThreadPoolDefaults() {
+  static const bool captured = [] {
+    DefaultArrowCpuThreadPoolCapacity = arrow::GetCpuThreadPoolCapacity();
+    DefaultArrowIoThreadPoolCapacity = arrow::io::GetIOThreadPoolCapacity();
+    return true;
+  }();
+  (void)captured;
+}
+
+void WarnArrowThreadPoolCapacityError(const char* pool_name,
+                                      const arrow::Status& status) {
+  std::string message = status.ToString();
+  ereport(WARNING, (errmsg("could not set Arrow %s thread pool capacity: %s", pool_name,
+                           message.c_str())));
+}
+
+void ApplyArrowCpuThreadPoolCapacity(int configured_capacity) {
+  CaptureArrowThreadPoolDefaults();
+  int capacity =
+      configured_capacity > 0 ? configured_capacity : DefaultArrowCpuThreadPoolCapacity;
+  auto status = arrow::SetCpuThreadPoolCapacity(capacity);
+  if (!status.ok()) {
+    WarnArrowThreadPoolCapacityError("CPU", status);
+  }
+}
+
+void ApplyArrowIoThreadPoolCapacity(int configured_capacity) {
+  CaptureArrowThreadPoolDefaults();
+  int capacity =
+      configured_capacity > 0 ? configured_capacity : DefaultArrowIoThreadPoolCapacity;
+  auto status = arrow::io::SetIOThreadPoolCapacity(capacity);
+  if (!status.ok()) {
+    WarnArrowThreadPoolCapacityError("I/O", status);
+  }
+}
+
+void AssignArrowCpuThreadPoolCapacity(int new_value, void*) {
+  ApplyArrowCpuThreadPoolCapacity(new_value);
+}
+
+void AssignArrowIoThreadPoolCapacity(int new_value, void*) {
+  ApplyArrowIoThreadPoolCapacity(new_value);
+}
+
+void RegisterArrowThreadPoolGucs() {
+  CaptureArrowThreadPoolDefaults();
+  DefineCustomIntVariable(
+      "pgiceberg.arrow_cpu_threads",
+      "Sets the Arrow CPU thread pool capacity for this PostgreSQL backend.",
+      "Set to 0 to keep Arrow's default CPU thread pool capacity.",
+      &ArrowCpuThreadPoolCapacity, 0, 0, kArrowThreadPoolMaxCapacity, PGC_USERSET, 0,
+      nullptr, AssignArrowCpuThreadPoolCapacity, nullptr);
+  DefineCustomIntVariable(
+      "pgiceberg.arrow_io_threads",
+      "Sets the Arrow I/O thread pool capacity for this PostgreSQL backend.",
+      "Set to 0 to keep Arrow's default I/O thread pool capacity.",
+      &ArrowIoThreadPoolCapacity, 0, 0, kArrowThreadPoolMaxCapacity, PGC_USERSET, 0,
+      nullptr, AssignArrowIoThreadPoolCapacity, nullptr);
+  ApplyArrowCpuThreadPoolCapacity(ArrowCpuThreadPoolCapacity);
+  ApplyArrowIoThreadPoolCapacity(ArrowIoThreadPoolCapacity);
+}
+
 }  // namespace
 
 extern "C" {
-#include "postgres.h"
-#include "fmgr.h"
-
 PG_MODULE_MAGIC;
 
 // Transaction callbacks must be registered at module load time, not from an
@@ -43,6 +119,7 @@ PG_MODULE_MAGIC;
 // Iceberg commit state.
 void _PG_init(void) {
   EnsureIcebergRegistrations();
+  RegisterArrowThreadPoolGucs();
   pgiceberg::fdw::RegisterTransactionCallbacks();
   pgiceberg::tableam::RegisterTableAmHooks();
 }
