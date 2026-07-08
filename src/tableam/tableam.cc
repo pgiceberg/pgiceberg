@@ -13,6 +13,7 @@
 #include "tableam/tableam.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -51,9 +52,11 @@ extern "C" {
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_type_d.h"
 #include "commands/defrem.h"
 #include "executor/executor.h"
+#include "executor/spi.h"
 #include "executor/tuptable.h"
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -67,8 +70,8 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/syscache.h"
 #include "utils/varlena.h"
-#include "executor/spi.h"
 }
 
 namespace pgiceberg::tableam {
@@ -134,7 +137,7 @@ struct NativeCreateOptions {
   int format_version = 2;
 };
 
-enum class PendingCatalogChangeKind {
+enum class PendingCatalogChangeKind : std::uint8_t {
   kCreate,
   kDrop,
 };
@@ -504,7 +507,19 @@ bool IsIcebergCreateTableAsStmt(CreateTableAsStmt* stmt) {
 
 bool RelationUsesIcebergTableAm(Oid relid) {
   Oid iceberg_am = get_table_am_oid(kIcebergTableAmName, true);
-  return OidIsValid(iceberg_am) && get_rel_relam(relid) == iceberg_am;
+  if (!OidIsValid(iceberg_am)) {
+    return false;
+  }
+
+  HeapTuple tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+  if (!HeapTupleIsValid(tuple)) {
+    return false;
+  }
+
+  auto* pg_class = static_cast<Form_pg_class>(GETSTRUCT(tuple));
+  Oid relam = pg_class->relam;
+  ReleaseSysCache(tuple);
+  return relam == iceberg_am;
 }
 
 void ErrorUnsupported(const char* operation) {
