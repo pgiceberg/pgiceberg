@@ -785,13 +785,14 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
   PGICEBERG_ASSIGN_OR_RETURN(
       auto table,
       pgiceberg::LoadIcebergTable(catalog_options, RelationGetRelationName(relation)));
-  PGICEBERG_ASSIGN_OR_RETURN(auto read_table, ReadTableForCurrentTransaction(options, table));
+  PGICEBERG_ASSIGN_OR_RETURN(auto read_table,
+                             ReadTableForCurrentTransaction(options, table));
 
   PGICEBERG_ASSIGN_OR_RETURN(auto iceberg_schema,
                              FromIcebergResult(read_table->schema(), "load schema"));
   PGICEBERG_ASSIGN_OR_RETURN(auto arrow_schema, ArrowSchemaFor(*iceberg_schema));
-  PGICEBERG_ASSIGN_OR_RETURN(auto spec,
-                             FromIcebergResult(read_table->spec(), "load partition spec"));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto spec, FromIcebergResult(read_table->spec(), "load partition spec"));
   if (!spec->fields().empty()) {
     return std::unexpected(
         MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -813,9 +814,9 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
       }
     }
     if (attr_number == InvalidAttrNumber) {
-      return std::unexpected(MakeError(
-          ERRCODE_FDW_ERROR,
-          "Iceberg field \"" + field->name() + "\" does not exist in table"));
+      return std::unexpected(
+          MakeError(ERRCODE_FDW_ERROR,
+                    "Iceberg field \"" + field->name() + "\" does not exist in table"));
     }
     attr_numbers.push_back(attr_number);
   }
@@ -836,7 +837,8 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
     return std::unexpected(pending_table_result.error());
   }
   return QueuePendingModifyChange(
-      **pending_table_result, std::make_unique<PendingAppendChange>(std::move(data_file)));
+      **pending_table_result,
+      std::make_unique<PendingAppendChange>(std::move(data_file)));
 }
 
 // ModifyState is statement-local executor state.  It owns transient row and

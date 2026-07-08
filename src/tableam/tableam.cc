@@ -240,6 +240,19 @@ Result<std::shared_ptr<iceberg::Schema>> SchemaFromRelation(Relation relation) {
   return std::make_shared<iceberg::Schema>(std::move(fields), 1);
 }
 
+std::vector<int> AllTableColumns(Relation relation) {
+  TupleDesc desc = RelationGetDescr(relation);
+  std::vector<int> attnums;
+  attnums.reserve(desc->natts);
+  for (int i = 0; i < desc->natts; i++) {
+    Form_pg_attribute attr = TupleDescAttr(desc, i);
+    if (!attr->attisdropped) {
+      attnums.push_back(i + 1);
+    }
+  }
+  return attnums;
+}
+
 iceberg::TableIdentifier TableIdentifierForBinding(const Binding& binding) {
   return iceberg::TableIdentifier{
       .ns = iceberg::Namespace{.levels = SplitNamespace(binding.name_space)},
@@ -775,7 +788,8 @@ TableScanDesc IcebergScanBegin(Relation rel, Snapshot snapshot, int nkeys,
   scan->base.rs_flags = flags;
   PgStatusGuard([&]() -> Status {
     PGICEBERG_ASSIGN_OR_RETURN(auto options, OptionsFromBinding(rel));
-    PGICEBERG_ASSIGN_OR_RETURN(scan->state, fdw::BeginScan(rel, options));
+    PGICEBERG_ASSIGN_OR_RETURN(scan->state,
+                               fdw::BeginScan(rel, options, AllTableColumns(rel)));
     return Ok();
   });
   return reinterpret_cast<TableScanDesc>(scan);
