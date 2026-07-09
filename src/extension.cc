@@ -119,6 +119,12 @@ PG_MODULE_MAGIC;
 // PostgreSQL transaction and all of them have to share the same pending
 // Iceberg commit state.
 void _PG_init(void) {
+  static bool initialized = false;
+  if (initialized) {
+    return;
+  }
+  initialized = true;
+
   EnsureIcebergRegistrations();
   RegisterArrowThreadPoolGucs();
   pgiceberg::fdw::RegisterTransactionCallbacks();

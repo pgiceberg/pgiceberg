@@ -455,8 +455,13 @@ Status ProcessMirrors() {
 }
 
 void RunWorkerLoop() {
+#if PG_VERSION_NUM >= 170000
   BackgroundWorkerInitializeConnection(LogicalSyncDatabase, LogicalSyncUser,
                                        BGWORKER_BYPASS_ROLELOGINCHECK);
+#else
+  BackgroundWorkerInitializeConnection(LogicalSyncDatabase, LogicalSyncUser,
+                                       BGWORKER_BYPASS_ALLOWCONN);
+#endif
   while (!GotSigterm) {
     PG_TRY();
     {
@@ -558,6 +563,14 @@ static void PgIcebergOutputBegin(LogicalDecodingContext*, ReorderBufferTXN*) {}
 static void PgIcebergOutputCommit(LogicalDecodingContext*, ReorderBufferTXN*,
                                   XLogRecPtr) {}
 
+static HeapTuple PgIcebergOutputNewTuple(ReorderBufferChange* change) {
+#if PG_VERSION_NUM >= 170000
+  return change->data.tp.newtuple;
+#else
+  return change->data.tp.newtuple == nullptr ? nullptr : &change->data.tp.newtuple->tuple;
+#endif
+}
+
 static void PgIcebergOutputChange(LogicalDecodingContext* ctx, ReorderBufferTXN*,
                                   Relation relation, ReorderBufferChange* change) {
   char action = '\0';
@@ -565,7 +578,7 @@ static void PgIcebergOutputChange(LogicalDecodingContext* ctx, ReorderBufferTXN*
   switch (change->action) {
     case REORDER_BUFFER_CHANGE_INSERT:
       action = 'I';
-      tuple = change->data.tp.newtuple;
+      tuple = PgIcebergOutputNewTuple(change);
       break;
     case REORDER_BUFFER_CHANGE_UPDATE:
       action = 'U';
