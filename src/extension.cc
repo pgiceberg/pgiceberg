@@ -26,6 +26,7 @@ extern "C" {
 #include "postgres.h"
 #include "fmgr.h"
 #include "utils/guc.h"
+#include "utils/guc_tables.h"
 }
 
 namespace {
@@ -109,6 +110,12 @@ void RegisterArrowThreadPoolGucs() {
   ApplyArrowIoThreadPoolCapacity(ArrowIoThreadPoolCapacity);
 }
 
+bool PgIcebergGucsRegistered() {
+  const struct config_generic* record =
+      find_option("pgiceberg.arrow_cpu_threads", false, true, WARNING);
+  return record != nullptr && (record->flags & GUC_CUSTOM_PLACEHOLDER) == 0;
+}
+
 }  // namespace
 
 extern "C" {
@@ -120,7 +127,8 @@ PG_MODULE_MAGIC;
 // Iceberg commit state.
 void _PG_init(void) {
   static bool initialized = false;
-  if (initialized) {
+  if (initialized || PgIcebergGucsRegistered()) {
+    initialized = true;
     return;
   }
   initialized = true;
