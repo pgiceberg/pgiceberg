@@ -18,6 +18,18 @@ SELECT fdwname
 FROM pg_foreign_data_wrapper
 WHERE fdwname = 'pgiceberg';
 
+SHOW pgiceberg.arrow_cpu_threads;
+SHOW pgiceberg.arrow_io_threads;
+
+SET pgiceberg.arrow_cpu_threads = 1;
+SET pgiceberg.arrow_io_threads = 1;
+
+SHOW pgiceberg.arrow_cpu_threads;
+SHOW pgiceberg.arrow_io_threads;
+
+RESET pgiceberg.arrow_cpu_threads;
+RESET pgiceberg.arrow_io_threads;
+
 \set VERBOSITY terse
 
 CREATE SERVER invalid_option
