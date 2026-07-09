@@ -24,6 +24,7 @@ add_library(pgiceberg MODULE
             functions/create_table.cc
             functions/metadata.cc
             functions/register_table.cc
+            logical/logical.cc
             tableam/tableam.cc
             utilities/avro_fdw.cc
             utilities/parquet_fdw.cc)

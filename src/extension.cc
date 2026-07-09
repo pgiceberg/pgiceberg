@@ -11,6 +11,7 @@
 // limitations under the License.
 
 #include "fdw/modify_state.h"
+#include "logical/logical.h"
 #include "tableam/tableam.h"
 
 #include <string>
@@ -122,5 +123,6 @@ void _PG_init(void) {
   RegisterArrowThreadPoolGucs();
   pgiceberg::fdw::RegisterTransactionCallbacks();
   pgiceberg::tableam::RegisterTableAmHooks();
+  pgiceberg::logical::RegisterLogicalWorker();
 }
 }

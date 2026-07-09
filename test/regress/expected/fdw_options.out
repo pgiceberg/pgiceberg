@@ -17,6 +17,11 @@ WHERE fdwname = 'pgiceberg';
 fdwname
 pgiceberg
 (1 row)
+SELECT count(*) AS logical_mirror_count
+FROM pgiceberg.logical_mirror_status();
+logical_mirror_count
+0
+(1 row)
 SHOW pgiceberg.arrow_cpu_threads;
 pgiceberg.arrow_cpu_threads
 0

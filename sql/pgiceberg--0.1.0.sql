@@ -56,6 +56,29 @@ COMMENT ON COLUMN pgiceberg.table_bindings.namespace IS
 COMMENT ON COLUMN pgiceberg.table_bindings.table_name IS
   'Iceberg table name used to load the table.';
 
+CREATE TABLE pgiceberg.logical_mirrors (
+  source_relid oid PRIMARY KEY,
+  catalog text NOT NULL,
+  namespace text NOT NULL,
+  table_name text NOT NULL,
+  slot_name name NOT NULL UNIQUE,
+  enabled boolean NOT NULL DEFAULT true,
+  batch_size integer NOT NULL DEFAULT 1024 CHECK (batch_size > 0),
+  last_flushed_lsn pg_lsn,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+) USING heap;
+
+COMMENT ON TABLE pgiceberg.logical_mirrors IS
+  'Append-only logical decoding mirrors from PostgreSQL heap tables to Iceberg tables.';
+COMMENT ON COLUMN pgiceberg.logical_mirrors.source_relid IS
+  'OID of the PostgreSQL source table consumed through logical decoding.';
+COMMENT ON COLUMN pgiceberg.logical_mirrors.slot_name IS
+  'Logical replication slot consumed by the pgiceberg background worker.';
+COMMENT ON COLUMN pgiceberg.logical_mirrors.last_flushed_lsn IS
+  'Latest LSN consumed after a successful Iceberg append.';
+
 CREATE FUNCTION pgiceberg.add_catalog(
   name text,
   catalog_type text,
@@ -230,6 +253,200 @@ COMMENT ON FUNCTION pgiceberg.register_table_from_location(text, text, text, tex
   'Register an existing Iceberg table by finding the latest metadata JSON under a table location.';
 
 REVOKE EXECUTE ON FUNCTION pgiceberg.register_table_from_location(text, text, text, text, boolean) FROM PUBLIC;
+
+-- Append-only logical decoding mirrors.
+CREATE FUNCTION pgiceberg.create_logical_mirror(
+  src regclass,
+  catalog text,
+  namespace text,
+  table_name text,
+  slot_name text DEFAULT NULL,
+  create_iceberg_table boolean DEFAULT true,
+  batch_size integer DEFAULT 1024
+)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg
+AS $$
+DECLARE
+  source_oid oid := src::oid;
+  resolved_slot name := COALESCE(
+    slot_name,
+    'pgiceberg_' || source_oid::text
+  )::name;
+  column_names text[];
+  column_types regtype[];
+  column_required boolean[];
+  source_kind "char";
+BEGIN
+  SELECT relkind
+  INTO source_kind
+  FROM pg_class
+  WHERE oid = source_oid;
+
+  IF source_kind IS DISTINCT FROM 'r' THEN
+    RAISE EXCEPTION 'pgiceberg logical mirrors require a heap source table'
+      USING ERRCODE = '0A000';
+  END IF;
+
+  IF batch_size <= 0 THEN
+    RAISE EXCEPTION 'batch_size must be greater than zero'
+      USING ERRCODE = '22023';
+  END IF;
+
+  SELECT
+    array_agg(attname::text ORDER BY attnum),
+    array_agg(atttypid::regtype ORDER BY attnum),
+    array_agg(attnotnull ORDER BY attnum)
+  INTO column_names, column_types, column_required
+  FROM pg_attribute
+  WHERE attrelid = source_oid
+    AND attnum > 0
+    AND NOT attisdropped;
+
+  IF column_names IS NULL THEN
+    RAISE EXCEPTION 'source table % has no columns', src
+      USING ERRCODE = '42P16';
+  END IF;
+
+  IF create_iceberg_table THEN
+    PERFORM pgiceberg.create_table(
+      catalog,
+      namespace,
+      table_name,
+      column_names,
+      column_types,
+      column_required,
+      false,
+      2
+    );
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_replication_slots
+    WHERE pg_replication_slots.slot_name = resolved_slot::text
+  ) THEN
+    PERFORM pg_create_logical_replication_slot(resolved_slot, 'pgiceberg');
+  END IF;
+
+  INSERT INTO pgiceberg.logical_mirrors (
+    source_relid,
+    catalog,
+    namespace,
+    table_name,
+    slot_name,
+    enabled,
+    batch_size,
+    last_error,
+    created_at,
+    updated_at
+  )
+  VALUES (
+    source_oid,
+    catalog,
+    namespace,
+    table_name,
+    resolved_slot,
+    true,
+    batch_size,
+    NULL,
+    now(),
+    now()
+  )
+  ON CONFLICT (source_relid) DO UPDATE
+  SET catalog = EXCLUDED.catalog,
+      namespace = EXCLUDED.namespace,
+      table_name = EXCLUDED.table_name,
+      slot_name = EXCLUDED.slot_name,
+      enabled = true,
+      batch_size = EXCLUDED.batch_size,
+      last_error = NULL,
+      updated_at = now();
+END;
+$$;
+
+COMMENT ON FUNCTION pgiceberg.create_logical_mirror(regclass, text, text, text, text, boolean, integer) IS
+  'Create or replace an append-only logical decoding mirror from a PostgreSQL heap table to an Iceberg table.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.create_logical_mirror(regclass, text, text, text, text, boolean, integer) FROM PUBLIC;
+
+CREATE FUNCTION pgiceberg.drop_logical_mirror(
+  src regclass,
+  drop_slot boolean DEFAULT true
+)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg
+AS $$
+DECLARE
+  mirror_slot name;
+BEGIN
+  SELECT slot_name
+  INTO mirror_slot
+  FROM pgiceberg.logical_mirrors
+  WHERE source_relid = src::oid;
+
+  DELETE FROM pgiceberg.logical_mirrors
+  WHERE source_relid = src::oid;
+
+  IF drop_slot AND mirror_slot IS NOT NULL THEN
+    PERFORM pg_drop_replication_slot(mirror_slot)
+    WHERE EXISTS (
+      SELECT 1
+      FROM pg_replication_slots
+      WHERE pg_replication_slots.slot_name = mirror_slot::text
+    );
+  END IF;
+END;
+$$;
+
+COMMENT ON FUNCTION pgiceberg.drop_logical_mirror(regclass, boolean) IS
+  'Remove a pgiceberg logical mirror and optionally drop its logical replication slot.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.drop_logical_mirror(regclass, boolean) FROM PUBLIC;
+
+CREATE FUNCTION pgiceberg.logical_mirror_status()
+RETURNS TABLE (
+  source_relid oid,
+  source_table regclass,
+  catalog text,
+  namespace text,
+  table_name text,
+  slot_name name,
+  enabled boolean,
+  batch_size integer,
+  last_flushed_lsn pg_lsn,
+  restart_lsn pg_lsn,
+  confirmed_flush_lsn pg_lsn,
+  active boolean,
+  last_error text
+)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg
+AS $$
+  SELECT
+    m.source_relid,
+    m.source_relid::regclass,
+    m.catalog,
+    m.namespace,
+    m.table_name,
+    m.slot_name,
+    m.enabled,
+    m.batch_size,
+    m.last_flushed_lsn,
+    s.restart_lsn,
+    s.confirmed_flush_lsn,
+    s.active,
+    m.last_error
+  FROM pgiceberg.logical_mirrors AS m
+  LEFT JOIN pg_replication_slots AS s
+    ON s.slot_name = m.slot_name::text
+  ORDER BY m.source_relid;
+$$;
+
+COMMENT ON FUNCTION pgiceberg.logical_mirror_status() IS
+  'Return pgiceberg logical mirror metadata and replication slot progress.';
 
 -- Metadata inspection helpers.
 CREATE FUNCTION pgiceberg.metadata_file_json(

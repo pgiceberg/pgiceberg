@@ -13,6 +13,7 @@
 if(POSTGRESQL_REGRESS)
   set(PGICEBERG_REGRESS_TESTS
       fdw_options
+      logical_decoding
       fdw_dml
       fdw_import_schema
       tableam_native
@@ -40,7 +41,9 @@ if(POSTGRESQL_REGRESS)
                  "${PGICEBERG_REGRESS_EXTENSION_DIR}/pgiceberg--0.1.0.sql" COPYONLY)
 
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
-       "unix_socket_directories = '/tmp'\n" "listen_addresses = '127.0.0.1'\n")
+       "unix_socket_directories = '/tmp'\n" "listen_addresses = '127.0.0.1'\n"
+       "wal_level = logical\n"
+       "dynamic_library_path = '${PROJECT_BINARY_DIR}/src:$libdir'\n")
   if(POSTGRESQL_VERSION VERSION_GREATER_EQUAL "18")
     file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
          "extension_control_path = '${CMAKE_CURRENT_BINARY_DIR}:$system'\n")
