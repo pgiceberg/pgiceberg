@@ -16,6 +16,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -54,7 +55,6 @@ extern "C" {
 #include "utils/pg_lsn.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
-#include "utils/wait_event_types.h"
 }
 
 namespace pgiceberg::logical {
@@ -87,14 +87,16 @@ Status EnsureSpiOk(int result, int expected, const char* message) {
   return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR, message));
 }
 
-std::string TextDatumToString(Datum value) { return std::string(TextDatumGetCString(value)); }
+std::string TextDatumToString(Datum value) {
+  return std::string(TextDatumGetCString(value));
+}
 
 Result<std::string> SpiTextColumn(HeapTuple tuple, TupleDesc desc, int column) {
   bool is_null = false;
   Datum value = SPI_getbinval(tuple, desc, column, &is_null);
   if (is_null) {
-    return std::unexpected(
-        MakeError(ERRCODE_NULL_VALUE_NOT_ALLOWED, "pgiceberg logical mirror row contains NULL"));
+    return std::unexpected(MakeError(ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                                     "pgiceberg logical mirror row contains NULL"));
   }
   return TextDatumToString(value);
 }
@@ -103,8 +105,8 @@ Result<Oid> SpiOidColumn(HeapTuple tuple, TupleDesc desc, int column) {
   bool is_null = false;
   Datum value = SPI_getbinval(tuple, desc, column, &is_null);
   if (is_null) {
-    return std::unexpected(
-        MakeError(ERRCODE_NULL_VALUE_NOT_ALLOWED, "pgiceberg logical mirror row contains NULL"));
+    return std::unexpected(MakeError(ERRCODE_NULL_VALUE_NOT_ALLOWED,
+                                     "pgiceberg logical mirror row contains NULL"));
   }
   return DatumGetObjectId(value);
 }
@@ -144,16 +146,16 @@ bool ConsumeChar(std::string_view input, std::size_t& pos, char expected) {
 Result<std::string_view> ReadToken(std::string_view input, std::size_t& pos,
                                    char delimiter) {
   if (pos > input.size()) {
-    return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR,
-                                     "invalid pgiceberg logical decoding record"));
+    return std::unexpected(
+        MakeError(ERRCODE_INTERNAL_ERROR, "invalid pgiceberg logical decoding record"));
   }
   const std::size_t start = pos;
   while (pos < input.size() && input[pos] != delimiter) {
     pos++;
   }
   if (pos >= input.size()) {
-    return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR,
-                                     "invalid pgiceberg logical decoding record"));
+    return std::unexpected(
+        MakeError(ERRCODE_INTERNAL_ERROR, "invalid pgiceberg logical decoding record"));
   }
   std::string_view token = input.substr(start, pos - start);
   pos++;
@@ -165,8 +167,8 @@ Result<T> ParseInteger(std::string_view token) {
   T value{};
   auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
   if (ec != std::errc() || ptr != token.data() + token.size()) {
-    return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR,
-                                     "invalid integer in pgiceberg logical decoding record"));
+    return std::unexpected(MakeError(
+        ERRCODE_INTERNAL_ERROR, "invalid integer in pgiceberg logical decoding record"));
   }
   return value;
 }
@@ -209,11 +211,11 @@ Result<DecodedChange> ParseDecodedChange(std::string_view input) {
       pos++;
     }
     if (pos >= input.size()) {
-      return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR,
-                                       "invalid value length in logical decoding record"));
+      return std::unexpected(MakeError(
+          ERRCODE_INTERNAL_ERROR, "invalid value length in logical decoding record"));
     }
-    PGICEBERG_ASSIGN_OR_RETURN(auto len,
-                               ParseInteger<std::size_t>(input.substr(len_start, pos - len_start)));
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto len, ParseInteger<std::size_t>(input.substr(len_start, pos - len_start)));
     pos++;
     if (pos + len > input.size()) {
       return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR,
@@ -225,12 +227,12 @@ Result<DecodedChange> ParseDecodedChange(std::string_view input) {
     }
     pos += len;
     if (i + 1 < ncols && !ConsumeChar(input, pos, '\t')) {
-      return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR,
-                                       "invalid logical decoding record separator"));
+      return std::unexpected(
+          MakeError(ERRCODE_INTERNAL_ERROR, "invalid logical decoding record separator"));
     }
     if (attnum <= 0) {
-      return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR,
-                                       "invalid attribute number in logical decoding record"));
+      return std::unexpected(MakeError(
+          ERRCODE_INTERNAL_ERROR, "invalid attribute number in logical decoding record"));
     }
     if (static_cast<std::size_t>(attnum) >= change.values_by_attnum.size()) {
       change.values_by_attnum.resize(static_cast<std::size_t>(attnum) + 1);
@@ -248,8 +250,8 @@ Result<std::vector<Mirror>> LoadMirrors() {
       "WHERE enabled "
       "ORDER BY source_relid";
   const int result = SPI_execute(sql, true, 0);
-  PGICEBERG_RETURN_NOT_OK(EnsureSpiOk(result, SPI_OK_SELECT,
-                                      "could not read pgiceberg logical mirrors"));
+  PGICEBERG_RETURN_NOT_OK(
+      EnsureSpiOk(result, SPI_OK_SELECT, "could not read pgiceberg logical mirrors"));
 
   std::vector<Mirror> mirrors;
   mirrors.reserve(SPI_processed);
@@ -317,8 +319,8 @@ Status UpdateMirrorProgress(const Mirror& mirror, const std::string& lsn,
       "    updated_at = now() "
       "WHERE source_relid = $1";
   Oid argtypes[] = {OIDOID, LSNOID, TEXTOID};
-  char nulls[] = {' ', lsn.empty() ? 'n' : ' ',
-                  error_message == nullptr ? 'n' : ' ', '\0'};
+  char nulls[] = {' ', lsn.empty() ? 'n' : ' ', error_message == nullptr ? 'n' : ' ',
+                  '\0'};
   Datum values[] = {
       ObjectIdGetDatum(mirror.source_relid),
       lsn.empty() ? static_cast<Datum>(0)
@@ -358,8 +360,8 @@ Result<TupleTableSlot*> SlotFromDecodedRow(Relation relation,
     const int attnum = attr->attnum;
     if (attnum <= 0 ||
         static_cast<std::size_t>(attnum) >= change.values_by_attnum.size()) {
-      return std::unexpected(MakeError(ERRCODE_INTERNAL_ERROR,
-                                       "decoded row is missing a source column"));
+      return std::unexpected(
+          MakeError(ERRCODE_INTERNAL_ERROR, "decoded row is missing a source column"));
     }
     const auto& value = change.values_by_attnum[static_cast<std::size_t>(attnum)];
     if (!value.has_value()) {
@@ -395,8 +397,8 @@ Status AppendDecodedRows(Relation relation, const Mirror& mirror,
     slots.push_back(slot);
   }
 
-  Status status = fdw::AppendSlots(relation, options, slots.data(),
-                                   static_cast<int>(slots.size()));
+  Status status =
+      fdw::AppendSlots(relation, options, slots.data(), static_cast<int>(slots.size()));
   for (auto* slot : slots) {
     ExecDropSingleTupleTableSlot(slot);
   }
@@ -478,7 +480,7 @@ void RunWorkerLoop() {
 
     const int wait_result =
         WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-                  LogicalSyncPollIntervalMs, WAIT_EVENT_LOGICAL_APPLY_MAIN);
+                  LogicalSyncPollIntervalMs, 0);
     if (wait_result & WL_LATCH_SET) {
       ResetLatch(MyLatch);
     }
@@ -492,20 +494,19 @@ void RegisterLogicalGucs() {
       "Database where the pgiceberg logical sync worker runs.",
       "The initial implementation runs one worker against one configured database.",
       &LogicalSyncDatabase, "postgres", PGC_POSTMASTER, 0, nullptr, nullptr, nullptr);
-  DefineCustomStringVariable(
-      "pgiceberg.logical_sync_user", "User for the pgiceberg logical sync worker.",
-      nullptr, &LogicalSyncUser, "postgres", PGC_POSTMASTER, 0, nullptr, nullptr,
-      nullptr);
-  DefineCustomIntVariable(
-      "pgiceberg.logical_sync_poll_interval_ms",
-      "Polling interval for the pgiceberg logical sync worker.", nullptr,
-      &LogicalSyncPollIntervalMs, kDefaultPollIntervalMs, 10, 60000, PGC_SIGHUP, 0,
-      nullptr, nullptr, nullptr);
+  DefineCustomStringVariable("pgiceberg.logical_sync_user",
+                             "User for the pgiceberg logical sync worker.", nullptr,
+                             &LogicalSyncUser, "postgres", PGC_POSTMASTER, 0, nullptr,
+                             nullptr, nullptr);
+  DefineCustomIntVariable("pgiceberg.logical_sync_poll_interval_ms",
+                          "Polling interval for the pgiceberg logical sync worker.",
+                          nullptr, &LogicalSyncPollIntervalMs, kDefaultPollIntervalMs, 10,
+                          60000, PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
   DefineCustomIntVariable(
       "pgiceberg.logical_sync_batch_size",
       "Default maximum number of logical decoding changes consumed per worker poll.",
-      nullptr, &LogicalSyncBatchSize, kDefaultBatchSize, 1, kMaxBatchSize, PGC_SIGHUP,
-      0, nullptr, nullptr, nullptr);
+      nullptr, &LogicalSyncBatchSize, kDefaultBatchSize, 1, kMaxBatchSize, PGC_SIGHUP, 0,
+      nullptr, nullptr, nullptr);
 }
 
 void RegisterWorker() {
@@ -597,8 +598,13 @@ static void PgIcebergOutputChange(LogicalDecodingContext* ctx, ReorderBufferTXN*
       bool typisvarlena = false;
       getTypeOutputInfo(attr->atttypid, &typoutput, &typisvarlena);
       char* text = OidOutputFunctionCall(typoutput, value);
-      appendStringInfo(ctx->out, "\t%d\tv\t%zu:", attr->attnum, std::strlen(text));
-      appendBinaryStringInfo(ctx->out, text, std::strlen(text));
+      const auto text_len = std::strlen(text);
+      if (text_len > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                        errmsg("logical decoding attribute output is too large")));
+      }
+      appendStringInfo(ctx->out, "\t%d\tv\t%zu:", attr->attnum, text_len);
+      appendBinaryStringInfo(ctx->out, text, static_cast<int>(text_len));
       pfree(text);
     }
   }
