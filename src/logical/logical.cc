@@ -460,31 +460,13 @@ Status ProcessMirror(const Mirror& mirror) {
     }
   }
 
-  // LoadCatalogOptions/AppendSlots open their own SPI connection. Release ours
-  // first so nested SPI_connect does not fail while applying Iceberg changes.
-  if (SPI_finish() != SPI_OK_FINISH) {
-    return std::unexpected(
-        MakeError(ERRCODE_INTERNAL_ERROR, "could not disconnect from SPI"));
-  }
-
-  Status apply_status = Ok();
-  {
-    Relation relation = table_open(mirror.source_relid, AccessShareLock);
-    RelationLockGuard relation_guard(relation, AccessShareLock);
-    apply_status = AppendDecodedRows(relation, mirror, inserts);
-    if (apply_status) {
-      // Commit Iceberg before consuming WAL so a failed/crashy Iceberg commit
-      // cannot lose changes. At-least-once delivery may produce duplicates if
-      // the process crashes after Iceberg commit and before slot advancement.
-      apply_status = fdw::FlushPendingModifyChanges();
-    }
-  }
-
-  if (SPI_connect() != SPI_OK_CONNECT) {
-    return std::unexpected(
-        MakeError(ERRCODE_INTERNAL_ERROR, "could not reconnect to SPI"));
-  }
-  PGICEBERG_RETURN_NOT_OK(apply_status);
+  Relation relation = table_open(mirror.source_relid, AccessShareLock);
+  RelationLockGuard relation_guard(relation, AccessShareLock);
+  PGICEBERG_RETURN_NOT_OK(AppendDecodedRows(relation, mirror, inserts));
+  // Commit Iceberg before consuming WAL so a failed/crashy Iceberg commit cannot
+  // lose changes. At-least-once delivery may produce duplicates if the process
+  // crashes after Iceberg commit and before slot advancement.
+  PGICEBERG_RETURN_NOT_OK(fdw::FlushPendingModifyChanges());
 
   if (!last_lsn.empty()) {
     PGICEBERG_RETURN_NOT_OK(AdvanceSlotByCount(mirror, static_cast<int>(rows.size())));

@@ -125,10 +125,18 @@ Status EnsureNamespaceExists(std::shared_ptr<iceberg::sql::SqlCatalog>& catalog,
 }  // namespace
 
 Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
-  if (SPI_connect() != SPI_OK_CONNECT) {
+  const int connect_rc = SPI_connect();
+  const bool started_here = (connect_rc == SPI_OK_CONNECT);
+  if (!started_here && connect_rc != SPI_ERROR_CONNECT) {
     return std::unexpected(
         MakeError(ERRCODE_INTERNAL_ERROR, "could not connect to PostgreSQL SPI"));
   }
+
+  auto finish_if_started = [started_here]() {
+    if (started_here) {
+      SPI_finish();
+    }
+  };
 
   const char* command =
       "SELECT catalog_type, catalog_uri, warehouse, iceberg_catalog_name "
@@ -139,13 +147,13 @@ Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
   const int result =
       SPI_execute_with_args(command, 1, argtypes, values, nullptr, true, 1);
   if (result != SPI_OK_SELECT) {
-    SPI_finish();
+    finish_if_started();
     return std::unexpected(
         MakeError(ERRCODE_INTERNAL_ERROR, "could not read pgiceberg catalog registry"));
   }
 
   if (SPI_processed == 0) {
-    SPI_finish();
+    finish_if_started();
     return std::unexpected(MakeError(
         ERRCODE_UNDEFINED_OBJECT, "pgiceberg catalog \"" + name + "\" is not registered",
         "Register it with pgiceberg.add_catalog(...)."));
@@ -157,7 +165,6 @@ Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
     bool is_null = false;
     Datum value = SPI_getbinval(tuple, tuple_desc, column_number, &is_null);
     if (is_null) {
-      SPI_finish();
       return std::unexpected(MakeError(ERRCODE_NULL_VALUE_NOT_ALLOWED,
                                        "pgiceberg catalog registry contains NULL"));
     }
@@ -165,12 +172,35 @@ Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
   };
 
   CatalogOptions options;
-  PGICEBERG_ASSIGN_OR_RETURN(options.catalog_type, text_column(1));
-  PGICEBERG_ASSIGN_OR_RETURN(options.catalog_uri, text_column(2));
-  PGICEBERG_ASSIGN_OR_RETURN(options.warehouse, text_column(3));
-  PGICEBERG_ASSIGN_OR_RETURN(options.catalog_name, text_column(4));
+  auto catalog_type = text_column(1);
+  if (!catalog_type) {
+    finish_if_started();
+    return std::unexpected(catalog_type.error());
+  }
+  options.catalog_type = std::move(catalog_type).value();
 
-  SPI_finish();
+  auto catalog_uri = text_column(2);
+  if (!catalog_uri) {
+    finish_if_started();
+    return std::unexpected(catalog_uri.error());
+  }
+  options.catalog_uri = std::move(catalog_uri).value();
+
+  auto warehouse = text_column(3);
+  if (!warehouse) {
+    finish_if_started();
+    return std::unexpected(warehouse.error());
+  }
+  options.warehouse = std::move(warehouse).value();
+
+  auto catalog_name = text_column(4);
+  if (!catalog_name) {
+    finish_if_started();
+    return std::unexpected(catalog_name.error());
+  }
+  options.catalog_name = std::move(catalog_name).value();
+
+  finish_if_started();
   return options;
 }
 
