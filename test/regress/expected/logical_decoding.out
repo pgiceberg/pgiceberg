@@ -58,6 +58,7 @@ OPTIONS (
   namespace 'default',
   table 'logical_target'
 );
+-- Drain slot creation bookkeeping before application writes.
 SELECT count(*) AS setup_changes
 FROM pg_logical_slot_get_changes('pgiceberg_logical_regress', NULL, NULL);
 setup_changes
@@ -72,6 +73,7 @@ data
 I|RELID|3|1|v|1:1|2|v|5:alpha|3|v|5:12.50
 I|RELID|3|1|v|1:2|2|n|0:|3|n|0:
 (2 rows)
+-- Exercise the mirror processor path: durable Iceberg append then exact slot advance.
 SELECT pgiceberg.process_logical_mirrors();
 process_logical_mirrors
 
