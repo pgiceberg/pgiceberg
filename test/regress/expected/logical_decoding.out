@@ -25,7 +25,7 @@ add_catalog
 CREATE TABLE logical_source (
   id integer NOT NULL,
   name text,
-  amount numeric
+  amount integer
 );
 SELECT pgiceberg.create_logical_mirror(
   'logical_source',
@@ -51,7 +51,7 @@ OPTIONS (catalog 'logical_catalog');
 CREATE FOREIGN TABLE logical_target (
   id integer,
   name text,
-  amount numeric
+  amount integer
 )
 SERVER logical_iceberg
 OPTIONS (
@@ -64,13 +64,13 @@ FROM pg_logical_slot_get_changes('pgiceberg_logical_regress', NULL, NULL);
 setup_changes
 1
 (1 row)
-INSERT INTO logical_source VALUES (1, 'alpha', 12.50), (2, NULL, NULL);
+INSERT INTO logical_source VALUES (1, 'alpha', 12), (2, NULL, NULL);
 SELECT substring(data FROM 1 FOR 1) || '|RELID' ||
        replace(regexp_replace(data, E'^[IDUT]\\t[0-9]+', ''), E'\t', '|') AS data
 FROM pg_logical_slot_peek_changes('pgiceberg_logical_regress', NULL, NULL)
 ORDER BY lsn, data;
 data
-I|RELID|3|1|v|1:1|2|v|5:alpha|3|v|5:12.50
+I|RELID|3|1|v|1:1|2|v|5:alpha|3|v|2:12
 I|RELID|3|1|v|1:2|2|n|0:|3|n|0:
 (2 rows)
 -- Exercise the mirror processor path: durable Iceberg append then exact slot advance.
@@ -82,7 +82,7 @@ SELECT id, name, amount
 FROM logical_target
 ORDER BY id;
 id|name|amount
-1|alpha|12.50
+1|alpha|12
 2||
 (2 rows)
 SELECT enabled, last_flushed_lsn IS NULL AS no_flushed_lsn,

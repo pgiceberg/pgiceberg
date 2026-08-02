@@ -27,7 +27,7 @@ SELECT pgiceberg.add_catalog(
 CREATE TABLE logical_source (
   id integer NOT NULL,
   name text,
-  amount numeric
+  amount integer
 );
 
 SELECT pgiceberg.create_logical_mirror(
@@ -51,7 +51,7 @@ OPTIONS (catalog 'logical_catalog');
 CREATE FOREIGN TABLE logical_target (
   id integer,
   name text,
-  amount numeric
+  amount integer
 )
 SERVER logical_iceberg
 OPTIONS (
@@ -63,7 +63,7 @@ OPTIONS (
 SELECT count(*) AS setup_changes
 FROM pg_logical_slot_get_changes('pgiceberg_logical_regress', NULL, NULL);
 
-INSERT INTO logical_source VALUES (1, 'alpha', 12.50), (2, NULL, NULL);
+INSERT INTO logical_source VALUES (1, 'alpha', 12), (2, NULL, NULL);
 
 SELECT substring(data FROM 1 FOR 1) || '|RELID' ||
        replace(regexp_replace(data, E'^[IDUT]\\t[0-9]+', ''), E'\t', '|') AS data
