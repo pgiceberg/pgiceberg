@@ -259,14 +259,21 @@ Result<DecodedChange> ParseDecodedChange(std::string_view input) {
 }
 
 Result<std::vector<Mirror>> LoadMirrors() {
+  elog(LOG, "pgiceberg process_logical_mirrors: LoadMirrors enter");
   const char* sql =
-      "SELECT source_relid, catalog, namespace, table_name, slot_name, batch_size "
+      "SELECT source_relid, catalog, \"namespace\", table_name, slot_name, batch_size "
       "FROM pgiceberg.logical_mirrors "
       "WHERE enabled "
       "ORDER BY source_relid";
   const int result = SPI_execute(sql, true, 0);
+  elog(LOG, "pgiceberg process_logical_mirrors: LoadMirrors SPI_execute rc=%d processed=%lu",
+       result, (unsigned long)SPI_processed);
   PGICEBERG_RETURN_NOT_OK(
       EnsureSpiOk(result, SPI_OK_SELECT, "could not read pgiceberg logical mirrors"));
+  if (SPI_tuptable == nullptr) {
+    return std::unexpected(
+        MakeError(ERRCODE_INTERNAL_ERROR, "SPI_tuptable is NULL after reading mirrors"));
+  }
 
   std::vector<Mirror> mirrors;
   mirrors.reserve(SPI_processed);
@@ -286,6 +293,7 @@ Result<std::vector<Mirror>> LoadMirrors() {
     }
     mirrors.push_back(std::move(mirror));
   }
+  elog(LOG, "pgiceberg process_logical_mirrors: LoadMirrors done count=%zu", mirrors.size());
   return mirrors;
 }
 
