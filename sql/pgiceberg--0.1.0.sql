@@ -56,7 +56,11 @@ COMMENT ON COLUMN pgiceberg.table_bindings.namespace IS
 COMMENT ON COLUMN pgiceberg.table_bindings.table_name IS
   'Iceberg table name used to load the table.';
 
-CREATE TABLE pgiceberg.logical_mirrors (
+-- UNLOGGED so mirror progress/status DML is not WAL-logged. Otherwise every
+-- successful apply would leave catalog updates in the same replication slot
+-- that consumes source-table changes (and an in-function drain cannot see
+-- those updates until the surrounding transaction commits).
+CREATE UNLOGGED TABLE pgiceberg.logical_mirrors (
   source_relid oid PRIMARY KEY,
   catalog text NOT NULL,
   namespace text NOT NULL,
@@ -71,7 +75,7 @@ CREATE TABLE pgiceberg.logical_mirrors (
 ) USING heap;
 
 COMMENT ON TABLE pgiceberg.logical_mirrors IS
-  'Append-only logical decoding mirrors from PostgreSQL heap tables to Iceberg tables.';
+  'Append-only logical decoding mirrors from PostgreSQL heap tables to Iceberg tables. UNLOGGED so progress updates do not enter mirror replication slots.';
 COMMENT ON COLUMN pgiceberg.logical_mirrors.source_relid IS
   'OID of the PostgreSQL source table consumed through logical decoding.';
 COMMENT ON COLUMN pgiceberg.logical_mirrors.slot_name IS

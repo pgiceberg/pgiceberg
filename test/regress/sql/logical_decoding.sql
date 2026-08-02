@@ -59,7 +59,7 @@ OPTIONS (
   table 'logical_target'
 );
 
--- Drain slot creation bookkeeping before application writes.
+-- Slot should have no pending changes after mirror setup (catalog table is UNLOGGED).
 SELECT count(*) AS setup_changes
 FROM pg_logical_slot_get_changes('pgiceberg_logical_regress', NULL, NULL);
 

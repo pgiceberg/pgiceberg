@@ -345,9 +345,9 @@ Status AdvanceSlotByCount(const Mirror& mirror, int change_count) {
   return Ok();
 }
 
-// Mirror progress / disable updates write to pgiceberg.logical_mirrors and are
-// themselves decoded by the same slot. Consume those bookkeeping changes so they
-// do not linger as pending source work.
+// Safety net for non-source changes that somehow land in a mirror slot
+// (logical_mirrors itself is UNLOGGED so progress/status DML is not WAL-logged).
+// Stops without consuming when a change for the mirrored source table is next.
 Status DrainNonSourceSlotChanges(const Mirror& mirror) {
   for (;;) {
     PGICEBERG_ASSIGN_OR_RETURN(auto rows, PeekSlotChanges(mirror));

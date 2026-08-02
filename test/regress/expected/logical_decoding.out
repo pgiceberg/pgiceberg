@@ -62,7 +62,7 @@ OPTIONS (
 SELECT count(*) AS setup_changes
 FROM pg_logical_slot_get_changes('pgiceberg_logical_regress', NULL, NULL);
 setup_changes
-1
+0
 (1 row)
 INSERT INTO logical_source VALUES (1, 'alpha', 12), (2, NULL, NULL);
 SELECT substring(data FROM 1 FOR 1) || '|RELID' ||
