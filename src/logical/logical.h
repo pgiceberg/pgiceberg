@@ -12,8 +12,14 @@
 
 #pragma once
 
+#include "common/status.h"
+
 namespace pgiceberg::logical {
 
 void RegisterLogicalWorker();
+
+// Process enabled mirrors once in the current backend/transaction.
+// Used by the background worker and by the SQL test/admin helper.
+Status ProcessLogicalMirrorsOnce();
 
 }  // namespace pgiceberg::logical

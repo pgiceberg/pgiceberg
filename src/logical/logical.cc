@@ -70,10 +70,20 @@ char* LogicalSyncUser = nullptr;
 int LogicalSyncPollIntervalMs = kDefaultPollIntervalMs;
 int LogicalSyncBatchSize = kDefaultBatchSize;
 volatile sig_atomic_t GotSigterm = false;
+volatile sig_atomic_t GotSighup = false;
 
 void HandleSigterm(SIGNAL_ARGS) {
   int save_errno = errno;
   GotSigterm = true;
+  if (MyLatch != nullptr) {
+    SetLatch(MyLatch);
+  }
+  errno = save_errno;
+}
+
+void HandleSighup(SIGNAL_ARGS) {
+  int save_errno = errno;
+  GotSighup = true;
   if (MyLatch != nullptr) {
     SetLatch(MyLatch);
   }
@@ -144,7 +154,7 @@ bool ConsumeChar(std::string_view input, std::size_t& pos, char expected) {
 }
 
 Result<std::string_view> ReadToken(std::string_view input, std::size_t& pos,
-                                   char delimiter) {
+                                   char delimiter, bool allow_eof = false) {
   if (pos > input.size()) {
     return std::unexpected(
         MakeError(ERRCODE_INTERNAL_ERROR, "invalid pgiceberg logical decoding record"));
@@ -154,8 +164,11 @@ Result<std::string_view> ReadToken(std::string_view input, std::size_t& pos,
     pos++;
   }
   if (pos >= input.size()) {
-    return std::unexpected(
-        MakeError(ERRCODE_INTERNAL_ERROR, "invalid pgiceberg logical decoding record"));
+    if (!allow_eof || start >= input.size()) {
+      return std::unexpected(
+          MakeError(ERRCODE_INTERNAL_ERROR, "invalid pgiceberg logical decoding record"));
+    }
+    return input.substr(start);
   }
   std::string_view token = input.substr(start, pos - start);
   pos++;
@@ -187,7 +200,9 @@ Result<DecodedChange> ParseDecodedChange(std::string_view input) {
         MakeError(ERRCODE_INTERNAL_ERROR, "invalid pgiceberg logical decoding record"));
   }
 
-  PGICEBERG_ASSIGN_OR_RETURN(auto relid_token, ReadToken(input, pos, '\t'));
+  // Non-INSERT records are emitted as "<action>\t<relid>" with no trailing
+  // delimiter, so allow EOF to terminate the relid token.
+  PGICEBERG_ASSIGN_OR_RETURN(auto relid_token, ReadToken(input, pos, '\t', true));
   PGICEBERG_ASSIGN_OR_RETURN(change.relid, ParseInteger<Oid>(relid_token));
   if (change.action != 'I') {
     return change;
@@ -298,15 +313,30 @@ Result<std::vector<std::pair<std::string, std::string>>> PeekSlotChanges(
   return rows;
 }
 
-Status AdvanceSlot(const Mirror& mirror, const std::string& lsn) {
+Status AdvanceSlotByCount(const Mirror& mirror, int change_count) {
+  if (change_count <= 0) {
+    return Ok();
+  }
+  // Consume exactly the peeked prefix. Advancing by LSN can skip additional
+  // decoded messages that share the final LSN and were not processed yet.
   const char* sql =
       "SELECT count(*) "
-      "FROM pg_logical_slot_get_changes($1::text::name, $2::pg_lsn, NULL)";
-  Oid argtypes[] = {TEXTOID, LSNOID};
+      "FROM pg_logical_slot_get_changes($1::text::name, NULL, $2::integer)";
+  Oid argtypes[] = {TEXTOID, INT4OID};
   Datum values[] = {CStringGetTextDatum(mirror.slot_name.c_str()),
-                    DirectFunctionCall1(pg_lsn_in, CStringGetDatum(lsn.c_str()))};
+                    Int32GetDatum(change_count)};
   const int result = SPI_execute_with_args(sql, 2, argtypes, values, nullptr, false, 1);
-  return EnsureSpiOk(result, SPI_OK_SELECT, "could not advance pgiceberg logical slot");
+  PGICEBERG_RETURN_NOT_OK(
+      EnsureSpiOk(result, SPI_OK_SELECT, "could not advance pgiceberg logical slot"));
+
+  bool is_null = false;
+  Datum count_datum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &is_null);
+  if (is_null || DatumGetInt64(count_datum) != change_count) {
+    return std::unexpected(MakeError(
+        ERRCODE_INTERNAL_ERROR,
+        "pgiceberg logical slot advanced a different number of changes than peeked"));
+  }
+  return Ok();
 }
 
 Status UpdateMirrorProgress(const Mirror& mirror, const std::string& lsn,
@@ -429,19 +459,41 @@ Status ProcessMirror(const Mirror& mirror) {
     }
   }
 
-  Relation relation = table_open(mirror.source_relid, AccessShareLock);
-  RelationLockGuard relation_guard(relation, AccessShareLock);
-  PGICEBERG_RETURN_NOT_OK(AppendDecodedRows(relation, mirror, inserts));
+  // LoadCatalogOptions/AppendSlots open their own SPI connection. Release ours
+  // first so nested SPI_connect does not fail while applying Iceberg changes.
+  if (SPI_finish() != SPI_OK_FINISH) {
+    return std::unexpected(
+        MakeError(ERRCODE_INTERNAL_ERROR, "could not disconnect from SPI"));
+  }
+
+  Status apply_status = Ok();
+  {
+    Relation relation = table_open(mirror.source_relid, AccessShareLock);
+    RelationLockGuard relation_guard(relation, AccessShareLock);
+    apply_status = AppendDecodedRows(relation, mirror, inserts);
+    if (apply_status) {
+      // Commit Iceberg before consuming WAL so a failed/crashy Iceberg commit
+      // cannot lose changes. At-least-once delivery may produce duplicates if
+      // the process crashes after Iceberg commit and before slot advancement.
+      apply_status = fdw::FlushPendingModifyChanges();
+    }
+  }
+
+  if (SPI_connect() != SPI_OK_CONNECT) {
+    return std::unexpected(
+        MakeError(ERRCODE_INTERNAL_ERROR, "could not reconnect to SPI"));
+  }
+  PGICEBERG_RETURN_NOT_OK(apply_status);
 
   if (!last_lsn.empty()) {
-    PGICEBERG_RETURN_NOT_OK(AdvanceSlot(mirror, last_lsn));
+    PGICEBERG_RETURN_NOT_OK(AdvanceSlotByCount(mirror, static_cast<int>(rows.size())));
     PGICEBERG_RETURN_NOT_OK(UpdateMirrorProgress(mirror, last_lsn, nullptr));
   }
   if (saw_unsupported) {
     const char* message =
         "pgiceberg logical mirrors currently support only INSERT changes";
     PGICEBERG_RETURN_NOT_OK(DisableMirror(mirror, message));
-    ereport(WARNING, (errmsg("%s for source relation %u", message, mirror.source_relid)));
+    ereport(WARNING, (errmsg("%s", message)));
   }
   return Ok();
 }
@@ -463,6 +515,11 @@ void RunWorkerLoop() {
                                        BGWORKER_BYPASS_ALLOWCONN);
 #endif
   while (!GotSigterm) {
+    if (GotSighup) {
+      GotSighup = false;
+      ProcessConfigFile(PGC_SIGHUP);
+    }
+
     PG_TRY();
     {
       StartTransactionCommand();
@@ -542,11 +599,26 @@ void RegisterLogicalWorker() {
   RegisterWorker();
 }
 
+Status ProcessLogicalMirrorsOnce() { return ProcessMirrors(); }
+
 }  // namespace pgiceberg::logical
 
 extern "C" {
 
+PG_FUNCTION_INFO_V1(pgiceberg_process_logical_mirrors);
+
+Datum pgiceberg_process_logical_mirrors(PG_FUNCTION_ARGS) {
+  (void)fcinfo;
+  if (SPI_connect() != SPI_OK_CONNECT) {
+    ereport(ERROR, (errmsg("could not connect to SPI")));
+  }
+  pgiceberg::PgStatusGuard([&]() { return pgiceberg::logical::ProcessLogicalMirrorsOnce(); });
+  SPI_finish();
+  PG_RETURN_VOID();
+}
+
 PGDLLEXPORT void pgiceberg_logical_worker_main(Datum) {
+  pqsignal(SIGHUP, pgiceberg::logical::HandleSighup);
   pqsignal(SIGTERM, pgiceberg::logical::HandleSigterm);
   BackgroundWorkerUnblockSignals();
   pgiceberg::logical::RunWorkerLoop();

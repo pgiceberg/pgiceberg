@@ -77,7 +77,7 @@ COMMENT ON COLUMN pgiceberg.logical_mirrors.source_relid IS
 COMMENT ON COLUMN pgiceberg.logical_mirrors.slot_name IS
   'Logical replication slot consumed by the pgiceberg background worker.';
 COMMENT ON COLUMN pgiceberg.logical_mirrors.last_flushed_lsn IS
-  'Latest LSN consumed after a successful Iceberg append.';
+  'Latest LSN whose decoded changes were durably appended to Iceberg and then consumed from the slot (at-least-once).';
 
 CREATE FUNCTION pgiceberg.add_catalog(
   name text,
@@ -278,7 +278,13 @@ DECLARE
   column_types regtype[];
   column_required boolean[];
   source_kind "char";
+  previous_slot name;
 BEGIN
+  IF NOT has_table_privilege(session_user, src, 'SELECT') THEN
+    RAISE EXCEPTION 'permission denied for table %', src
+      USING ERRCODE = '42501';
+  END IF;
+
   SELECT relkind
   INTO source_kind
   FROM pg_class
@@ -293,6 +299,10 @@ BEGIN
     RAISE EXCEPTION 'batch_size must be greater than zero'
       USING ERRCODE = '22023';
   END IF;
+
+  -- Block concurrent writers while establishing the slot so committed inserts
+  -- between setup steps are not missed by an append-only "from now" mirror.
+  EXECUTE format('LOCK TABLE %s IN SHARE ROW EXCLUSIVE MODE', src);
 
   SELECT
     array_agg(attname::text ORDER BY attnum),
@@ -309,6 +319,21 @@ BEGIN
       USING ERRCODE = '42P16';
   END IF;
 
+  SELECT logical_mirrors.slot_name
+  INTO previous_slot
+  FROM pgiceberg.logical_mirrors
+  WHERE source_relid = source_oid;
+
+  -- Create the replication slot before Iceberg table setup so the slot's
+  -- start point is established as early as possible under the table lock.
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_replication_slots
+    WHERE pg_replication_slots.slot_name = resolved_slot::text
+  ) THEN
+    PERFORM pg_create_logical_replication_slot(resolved_slot, 'pgiceberg');
+  END IF;
+
   IF create_iceberg_table THEN
     PERFORM pgiceberg.create_table(
       catalog,
@@ -320,14 +345,6 @@ BEGIN
       false,
       2
     );
-  END IF;
-
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_replication_slots
-    WHERE pg_replication_slots.slot_name = resolved_slot::text
-  ) THEN
-    PERFORM pg_create_logical_replication_slot(resolved_slot, 'pgiceberg');
   END IF;
 
   INSERT INTO pgiceberg.logical_mirrors (
@@ -363,11 +380,21 @@ BEGIN
       batch_size = EXCLUDED.batch_size,
       last_error = NULL,
       updated_at = now();
+
+  IF previous_slot IS NOT NULL
+     AND previous_slot IS DISTINCT FROM resolved_slot
+     AND EXISTS (
+       SELECT 1
+       FROM pg_replication_slots
+       WHERE pg_replication_slots.slot_name = previous_slot::text
+     ) THEN
+    PERFORM pg_drop_replication_slot(previous_slot);
+  END IF;
 END;
 $$;
 
 COMMENT ON FUNCTION pgiceberg.create_logical_mirror(regclass, text, text, text, text, boolean, integer) IS
-  'Create or replace an append-only logical decoding mirror from a PostgreSQL heap table to an Iceberg table.';
+  'Create or replace an append-only logical decoding mirror from a PostgreSQL heap table to an Iceberg table. Starts from the slot creation LSN (no automatic backfill). Requires SELECT on the source table.';
 
 REVOKE EXECUTE ON FUNCTION pgiceberg.create_logical_mirror(regclass, text, text, text, text, boolean, integer) FROM PUBLIC;
 
@@ -382,6 +409,11 @@ AS $$
 DECLARE
   mirror_slot name;
 BEGIN
+  IF NOT has_table_privilege(session_user, src, 'SELECT') THEN
+    RAISE EXCEPTION 'permission denied for table %', src
+      USING ERRCODE = '42501';
+  END IF;
+
   SELECT slot_name
   INTO mirror_slot
   FROM pgiceberg.logical_mirrors
@@ -402,7 +434,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION pgiceberg.drop_logical_mirror(regclass, boolean) IS
-  'Remove a pgiceberg logical mirror and optionally drop its logical replication slot.';
+  'Remove a pgiceberg logical mirror and optionally drop its logical replication slot. Call before DROP EXTENSION to avoid orphaned slots.';
 
 REVOKE EXECUTE ON FUNCTION pgiceberg.drop_logical_mirror(regclass, boolean) FROM PUBLIC;
 
@@ -448,6 +480,15 @@ $$;
 COMMENT ON FUNCTION pgiceberg.logical_mirror_status() IS
   'Return pgiceberg logical mirror metadata and replication slot progress.';
 
+CREATE FUNCTION pgiceberg.process_logical_mirrors()
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_process_logical_mirrors'
+LANGUAGE C;
+
+COMMENT ON FUNCTION pgiceberg.process_logical_mirrors() IS
+  'Process enabled logical mirrors once: append INSERT changes to Iceberg, then advance each slot. Delivery is at-least-once.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.process_logical_mirrors() FROM PUBLIC;
 -- Metadata inspection helpers.
 CREATE FUNCTION pgiceberg.metadata_file_json(
   metadata_file_location text
