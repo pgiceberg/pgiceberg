@@ -460,17 +460,27 @@ Status ProcessMirror(const Mirror& mirror) {
     }
   }
 
-  Relation relation = table_open(mirror.source_relid, AccessShareLock);
-  RelationLockGuard relation_guard(relation, AccessShareLock);
-  PGICEBERG_RETURN_NOT_OK(AppendDecodedRows(relation, mirror, inserts));
-  // Commit Iceberg before consuming WAL so a failed/crashy Iceberg commit cannot
-  // lose changes. At-least-once delivery may produce duplicates if the process
-  // crashes after Iceberg commit and before slot advancement.
-  PGICEBERG_RETURN_NOT_OK(fdw::FlushPendingModifyChanges());
+  elog(LOG, "pgiceberg logical mirror: parsed %zu inserts unsupported=%d", inserts.size(),
+       saw_unsupported ? 1 : 0);
+
+  {
+    Relation relation = table_open(mirror.source_relid, AccessShareLock);
+    RelationLockGuard relation_guard(relation, AccessShareLock);
+    elog(LOG, "pgiceberg logical mirror: appending rows");
+    PGICEBERG_RETURN_NOT_OK(AppendDecodedRows(relation, mirror, inserts));
+    elog(LOG, "pgiceberg logical mirror: flushing Iceberg commit");
+    // Commit Iceberg before consuming WAL so a failed/crashy Iceberg commit cannot
+    // lose changes. At-least-once delivery may produce duplicates if the process
+    // crashes after Iceberg commit and before slot advancement.
+    PGICEBERG_RETURN_NOT_OK(fdw::FlushPendingModifyChanges());
+    elog(LOG, "pgiceberg logical mirror: Iceberg flush complete");
+  }
 
   if (!last_lsn.empty()) {
+    elog(LOG, "pgiceberg logical mirror: advancing slot by %zu", rows.size());
     PGICEBERG_RETURN_NOT_OK(AdvanceSlotByCount(mirror, static_cast<int>(rows.size())));
     PGICEBERG_RETURN_NOT_OK(UpdateMirrorProgress(mirror, last_lsn, nullptr));
+    elog(LOG, "pgiceberg logical mirror: slot advanced");
   }
   if (saw_unsupported) {
     const char* message =
