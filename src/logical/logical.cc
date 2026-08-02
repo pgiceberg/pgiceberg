@@ -345,6 +345,27 @@ Status AdvanceSlotByCount(const Mirror& mirror, int change_count) {
   return Ok();
 }
 
+// Mirror progress / disable updates write to pgiceberg.logical_mirrors and are
+// themselves decoded by the same slot. Consume those bookkeeping changes so they
+// do not linger as pending source work.
+Status DrainNonSourceSlotChanges(const Mirror& mirror) {
+  for (;;) {
+    PGICEBERG_ASSIGN_OR_RETURN(auto rows, PeekSlotChanges(mirror));
+    if (rows.empty()) {
+      return Ok();
+    }
+
+    for (const auto& [lsn, data] : rows) {
+      (void)lsn;
+      PGICEBERG_ASSIGN_OR_RETURN(auto change, ParseDecodedChange(data));
+      if (change.relid == mirror.source_relid) {
+        return Ok();
+      }
+    }
+    PGICEBERG_RETURN_NOT_OK(AdvanceSlotByCount(mirror, static_cast<int>(rows.size())));
+  }
+}
+
 Status UpdateMirrorProgress(const Mirror& mirror, const std::string& lsn,
                             const char* error_message) {
   const char* sql =
@@ -478,11 +499,13 @@ Status ProcessMirror(const Mirror& mirror) {
   if (!last_lsn.empty()) {
     PGICEBERG_RETURN_NOT_OK(AdvanceSlotByCount(mirror, static_cast<int>(rows.size())));
     PGICEBERG_RETURN_NOT_OK(UpdateMirrorProgress(mirror, last_lsn, nullptr));
+    PGICEBERG_RETURN_NOT_OK(DrainNonSourceSlotChanges(mirror));
   }
   if (saw_unsupported) {
     const char* message =
         "pgiceberg logical mirrors currently support only INSERT changes";
     PGICEBERG_RETURN_NOT_OK(DisableMirror(mirror, message));
+    PGICEBERG_RETURN_NOT_OK(DrainNonSourceSlotChanges(mirror));
     ereport(WARNING, (errmsg("%s", message)));
   }
   return Ok();
