@@ -108,6 +108,7 @@ U|RELID
 D|RELID
 T|RELID
 (3 rows)
+-- Unsupported changes must parse cleanly, advance the slot, and disable the mirror.
 SELECT pgiceberg.process_logical_mirrors();
 WARNING:  pgiceberg logical mirrors currently support only INSERT changes
 process_logical_mirrors
