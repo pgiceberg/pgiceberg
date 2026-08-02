@@ -442,10 +442,7 @@ Status AppendDecodedRows(Relation relation, const Mirror& mirror,
 }
 
 Status ProcessMirror(const Mirror& mirror) {
-  elog(LOG, "pgiceberg process_logical_mirrors: ProcessMirror slot=%s",
-       mirror.slot_name.c_str());
   PGICEBERG_ASSIGN_OR_RETURN(auto rows, PeekSlotChanges(mirror));
-  elog(LOG, "pgiceberg process_logical_mirrors: peeked %zu rows", rows.size());
   if (rows.empty()) {
     return Ok();
   }
@@ -468,27 +465,19 @@ Status ProcessMirror(const Mirror& mirror) {
     }
   }
 
-  elog(LOG, "pgiceberg logical mirror: parsed %zu inserts unsupported=%d", inserts.size(),
-       saw_unsupported ? 1 : 0);
-
   {
     Relation relation = table_open(mirror.source_relid, AccessShareLock);
     RelationLockGuard relation_guard(relation, AccessShareLock);
-    elog(LOG, "pgiceberg logical mirror: appending rows");
     PGICEBERG_RETURN_NOT_OK(AppendDecodedRows(relation, mirror, inserts));
-    elog(LOG, "pgiceberg logical mirror: flushing Iceberg commit");
     // Commit Iceberg before consuming WAL so a failed/crashy Iceberg commit cannot
     // lose changes. At-least-once delivery may produce duplicates if the process
     // crashes after Iceberg commit and before slot advancement.
     PGICEBERG_RETURN_NOT_OK(fdw::FlushPendingModifyChanges());
-    elog(LOG, "pgiceberg logical mirror: Iceberg flush complete");
   }
 
   if (!last_lsn.empty()) {
-    elog(LOG, "pgiceberg logical mirror: advancing slot by %zu", rows.size());
     PGICEBERG_RETURN_NOT_OK(AdvanceSlotByCount(mirror, static_cast<int>(rows.size())));
     PGICEBERG_RETURN_NOT_OK(UpdateMirrorProgress(mirror, last_lsn, nullptr));
-    elog(LOG, "pgiceberg logical mirror: slot advanced");
   }
   if (saw_unsupported) {
     const char* message =
@@ -500,9 +489,7 @@ Status ProcessMirror(const Mirror& mirror) {
 }
 
 Status ProcessMirrors() {
-  elog(LOG, "pgiceberg process_logical_mirrors: ProcessMirrors");
   PGICEBERG_ASSIGN_OR_RETURN(auto mirrors, LoadMirrors());
-  elog(LOG, "pgiceberg process_logical_mirrors: loaded %zu mirrors", mirrors.size());
   for (const auto& mirror : mirrors) {
     PGICEBERG_RETURN_NOT_OK(ProcessMirror(mirror));
   }
@@ -602,10 +589,7 @@ void RegisterLogicalWorker() {
   RegisterWorker();
 }
 
-Status ProcessLogicalMirrorsOnce() {
-  elog(LOG, "pgiceberg process_logical_mirrors: ProcessLogicalMirrorsOnce");
-  return ProcessMirrors();
-}
+Status ProcessLogicalMirrorsOnce() { return ProcessMirrors(); }
 
 }  // namespace pgiceberg::logical
 
@@ -615,14 +599,11 @@ PG_FUNCTION_INFO_V1(pgiceberg_process_logical_mirrors);
 
 Datum pgiceberg_process_logical_mirrors(PG_FUNCTION_ARGS) {
   (void)fcinfo;
-  elog(LOG, "pgiceberg process_logical_mirrors: enter");
   if (SPI_connect() != SPI_OK_CONNECT) {
     ereport(ERROR, (errmsg("could not connect to SPI")));
   }
-  elog(LOG, "pgiceberg process_logical_mirrors: SPI connected");
   pgiceberg::PgStatusGuard(
       [&]() { return pgiceberg::logical::ProcessLogicalMirrorsOnce(); });
-  elog(LOG, "pgiceberg process_logical_mirrors: done");
   SPI_finish();
   PG_RETURN_VOID();
 }
