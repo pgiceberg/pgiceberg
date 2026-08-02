@@ -330,7 +330,8 @@ Status AdvanceSlotByCount(const Mirror& mirror, int change_count) {
       EnsureSpiOk(result, SPI_OK_SELECT, "could not advance pgiceberg logical slot"));
 
   bool is_null = false;
-  Datum count_datum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &is_null);
+  Datum count_datum =
+      SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &is_null);
   if (is_null || DatumGetInt64(count_datum) != change_count) {
     return std::unexpected(MakeError(
         ERRCODE_INTERNAL_ERROR,
@@ -612,7 +613,8 @@ Datum pgiceberg_process_logical_mirrors(PG_FUNCTION_ARGS) {
   if (SPI_connect() != SPI_OK_CONNECT) {
     ereport(ERROR, (errmsg("could not connect to SPI")));
   }
-  pgiceberg::PgStatusGuard([&]() { return pgiceberg::logical::ProcessLogicalMirrorsOnce(); });
+  pgiceberg::PgStatusGuard(
+      [&]() { return pgiceberg::logical::ProcessLogicalMirrorsOnce(); });
   SPI_finish();
   PG_RETURN_VOID();
 }
