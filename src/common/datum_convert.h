@@ -30,6 +30,9 @@ class Scalar;
 
 namespace pgiceberg {
 
+// Microseconds between the Unix epoch and PostgreSQL's timestamp epoch (2000-01-01).
+inline constexpr std::int64_t kPostgresUnixEpochOffsetMicros = 946684800000000LL;
+
 Result<Datum> ConvertValue(const arrow::Array& array, std::int64_t offset, Oid pg_type,
                            bool& is_null);
 

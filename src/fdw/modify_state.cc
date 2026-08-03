@@ -35,13 +35,13 @@
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/partition_spec.h>
 #include <iceberg/schema.h>
-#include <iceberg/schema_internal.h>
 #include <iceberg/table.h>
 #include <iceberg/table_metadata.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/fast_append.h>
 #include <iceberg/update/overwrite_files.h>
 
+#include "common/arrow_schema.h"
 #include "common/catalog.h"
 #include "common/datum_convert.h"
 #include "common/pg_error.h"
@@ -431,13 +431,6 @@ struct Value {
 
 using Row = std::vector<Value>;
 
-Result<std::shared_ptr<arrow::Schema>> ArrowSchemaFor(const iceberg::Schema& schema) {
-  ArrowSchema c_schema;
-  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(iceberg::ToArrowSchema(schema, &c_schema),
-                                            "convert Iceberg schema to Arrow"));
-  return FromArrowResult(arrow::ImportSchema(&c_schema), "import Arrow schema");
-}
-
 std::string DataFilePath(const iceberg::Table& table) {
   auto now = std::chrono::system_clock::now().time_since_epoch().count();
   std::ostringstream name;
@@ -792,7 +785,8 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
 
   PGICEBERG_ASSIGN_OR_RETURN(auto iceberg_schema,
                              FromIcebergResult(read_table->schema(), "load schema"));
-  PGICEBERG_ASSIGN_OR_RETURN(auto arrow_schema, ArrowSchemaFor(*iceberg_schema));
+  PGICEBERG_ASSIGN_OR_RETURN(auto arrow_schema,
+                             pgiceberg::ArrowSchemaFor(*iceberg_schema));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto spec, FromIcebergResult(read_table->spec(), "load partition spec"));
   if (!spec->fields().empty()) {
@@ -915,7 +909,8 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
   PGICEBERG_ASSIGN_OR_RETURN(
       state->iceberg_schema,
       FromIcebergResult(state->read_table->schema(), "load schema"));
-  PGICEBERG_ASSIGN_OR_RETURN(state->arrow_schema, ArrowSchemaFor(*state->iceberg_schema));
+  PGICEBERG_ASSIGN_OR_RETURN(state->arrow_schema,
+                             pgiceberg::ArrowSchemaFor(*state->iceberg_schema));
 
   PGICEBERG_ASSIGN_OR_RETURN(
       state->spec, FromIcebergResult(state->read_table->spec(), "load partition spec"));

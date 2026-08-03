@@ -12,10 +12,12 @@
 
 #include "common/catalog.h"
 
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <iceberg/arrow/arrow_io_internal.h>
@@ -23,9 +25,15 @@
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/manifest/manifest_list.h>
 #include <iceberg/manifest/manifest_reader.h>
+#include <iceberg/partition_spec.h>
+#include <iceberg/schema.h>
 #include <iceberg/snapshot.h>
+#include <iceberg/sort_order.h>
 #include <iceberg/table.h>
 #include <iceberg/table_identifier.h>
+#include <iceberg/table_properties.h>
+#include <iceberg/transaction.h>
+#include <iceberg/update/update_properties.h>
 
 #include "common/status.h"
 
@@ -40,21 +48,6 @@ extern "C" {
 
 namespace pgiceberg {
 namespace {
-
-std::vector<std::string> SplitNamespace(const std::string& name_space) {
-  std::vector<std::string> levels;
-  std::stringstream input(name_space);
-  std::string level;
-  while (std::getline(input, level, '.')) {
-    if (!level.empty()) {
-      levels.push_back(level);
-    }
-  }
-  if (levels.empty()) {
-    levels.push_back("default");
-  }
-  return levels;
-}
 
 iceberg::TableIdentifier TableIdentifierFor(const CatalogOptions& options,
                                             const char* relation_name) {
@@ -122,7 +115,40 @@ Status EnsureNamespaceExists(std::shared_ptr<iceberg::sql::SqlCatalog>& catalog,
   return FromIcebergStatus(catalog->CreateNamespace(ns, {}), "create namespace");
 }
 
+Status EnsureTableName(const CatalogOptions& options) {
+  if (options.table.empty()) {
+    return std::unexpected(
+        MakeError(ERRCODE_INVALID_PARAMETER_VALUE, "pgiceberg table name is required"));
+  }
+  return Ok();
+}
+
 }  // namespace
+
+std::vector<std::string> SplitNamespace(const std::string& name_space) {
+  std::vector<std::string> levels;
+  std::stringstream input(name_space);
+  std::string level;
+  while (std::getline(input, level, '.')) {
+    if (!level.empty()) {
+      levels.push_back(level);
+    }
+  }
+  if (levels.empty()) {
+    levels.push_back("default");
+  }
+  return levels;
+}
+
+Status ValidateFormatVersion(int format_version) {
+  if (format_version == 2 || format_version == 3) {
+    return Ok();
+  }
+  return std::unexpected(
+      MakeError(ERRCODE_INVALID_PARAMETER_VALUE,
+                "unsupported Iceberg format version " + std::to_string(format_version),
+                "Iceberg format version 1 is not supported; valid values are 2 and 3."));
+}
 
 Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
   const int connect_rc = SPI_connect();
@@ -325,6 +351,61 @@ Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
 
   return FromIcebergResult(catalog->RegisterTable(ident, metadata_file_location),
                            "register Iceberg table");
+}
+
+Result<std::shared_ptr<iceberg::Table>> CreateUnpartitionedIcebergTable(
+    const CatalogOptions& options, const std::shared_ptr<iceberg::Schema>& schema,
+    int format_version, bool drop_if_exists) {
+  PGICEBERG_RETURN_NOT_OK(ValidateFormatVersion(format_version));
+  PGICEBERG_RETURN_NOT_OK(EnsureTableName(options));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options, true));
+  const auto ident = TableIdentifierFor(options, options.table.c_str());
+  PGICEBERG_RETURN_NOT_OK(EnsureNamespaceExists(catalog, ident.ns));
+
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto exists, FromIcebergResult(catalog->TableExists(ident), "check table"));
+  if (exists) {
+    if (!drop_if_exists) {
+      return std::unexpected(MakeError(ERRCODE_DUPLICATE_TABLE,
+                                       "Iceberg table \"" + options.name_space + "." +
+                                           options.table + "\" already exists"));
+    }
+    PGICEBERG_RETURN_NOT_OK(
+        FromIcebergStatus(catalog->DropTable(ident, false), "drop table"));
+  }
+
+  const auto table_location =
+      std::filesystem::path(options.warehouse) / options.name_space / options.table;
+  std::filesystem::create_directories(table_location / "metadata");
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto staged_table,
+      FromIcebergResult(catalog->StageCreateTable(
+                            ident, schema, iceberg::PartitionSpec::Unpartitioned(),
+                            iceberg::SortOrder::Unsorted(), table_location.string(),
+                            {{"write.parquet.compression-codec", "uncompressed"}}),
+                        "stage create table"));
+  PGICEBERG_ASSIGN_OR_RETURN(auto properties_update,
+                             FromIcebergResult(staged_table->NewUpdateProperties(),
+                                               "create table properties update"));
+  PGICEBERG_RETURN_NOT_OK(
+      FromIcebergStatus(properties_update
+                            ->Set(iceberg::TableProperties::kFormatVersion.key(),
+                                  std::to_string(format_version))
+                            .Commit(),
+                        "set table format version"));
+  return FromIcebergResult(staged_table->Commit(), "create table");
+}
+
+Status DropIcebergTable(const CatalogOptions& options) {
+  PGICEBERG_RETURN_NOT_OK(EnsureTableName(options));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options, true));
+  const auto ident = TableIdentifierFor(options, options.table.c_str());
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto exists, FromIcebergResult(catalog->TableExists(ident), "check table"));
+  if (!exists) {
+    return Ok();
+  }
+  return FromIcebergStatus(catalog->DropTable(ident, false), "drop table");
 }
 
 }  // namespace pgiceberg

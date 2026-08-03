@@ -44,8 +44,6 @@ extern "C" {
 namespace pgiceberg {
 namespace {
 
-constexpr std::int64_t kPostgresUnixEpochOffsetMicros = 946684800000000LL;
-
 Result<std::optional<std::int64_t>> IntegerValue(const arrow::Array& array,
                                                  std::int64_t offset) {
   switch (array.type_id()) {

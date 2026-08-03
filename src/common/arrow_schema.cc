@@ -10,26 +10,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
+#include "common/arrow_schema.h"
 
-#include <memory>
-#include <string>
-
-#include <arrow/type_fwd.h>
-#include <iceberg/type_fwd.h>
-
-#include "common/status.h"
-
-extern "C" {
-#include "postgres.h"
-}
+#include <arrow/c/bridge.h>
+#include <iceberg/schema.h>
+#include <iceberg/schema_internal.h>
 
 namespace pgiceberg {
 
-Result<std::shared_ptr<iceberg::Type>> PostgresTypeToIcebergType(Oid pg_type,
-                                                                 int32 typmod = -1);
-
-std::string IcebergTypeToSql(const iceberg::Type& type);
-std::string ArrowTypeToSql(const arrow::DataType& type);
+Result<std::shared_ptr<arrow::Schema>> ArrowSchemaFor(const iceberg::Schema& schema) {
+  ArrowSchema c_schema;
+  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(iceberg::ToArrowSchema(schema, &c_schema),
+                                            "convert Iceberg schema to Arrow"));
+  return FromArrowResult(arrow::ImportSchema(&c_schema), "import Arrow schema");
+}
 
 }  // namespace pgiceberg

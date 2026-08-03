@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <iceberg/type_fwd.h>
 
@@ -49,6 +50,9 @@ struct TableFilesSummary {
   int64_t delete_file_size_in_bytes = 0;
 };
 
+std::vector<std::string> SplitNamespace(const std::string& name_space);
+Status ValidateFormatVersion(int format_version);
+
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name);
 Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& options,
@@ -60,5 +64,9 @@ Result<CatalogOptions> LoadCatalogOptions(const std::string& name);
 Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
     const CatalogOptions& options, const char* relation_name,
     const std::string& metadata_file_location, bool drop_if_exists);
+Result<std::shared_ptr<iceberg::Table>> CreateUnpartitionedIcebergTable(
+    const CatalogOptions& options, const std::shared_ptr<iceberg::Schema>& schema,
+    int format_version, bool drop_if_exists);
+Status DropIcebergTable(const CatalogOptions& options);
 
 }  // namespace pgiceberg

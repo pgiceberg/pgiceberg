@@ -15,24 +15,14 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <iceberg/arrow/arrow_io_internal.h>
-#include <iceberg/catalog/sql/sql_catalog.h>
-#include <iceberg/partition_spec.h>
 #include <iceberg/schema.h>
 #include <iceberg/schema_field.h>
-#include <iceberg/sort_order.h>
-#include <iceberg/table.h>
-#include <iceberg/table_properties.h>
-#include <iceberg/table_identifier.h>
-#include <iceberg/transaction.h>
-#include <iceberg/update/update_properties.h>
 
 #include "common/catalog.h"
 #include "common/pg_error.h"
@@ -154,66 +144,6 @@ std::vector<PendingCatalogChange>& PendingCatalogChanges() {
   return *changes;
 }
 
-std::vector<std::string> SplitNamespace(const std::string& name_space) {
-  std::vector<std::string> levels;
-  std::stringstream input(name_space);
-  std::string level;
-  while (std::getline(input, level, '.')) {
-    if (!level.empty()) {
-      levels.push_back(level);
-    }
-  }
-  if (levels.empty()) {
-    levels.push_back("default");
-  }
-  return levels;
-}
-
-Status ValidateFormatVersion(int format_version) {
-  if (format_version == 2 || format_version == 3) {
-    return Ok();
-  }
-  return std::unexpected(
-      MakeError(ERRCODE_INVALID_PARAMETER_VALUE,
-                "unsupported Iceberg format version " + std::to_string(format_version),
-                "Iceberg format version 1 is not supported; valid values are 2 and 3."));
-}
-
-Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
-    const CatalogOptions& options) {
-  if (options.catalog_uri.empty()) {
-    return std::unexpected(
-        MakeError(ERRCODE_FDW_INVALID_OPTION_NAME, "pgiceberg catalog_uri is required"));
-  }
-  if (options.warehouse.empty()) {
-    return std::unexpected(
-        MakeError(ERRCODE_FDW_INVALID_OPTION_NAME, "pgiceberg warehouse is required"));
-  }
-
-  std::shared_ptr<iceberg::FileIO> file_io(
-      iceberg::arrow::ArrowFileSystemFileIO::MakeLocalFileIO().release());
-  iceberg::sql::SqlCatalogConfig config{
-      .name = options.catalog_name,
-      .uri = options.catalog_uri,
-      .warehouse_location = options.warehouse,
-      .max_connections = 1,
-  };
-
-  if (options.catalog_type == "sqlite") {
-    return FromIcebergResult(iceberg::sql::SqlCatalog::MakeSqliteCatalog(config, file_io),
-                             "create SQLite catalog");
-  }
-  if (options.catalog_type == "sql") {
-    return FromIcebergResult(
-        iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io),
-        "create PostgreSQL catalog");
-  }
-  return std::unexpected(MakeError(
-      ERRCODE_FEATURE_NOT_SUPPORTED,
-      "pgiceberg table access method currently supports only catalog_type 'sql' "
-      "or 'sqlite'"));
-}
-
 Result<std::shared_ptr<iceberg::Schema>> SchemaFromRelation(Relation relation) {
   TupleDesc desc = RelationGetDescr(relation);
   std::vector<iceberg::SchemaField> fields;
@@ -256,72 +186,24 @@ std::vector<int> AllTableColumns(Relation relation) {
   return attnums;
 }
 
-iceberg::TableIdentifier TableIdentifierForBinding(const Binding& binding) {
-  return iceberg::TableIdentifier{
-      .ns = iceberg::Namespace{.levels = SplitNamespace(binding.name_space)},
-      .name = binding.table_name};
-}
-
 Status CreateIcebergCatalogTable(const Binding& binding, Relation relation,
                                  int format_version) {
   PGICEBERG_ASSIGN_OR_RETURN(auto options, LoadCatalogOptions(binding.catalog));
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
-  const auto ident = TableIdentifierForBinding(binding);
-  const auto& ns = ident.ns;
-  PGICEBERG_ASSIGN_OR_RETURN(
-      auto ns_exists,
-      FromIcebergResult(catalog->NamespaceExists(ns), "check Iceberg namespace"));
-  if (!ns_exists) {
-    PGICEBERG_RETURN_NOT_OK(
-        FromIcebergStatus(catalog->CreateNamespace(ns, {}), "create Iceberg namespace"));
-  }
-
-  PGICEBERG_ASSIGN_OR_RETURN(
-      auto table_exists,
-      FromIcebergResult(catalog->TableExists(ident), "check Iceberg table"));
-  if (table_exists) {
-    return std::unexpected(
-        MakeError(ERRCODE_DUPLICATE_TABLE, "Iceberg table \"" + binding.name_space + "." +
-                                               binding.table_name + "\" already exists"));
-  }
-
+  options.name_space = binding.name_space;
+  options.table = binding.table_name;
   PGICEBERG_ASSIGN_OR_RETURN(auto schema, SchemaFromRelation(relation));
-  const auto table_location =
-      std::filesystem::path(options.warehouse) / binding.name_space / binding.table_name;
-  std::filesystem::create_directories(table_location / "metadata");
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto staged_table,
-      FromIcebergResult(catalog->StageCreateTable(
-                            ident, schema, iceberg::PartitionSpec::Unpartitioned(),
-                            iceberg::SortOrder::Unsorted(), table_location.string(),
-                            {{"write.parquet.compression-codec", "uncompressed"}}),
-                        "stage create Iceberg table"));
-  PGICEBERG_ASSIGN_OR_RETURN(auto properties_update,
-                             FromIcebergResult(staged_table->NewUpdateProperties(),
-                                               "create table properties update"));
-  PGICEBERG_RETURN_NOT_OK(
-      FromIcebergStatus(properties_update
-                            ->Set(iceberg::TableProperties::kFormatVersion.key(),
-                                  std::to_string(format_version))
-                            .Commit(),
-                        "set table format version"));
-  PGICEBERG_ASSIGN_OR_RETURN(
-      auto table, FromIcebergResult(staged_table->Commit(), "create Iceberg table"));
+      auto table, CreateUnpartitionedIcebergTable(options, schema, format_version,
+                                                  /*drop_if_exists=*/false));
   (void)table;
   return Ok();
 }
 
 Status DropIcebergCatalogTable(const Binding& binding) {
   PGICEBERG_ASSIGN_OR_RETURN(auto options, LoadCatalogOptions(binding.catalog));
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options));
-  const auto ident = TableIdentifierForBinding(binding);
-  PGICEBERG_ASSIGN_OR_RETURN(
-      auto table_exists,
-      FromIcebergResult(catalog->TableExists(ident), "check Iceberg table"));
-  if (!table_exists) {
-    return Ok();
-  }
-  return FromIcebergStatus(catalog->DropTable(ident, false), "drop Iceberg table");
+  options.name_space = binding.name_space;
+  options.table = binding.table_name;
+  return DropIcebergTable(options);
 }
 
 Status InsertBinding(const Binding& binding) {
