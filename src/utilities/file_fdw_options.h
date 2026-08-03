@@ -27,6 +27,7 @@ struct List;
 
 namespace pgiceberg {
 
+// Options shared by the Avro and Parquet file-backed FDWs.
 struct FileFdwOptions {
   std::string dirname;
   std::string filename;

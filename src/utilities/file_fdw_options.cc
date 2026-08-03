@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "common/file_fdw_options.h"
+#include "utilities/file_fdw_options.h"
 
 #include <cstring>
 

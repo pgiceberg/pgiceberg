@@ -15,7 +15,6 @@ add_library(pgiceberg MODULE
             common/arrow_schema.cc
             common/catalog.cc
             common/datum_convert.cc
-            common/file_fdw_options.cc
             common/type_mapping.cc
             fdw/fdw.cc
             fdw/iceberg_scan.cc
@@ -29,6 +28,7 @@ add_library(pgiceberg MODULE
             logical/logical.cc
             tableam/tableam.cc
             utilities/avro_fdw.cc
+            utilities/file_fdw_options.cc
             utilities/parquet_fdw.cc)
 target_include_directories(pgiceberg PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(pgiceberg PRIVATE PostgreSQL::Server PostgreSQL::Client)

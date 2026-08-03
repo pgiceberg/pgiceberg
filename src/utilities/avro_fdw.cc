@@ -23,11 +23,11 @@
 
 #include "common/datum_convert.h"
 #include "common/fdw_path.h"
-#include "common/file_fdw_options.h"
 #include "common/pg_error.h"
 #include "common/pg_interrupt.h"
 #include "common/status.h"
 #include "fdw/scan_projection.h"
+#include "utilities/file_fdw_options.h"
 
 extern "C" {
 #include "postgres.h"
