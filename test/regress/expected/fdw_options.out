@@ -140,6 +140,6 @@ SELECT pgiceberg.create_table(
   true,
   1
 );
-ERROR:  unsupported pgiceberg.create_table format_version 1
+ERROR:  unsupported Iceberg format version 1
 \set VERBOSITY default
 DROP EXTENSION pgiceberg;
