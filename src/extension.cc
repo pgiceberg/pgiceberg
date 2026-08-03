@@ -11,6 +11,7 @@
 // limitations under the License.
 
 #include "fdw/modify_state.h"
+#include "logical/logical.h"
 #include "tableam/tableam.h"
 
 #include <string>
@@ -25,6 +26,7 @@ extern "C" {
 #include "postgres.h"
 #include "fmgr.h"
 #include "utils/guc.h"
+#include "utils/guc_tables.h"
 }
 
 namespace {
@@ -108,6 +110,12 @@ void RegisterArrowThreadPoolGucs() {
   ApplyArrowIoThreadPoolCapacity(ArrowIoThreadPoolCapacity);
 }
 
+bool PgIcebergGucsRegistered() {
+  const struct config_generic* record =
+      find_option("pgiceberg.arrow_cpu_threads", false, true, WARNING);
+  return record != nullptr && (record->flags & GUC_CUSTOM_PLACEHOLDER) == 0;
+}
+
 }  // namespace
 
 extern "C" {
@@ -118,9 +126,17 @@ PG_MODULE_MAGIC;
 // PostgreSQL transaction and all of them have to share the same pending
 // Iceberg commit state.
 void _PG_init(void) {
+  static bool initialized = false;
+  if (initialized || PgIcebergGucsRegistered()) {
+    initialized = true;
+    return;
+  }
+  initialized = true;
+
   EnsureIcebergRegistrations();
   RegisterArrowThreadPoolGucs();
   pgiceberg::fdw::RegisterTransactionCallbacks();
   pgiceberg::tableam::RegisterTableAmHooks();
+  pgiceberg::logical::RegisterLogicalWorker();
 }
 }

@@ -18,6 +18,9 @@ SELECT fdwname
 FROM pg_foreign_data_wrapper
 WHERE fdwname = 'pgiceberg';
 
+SELECT count(*) AS logical_mirror_count
+FROM pgiceberg.logical_mirror_status();
+
 SHOW pgiceberg.arrow_cpu_threads;
 SHOW pgiceberg.arrow_io_threads;
 

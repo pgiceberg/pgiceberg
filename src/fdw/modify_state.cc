@@ -775,6 +775,8 @@ Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
   return StaticTableForPendingChange(*pending);
 }
 
+Status FlushPendingModifyChanges() { return CommitPendingModifyChanges(); }
+
 Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** slots,
                    int nslots) {
   if (nslots <= 0) {

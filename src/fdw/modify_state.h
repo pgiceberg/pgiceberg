@@ -42,6 +42,9 @@ Result<TupleTableSlot*> ExecDelete(ModifyState* state, TupleTableSlot* slot,
 Status EndModify(ModifyState* state);
 Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** slots,
                    int nslots);
+// Durably commit any pending Iceberg DML for the current PostgreSQL transaction.
+// Safe to call before PRE_COMMIT; later PRE_COMMIT becomes a no-op for flushed work.
+Status FlushPendingModifyChanges();
 void RegisterTransactionCallbacks();
 
 }  // namespace pgiceberg::fdw
