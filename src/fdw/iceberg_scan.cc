@@ -14,6 +14,7 @@
 
 #include <utility>
 
+#include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/file_scan_task_reader.h>
 #include <iceberg/schema.h>

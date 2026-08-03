@@ -26,6 +26,7 @@
 
 #include <arrow/array.h>
 #include <arrow/array/builder_base.h>
+#include <arrow/c/bridge.h>
 #include <arrow/extension_type.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/data_writer.h>
