@@ -27,6 +27,7 @@ lists, deletes, and Parquet data files are handled through iceberg-cpp.
 - Infer foreign table definitions with `IMPORT FOREIGN SCHEMA`.
 - Register existing Iceberg table metadata into a SQL catalog.
 - Read table metadata and snapshot file summaries from SQL.
+- Read a historical Iceberg snapshot with the `snapshot_id` foreign-table option.
 - Append rows with `INSERT`.
 - Rewrite unpartitioned table data files for `UPDATE` and `DELETE`.
 
