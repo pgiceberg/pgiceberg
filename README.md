@@ -117,6 +117,17 @@ OPTIONS (
 );
 ```
 
+To read a historical Iceberg snapshot through iceberg-cpp
+`TableScanBuilder::UseSnapshot`, add a `snapshot_id` foreign-table option:
+
+```sql
+ALTER FOREIGN TABLE pgiceberg_trip_fixture
+OPTIONS (ADD snapshot_id '1234567890');
+```
+
+DML is rejected while `snapshot_id` is set. Drop the option to return to the
+current table snapshot before `INSERT`, `UPDATE`, or `DELETE`.
+
 Read and write through the foreign table:
 
 ```sql
@@ -211,6 +222,14 @@ SELECT pgiceberg.table_snapshot_files_summary(
   'dev',
   'default',
   'trip_fixture'
+);
+
+-- Inspect manifests and data files for a specific Iceberg snapshot id.
+SELECT pgiceberg.table_snapshot_files_summary(
+  'dev',
+  'default',
+  'trip_fixture',
+  1234567890
 );
 ```
 

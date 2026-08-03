@@ -29,8 +29,11 @@ namespace pgiceberg::fdw {
 
 IcebergScanCursor::IcebergScanCursor(
     std::shared_ptr<iceberg::Table> table,
-    std::optional<std::vector<std::string>> selected_columns)
-    : table_(std::move(table)), selected_columns_(std::move(selected_columns)) {}
+    std::optional<std::vector<std::string>> selected_columns,
+    std::optional<int64_t> snapshot_id)
+    : table_(std::move(table)),
+      selected_columns_(std::move(selected_columns)),
+      snapshot_id_(snapshot_id) {}
 
 Status IcebergScanCursor::Init() {
   PGICEBERG_ASSIGN_OR_RETURN(auto schema,
@@ -46,6 +49,11 @@ Status IcebergScanCursor::Init() {
 
   PGICEBERG_ASSIGN_OR_RETURN(auto scan_builder,
                              FromIcebergResult(table_->NewScan(), "create table scan"));
+  if (snapshot_id_.has_value()) {
+    // iceberg-cpp validates the id against table metadata and plans manifests for
+    // that historical snapshot (time travel), including delete files for the scan.
+    scan_builder->UseSnapshot(*snapshot_id_);
+  }
   if (selected_columns_.has_value()) {
     if (selected_columns_->empty()) {
       scan_builder->Project(iceberg::Schema::EmptySchema());

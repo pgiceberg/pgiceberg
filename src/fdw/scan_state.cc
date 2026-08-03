@@ -123,14 +123,16 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options,
   PGICEBERG_ASSIGN_OR_RETURN(
       state->table,
       pgiceberg::LoadIcebergTable(catalog_options, RelationGetRelationName(relation)));
-  // A scan can follow DML in the same PostgreSQL transaction.  Use the pending
-  // transaction view when one exists so the FDW does not expose a weaker
-  // read-your-writes rule than PostgreSQL users expect.
-  PGICEBERG_ASSIGN_OR_RETURN(state->table,
-                             ReadTableForCurrentTransaction(options, state->table));
+  // Historical snapshot reads pin iceberg-cpp UseSnapshot and must not overlay
+  // uncommitted PostgreSQL transaction state. Current-snapshot scans still honor
+  // pending DML so the FDW keeps PostgreSQL read-your-writes semantics.
+  if (!options.snapshot_id.has_value()) {
+    PGICEBERG_ASSIGN_OR_RETURN(state->table,
+                               ReadTableForCurrentTransaction(options, state->table));
+  }
   TupleDesc desc = RelationGetDescr(relation);
   state->cursor = std::make_unique<IcebergScanCursor>(
-      state->table, ProjectedColumnNames(desc, projected_attnums));
+      state->table, ProjectedColumnNames(desc, projected_attnums), options.snapshot_id);
   PGICEBERG_RETURN_NOT_OK(state->cursor->Init());
 
   auto projected = ProjectedAttributeSet(projected_attnums);
