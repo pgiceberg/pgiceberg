@@ -65,7 +65,7 @@ Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
     const CatalogOptions& options, const char* relation_name,
     const std::string& metadata_file_location, bool drop_if_exists);
 Result<std::shared_ptr<iceberg::Table>> CreateUnpartitionedIcebergTable(
-    const CatalogOptions& options, std::shared_ptr<iceberg::Schema> schema,
+    const CatalogOptions& options, const std::shared_ptr<iceberg::Schema>& schema,
     int format_version, bool drop_if_exists);
 Status DropIcebergTable(const CatalogOptions& options);
 

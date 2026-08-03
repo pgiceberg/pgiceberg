@@ -171,10 +171,9 @@ Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
 
     PGICEBERG_ASSIGN_OR_RETURN(auto schema,
                                BuildSchema(column_names, column_types, column_required));
-    PGICEBERG_ASSIGN_OR_RETURN(
-        auto created_table,
-        pgiceberg::CreateUnpartitionedIcebergTable(options, std::move(schema),
-                                                   format_version, drop_if_exists));
+    PGICEBERG_ASSIGN_OR_RETURN(auto created_table,
+                               pgiceberg::CreateUnpartitionedIcebergTable(
+                                   options, schema, format_version, drop_if_exists));
     (void)created_table;
 
     return static_cast<Datum>(0);

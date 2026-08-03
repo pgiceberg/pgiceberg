@@ -354,7 +354,7 @@ Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
 }
 
 Result<std::shared_ptr<iceberg::Table>> CreateUnpartitionedIcebergTable(
-    const CatalogOptions& options, std::shared_ptr<iceberg::Schema> schema,
+    const CatalogOptions& options, const std::shared_ptr<iceberg::Schema>& schema,
     int format_version, bool drop_if_exists) {
   PGICEBERG_RETURN_NOT_OK(ValidateFormatVersion(format_version));
   PGICEBERG_RETURN_NOT_OK(EnsureTableName(options));
@@ -379,12 +379,11 @@ Result<std::shared_ptr<iceberg::Table>> CreateUnpartitionedIcebergTable(
   std::filesystem::create_directories(table_location / "metadata");
   PGICEBERG_ASSIGN_OR_RETURN(
       auto staged_table,
-      FromIcebergResult(
-          catalog->StageCreateTable(
-              ident, std::move(schema), iceberg::PartitionSpec::Unpartitioned(),
-              iceberg::SortOrder::Unsorted(), table_location.string(),
-              {{"write.parquet.compression-codec", "uncompressed"}}),
-          "stage create table"));
+      FromIcebergResult(catalog->StageCreateTable(
+                            ident, schema, iceberg::PartitionSpec::Unpartitioned(),
+                            iceberg::SortOrder::Unsorted(), table_location.string(),
+                            {{"write.parquet.compression-codec", "uncompressed"}}),
+                        "stage create table"));
   PGICEBERG_ASSIGN_OR_RETURN(auto properties_update,
                              FromIcebergResult(staged_table->NewUpdateProperties(),
                                                "create table properties update"));

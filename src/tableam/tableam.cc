@@ -192,9 +192,9 @@ Status CreateIcebergCatalogTable(const Binding& binding, Relation relation,
   options.name_space = binding.name_space;
   options.table = binding.table_name;
   PGICEBERG_ASSIGN_OR_RETURN(auto schema, SchemaFromRelation(relation));
-  PGICEBERG_ASSIGN_OR_RETURN(auto table, CreateUnpartitionedIcebergTable(
-                                             options, std::move(schema), format_version,
-                                             /*drop_if_exists=*/false));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto table, CreateUnpartitionedIcebergTable(options, schema, format_version,
+                                                  /*drop_if_exists=*/false));
   (void)table;
   return Ok();
 }
