@@ -22,6 +22,8 @@ and SQL usage examples, see [README.md](README.md).
 - `src/fdw/`: PostgreSQL Foreign Data Wrapper callbacks and scan state.
 - `src/common/`: PostgreSQL and C++ boundary helpers.
 - `src/functions/`: SQL-callable helper functions.
+- `docs/design/`: internal design notes for PostgreSQL extension surfaces and
+  implementation tradeoffs.
 - `sql/` and `pgiceberg.control`: extension install metadata.
 - `test/regress/`: `pg_regress` SQL tests.
 - `test/datasets/`: small regression fixtures.
