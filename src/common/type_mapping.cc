@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <sstream>
 
+#include <arrow/type.h>
 #include <iceberg/type.h>
 
 extern "C" {
@@ -141,6 +142,38 @@ std::string IcebergTypeToSql(const iceberg::Type& type) {
       return "bytea";
     default:
       return "text";
+  }
+}
+
+std::string ArrowTypeToSql(const arrow::DataType& type) {
+  switch (type.id()) {
+    case arrow::Type::BOOL:
+      return "boolean";
+    case arrow::Type::INT8:
+    case arrow::Type::INT16:
+    case arrow::Type::UINT8:
+      return "smallint";
+    case arrow::Type::INT32:
+    case arrow::Type::UINT16:
+      return "integer";
+    case arrow::Type::INT64:
+    case arrow::Type::UINT32:
+      return "bigint";
+    case arrow::Type::FLOAT:
+      return "real";
+    case arrow::Type::DOUBLE:
+      return "double precision";
+    case arrow::Type::STRING:
+    case arrow::Type::LARGE_STRING:
+      return "text";
+    case arrow::Type::DATE32:
+      return "date";
+    case arrow::Type::TIMESTAMP: {
+      const auto& timestamp = static_cast<const arrow::TimestampType&>(type);
+      return timestamp.timezone().empty() ? "timestamp" : "timestamptz";
+    }
+    default:
+      return {};
   }
 }
 

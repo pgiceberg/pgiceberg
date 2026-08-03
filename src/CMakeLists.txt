@@ -12,8 +12,10 @@
 
 add_library(pgiceberg MODULE
             extension.cc
+            common/arrow_schema.cc
             common/catalog.cc
             common/datum_convert.cc
+            common/file_fdw_options.cc
             common/type_mapping.cc
             fdw/fdw.cc
             fdw/iceberg_scan.cc

@@ -10,18 +10,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <avro/DataFile.hh>
 #include <avro/Generic.hh>
 
+#include "common/datum_convert.h"
+#include "common/fdw_path.h"
+#include "common/file_fdw_options.h"
 #include "common/pg_error.h"
 #include "common/pg_interrupt.h"
 #include "common/status.h"
@@ -29,9 +31,6 @@
 
 extern "C" {
 #include "postgres.h"
-#include "access/reloptions.h"
-#include "catalog/pg_foreign_server_d.h"
-#include "catalog/pg_foreign_table_d.h"
 #include "commands/defrem.h"
 #include "executor/executor.h"
 #include "fmgr.h"
@@ -53,130 +52,9 @@ extern "C" {
 
 namespace {
 
-constexpr std::int64_t kPostgresUnixEpochOffsetMicros = 946684800000000LL;
-
-struct FileOptions {
-  std::string dirname;
-  std::string filename;
-};
-
 struct ColumnState {
   int field_index = -1;
 };
-
-bool EndsWith(std::string_view value, std::string_view suffix) {
-  return value.size() >= suffix.size() &&
-         value.substr(value.size() - suffix.size()) == suffix;
-}
-
-std::string BasenameWithoutExtension(std::string_view name, std::string_view extension) {
-  const auto dot = name.size() - extension.size();
-  return std::string(name.substr(0, dot));
-}
-
-void ApplyOption(FileOptions& options, DefElem* def) {
-  if (std::strcmp(def->defname, "filename") == 0) {
-    options.filename = defGetString(def);
-  } else if (std::strcmp(def->defname, "dirname") == 0) {
-    options.dirname = defGetString(def);
-  }
-}
-
-void ApplyOptions(FileOptions& options, List* option_list) {
-  ListCell* cell = nullptr;
-  foreach (cell, option_list) {
-    ApplyOption(options, static_cast<DefElem*>(lfirst(cell)));
-  }
-}
-
-FileOptions OptionsForForeignTable(Oid relation_oid) {
-  FileOptions options;
-  ForeignTable* table = GetForeignTable(relation_oid);
-  ForeignServer* server = GetForeignServer(table->serverid);
-  ApplyOptions(options, server->options);
-  ApplyOptions(options, table->options);
-  return options;
-}
-
-FileOptions OptionsForServer(Oid server_oid) {
-  FileOptions options;
-  ForeignServer* server = GetForeignServer(server_oid);
-  ApplyOptions(options, server->options);
-  return options;
-}
-
-pgiceberg::Status ValidateFileOptions(const FileOptions& options,
-                                      std::string_view fdw_name) {
-  if (options.filename.empty()) {
-    return std::unexpected(
-        pgiceberg::MakeError(ERRCODE_FDW_DYNAMIC_PARAMETER_VALUE_NEEDED,
-                             std::string(fdw_name) + " option \"filename\" is required"));
-  }
-  return pgiceberg::Ok();
-}
-
-pgiceberg::Status ValidateUtilityOptions(Datum raw_options, Oid catalog,
-                                         const char* fdw_name) {
-  List* options = untransformRelOptions(raw_options);
-  FileOptions parsed_options;
-
-  ListCell* cell = nullptr;
-  foreach (cell, options) {
-    auto* def = static_cast<DefElem*>(lfirst(cell));
-    const bool valid_option =
-        (catalog == ForeignTableRelationId &&
-         std::strcmp(def->defname, "filename") == 0) ||
-        (catalog == ForeignServerRelationId && std::strcmp(def->defname, "dirname") == 0);
-    if (!valid_option) {
-      return std::unexpected(pgiceberg::MakeError(
-          ERRCODE_FDW_INVALID_OPTION_NAME,
-          std::string("invalid ") + fdw_name + " option \"" + def->defname + "\"",
-          "Valid options are: dirname on servers, filename on foreign tables."));
-    }
-    ApplyOption(parsed_options, def);
-  }
-
-  if (catalog == ForeignTableRelationId) {
-    PGICEBERG_RETURN_NOT_OK(ValidateFileOptions(parsed_options, fdw_name));
-  }
-  return pgiceberg::Ok();
-}
-
-bool ImportFilterMatches(ImportForeignSchemaStmt* stmt, const std::string& table_name) {
-  if (stmt->list_type == FDW_IMPORT_SCHEMA_ALL) {
-    return true;
-  }
-
-  bool listed = false;
-  ListCell* cell = nullptr;
-  foreach (cell, stmt->table_list) {
-    auto* range = static_cast<RangeVar*>(lfirst(cell));
-    if (table_name == range->relname) {
-      listed = true;
-      break;
-    }
-  }
-
-  if (stmt->list_type == FDW_IMPORT_SCHEMA_LIMIT_TO) {
-    return listed;
-  }
-  if (stmt->list_type == FDW_IMPORT_SCHEMA_EXCEPT) {
-    return !listed;
-  }
-  return true;
-}
-
-std::string DirectoryForImport(Oid server_oid, const char* remote_schema) {
-  auto options = OptionsForServer(server_oid);
-  if (remote_schema == nullptr || std::strlen(remote_schema) == 0 ||
-      options.dirname.empty() || remote_schema[0] == '/') {
-    return remote_schema == nullptr ? std::string{} : std::string(remote_schema);
-  }
-  if (std::strcmp(remote_schema, ".") == 0) {
-    return options.dirname;
-  }
-  return options.dirname + "/" + remote_schema;
-}
 
 std::optional<avro::NodePtr> NullableAvroValueNode(const avro::NodePtr& node) {
   if (node->type() != avro::AVRO_UNION) {
@@ -261,7 +139,7 @@ Datum AvroTimestampDatum(std::int64_t value, avro::LogicalType::Type logical_typ
     default:
       break;
   }
-  value -= kPostgresUnixEpochOffsetMicros;
+  value -= pgiceberg::kPostgresUnixEpochOffsetMicros;
   return pg_type == TIMESTAMPOID ? TimestampGetDatum(value) : TimestampTzGetDatum(value);
 }
 
@@ -451,23 +329,9 @@ void DetachMemoryContextCleanup(AvroScanState* state) {
 
 void GetForeignRelSize(PlannerInfo*, RelOptInfo* baserel, Oid) { baserel->rows = 1000; }
 
-ForeignPath* CreateForeignScanPath(PlannerInfo* root, RelOptInfo* baserel) {
-  const auto rows = baserel->rows;
-  const auto total_cost = std::max(1.0, rows);
-#if PG_VERSION_NUM >= 180000
-  return create_foreignscan_path(root, baserel, nullptr, rows, 0, 0, total_cost, NIL,
-                                 nullptr, nullptr, NIL, NIL);
-#elif PG_VERSION_NUM >= 170000
-  return create_foreignscan_path(root, baserel, nullptr, rows, 0, total_cost, NIL,
-                                 nullptr, nullptr, NIL, NIL);
-#else
-  return create_foreignscan_path(root, baserel, nullptr, rows, 0, total_cost, NIL,
-                                 nullptr, nullptr, NIL);
-#endif
-}
-
 void GetForeignPaths(PlannerInfo* root, RelOptInfo* baserel, Oid) {
-  add_path(baserel, reinterpret_cast<Path*>(CreateForeignScanPath(root, baserel)));
+  add_path(baserel, reinterpret_cast<Path*>(
+                        pgiceberg::CreateSimpleForeignScanPath(root, baserel)));
 }
 
 ForeignScan* GetForeignPlan(PlannerInfo*, RelOptInfo* baserel, Oid, ForeignPath*,
@@ -487,8 +351,8 @@ pgiceberg::Status BeginForeignScanImpl(ForeignScanState* node, int eflags) {
   }
 
   Relation relation = node->ss.ss_currentRelation;
-  auto options = OptionsForForeignTable(RelationGetRelid(relation));
-  PGICEBERG_RETURN_NOT_OK(ValidateFileOptions(options, "pgiceberg_avro"));
+  auto options = pgiceberg::FileFdwOptionsForForeignTable(RelationGetRelid(relation));
+  PGICEBERG_RETURN_NOT_OK(pgiceberg::ValidateFileFdwOptions(options, "pgiceberg_avro"));
 
   auto state = std::make_unique<AvroScanState>();
   auto* plan = castNode(ForeignScan, node->ss.ps.plan);
@@ -564,7 +428,7 @@ pgiceberg::Status AppendImportColumns(StringInfo sql, const std::string& filenam
 pgiceberg::Result<List*> ImportForeignSchemaImpl(ImportForeignSchemaStmt* stmt,
                                                  Oid server_oid) {
   List* commands = NIL;
-  auto import_dir = DirectoryForImport(server_oid, stmt->remote_schema);
+  auto import_dir = pgiceberg::DirectoryForImport(server_oid, stmt->remote_schema);
   DIR* dir = AllocateDir(import_dir.c_str());
   if (dir == nullptr) {
     return std::unexpected(pgiceberg::MakeError(
@@ -575,12 +439,12 @@ pgiceberg::Result<List*> ImportForeignSchemaImpl(ImportForeignSchemaStmt* stmt,
   struct dirent* entry = nullptr;
   while ((entry = ReadDir(dir, import_dir.c_str())) != nullptr) {
     std::string filename(entry->d_name);
-    if (!EndsWith(filename, ".avro")) {
+    if (!pgiceberg::EndsWith(filename, ".avro")) {
       continue;
     }
 
-    auto table_name = BasenameWithoutExtension(filename, ".avro");
-    if (!ImportFilterMatches(stmt, table_name)) {
+    auto table_name = pgiceberg::BasenameWithoutExtension(filename, ".avro");
+    if (!pgiceberg::ImportFilterMatches(stmt, table_name)) {
       continue;
     }
 
@@ -637,8 +501,10 @@ Datum pgiceberg_avro_fdw_handler(PG_FUNCTION_ARGS) {
 Datum pgiceberg_avro_fdw_validator(PG_FUNCTION_ARGS) {
   Datum raw_options = PG_GETARG_DATUM(0);
   Oid catalog = PG_GETARG_OID(1);
-  pgiceberg::PgStatusGuard(
-      [=]() { return ValidateUtilityOptions(raw_options, catalog, "pgiceberg_avro"); });
+  pgiceberg::PgStatusGuard([=]() {
+    return pgiceberg::ValidateFileFdwUtilityOptions(raw_options, catalog,
+                                                    "pgiceberg_avro");
+  });
   PG_RETURN_VOID();
 }
 

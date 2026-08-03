@@ -10,20 +10,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <iceberg/arrow/arrow_io_internal.h>
-#include <iceberg/catalog/sql/sql_catalog.h>
-#include <iceberg/partition_spec.h>
 #include <iceberg/schema.h>
 #include <iceberg/schema_field.h>
-#include <iceberg/sort_order.h>
-#include <iceberg/table_properties.h>
-#include <iceberg/table_identifier.h>
-#include <iceberg/transaction.h>
-#include <iceberg/update/update_properties.h>
 
-#include <filesystem>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,16 +28,13 @@ extern "C" {
 #include "utils/lsyscache.h"
 }
 
-#include "common/pg_error.h"
 #include "common/catalog.h"
+#include "common/fcinfo.h"
+#include "common/pg_error.h"
 #include "common/status.h"
 #include "common/type_mapping.h"
 
 namespace {
-
-std::string TextArg(FunctionCallInfo fcinfo, int argno) {
-  return text_to_cstring(PG_GETARG_TEXT_PP(argno));
-}
 
 pgiceberg::Result<std::vector<Datum>> ArrayDatums(ArrayType* array, Oid expected_type,
                                                   const char* argument_name) {
@@ -163,61 +150,6 @@ pgiceberg::Result<std::shared_ptr<iceberg::Schema>> BuildSchema(
   return std::make_shared<iceberg::Schema>(std::move(fields), 1);
 }
 
-pgiceberg::Status ValidateFormatVersion(int32_t format_version) {
-  if (format_version == 2 || format_version == 3) {
-    return {};
-  }
-  return std::unexpected(pgiceberg::MakeError(
-      ERRCODE_INVALID_PARAMETER_VALUE,
-      "unsupported pgiceberg.create_table format_version " +
-          std::to_string(format_version),
-      "Iceberg format version 1 is not supported; valid values are 2 and 3."));
-}
-
-std::vector<std::string> SplitNamespace(const std::string& name_space) {
-  std::vector<std::string> levels;
-  std::stringstream input(name_space);
-  std::string level;
-  while (std::getline(input, level, '.')) {
-    if (!level.empty()) {
-      levels.push_back(level);
-    }
-  }
-  if (levels.empty()) {
-    levels.push_back("default");
-  }
-  return levels;
-}
-
-pgiceberg::Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateCatalog(
-    const std::string& catalog_type, const std::string& catalog_uri,
-    const std::string& warehouse, const std::string& catalog_name) {
-  std::shared_ptr<iceberg::FileIO> file_io(
-      iceberg::arrow::ArrowFileSystemFileIO::MakeLocalFileIO().release());
-  iceberg::sql::SqlCatalogConfig config{
-      .name = catalog_name,
-      .uri = catalog_uri,
-      .warehouse_location = warehouse,
-      .max_connections = 1,
-  };
-
-  if (catalog_type == "sqlite") {
-    return pgiceberg::FromIcebergResult(
-        iceberg::sql::SqlCatalog::MakeSqliteCatalog(config, file_io),
-        "create SQLite catalog");
-  }
-  if (catalog_type == "sql") {
-    return pgiceberg::FromIcebergResult(
-        iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io),
-        "create PostgreSQL catalog");
-  }
-
-  return std::unexpected(
-      pgiceberg::MakeError(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
-                           "invalid pgiceberg catalog_type \"" + catalog_type + "\"",
-                           "Valid catalog_type values are: sql, sqlite."));
-}
-
 }  // namespace
 
 extern "C" {
@@ -225,10 +157,10 @@ PG_FUNCTION_INFO_V1(pgiceberg_create_table);
 
 Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
-    PGICEBERG_ASSIGN_OR_RETURN(auto options,
-                               pgiceberg::LoadCatalogOptions(TextArg(fcinfo, 0)));
-    const std::string name_space = TextArg(fcinfo, 1);
-    const std::string table_name = TextArg(fcinfo, 2);
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto options, pgiceberg::LoadCatalogOptions(pgiceberg::TextArg(fcinfo, 0)));
+    options.name_space = pgiceberg::TextArg(fcinfo, 1);
+    options.table = pgiceberg::TextArg(fcinfo, 2);
     PGICEBERG_ASSIGN_OR_RETURN(auto column_names,
                                TextArrayArg(fcinfo, 3, "column_names"));
     PGICEBERG_ASSIGN_OR_RETURN(auto column_types, OidArrayArg(fcinfo, 4, "column_types"));
@@ -236,60 +168,14 @@ Datum pgiceberg_create_table(PG_FUNCTION_ARGS) {
                                BoolArrayArg(fcinfo, 5, "column_required"));
     const bool drop_if_exists = PG_GETARG_BOOL(6);
     const int32_t format_version = PG_GETARG_INT32(7);
-    PGICEBERG_RETURN_NOT_OK(ValidateFormatVersion(format_version));
 
-    PGICEBERG_ASSIGN_OR_RETURN(auto catalog,
-                               CreateCatalog(options.catalog_type, options.catalog_uri,
-                                             options.warehouse, options.catalog_name));
-    iceberg::Namespace ns{.levels = SplitNamespace(name_space)};
-    PGICEBERG_ASSIGN_OR_RETURN(
-        auto ns_exists,
-        pgiceberg::FromIcebergResult(catalog->NamespaceExists(ns), "check namespace"));
-    if (!ns_exists) {
-      PGICEBERG_RETURN_NOT_OK(pgiceberg::FromIcebergStatus(
-          catalog->CreateNamespace(ns, {}), "create namespace"));
-    }
-
-    iceberg::TableIdentifier ident{.ns = ns, .name = table_name};
-    PGICEBERG_ASSIGN_OR_RETURN(
-        auto table_exists,
-        pgiceberg::FromIcebergResult(catalog->TableExists(ident), "check table"));
-    if (table_exists) {
-      if (!drop_if_exists) {
-        return std::unexpected(pgiceberg::MakeError(
-            ERRCODE_DUPLICATE_TABLE,
-            "Iceberg table \"" + name_space + "." + table_name + "\" already exists"));
-      }
-      PGICEBERG_RETURN_NOT_OK(
-          pgiceberg::FromIcebergStatus(catalog->DropTable(ident, false), "drop table"));
-    }
-
-    const auto table_location =
-        std::filesystem::path(options.warehouse) / name_space / table_name;
-    std::filesystem::create_directories(table_location / "metadata");
     PGICEBERG_ASSIGN_OR_RETURN(auto schema,
                                BuildSchema(column_names, column_types, column_required));
     PGICEBERG_ASSIGN_OR_RETURN(
-        auto table, pgiceberg::FromIcebergResult(
-                        catalog->StageCreateTable(
-                            ident, schema, iceberg::PartitionSpec::Unpartitioned(),
-                            iceberg::SortOrder::Unsorted(), table_location.string(),
-                            {{"write.parquet.compression-codec", "uncompressed"}}),
-                        "stage create table"));
-    PGICEBERG_ASSIGN_OR_RETURN(
-        auto properties_update,
-        pgiceberg::FromIcebergResult(table->NewUpdateProperties(),
-                                     "create table properties update"));
-    PGICEBERG_RETURN_NOT_OK(pgiceberg::FromIcebergStatus(
-        properties_update
-            ->Set(iceberg::TableProperties::kFormatVersion.key(),
-                  std::to_string(format_version))
-            .Commit(),
-        "set table format version"));
-    PGICEBERG_ASSIGN_OR_RETURN(auto created_table, pgiceberg::FromIcebergResult(
-                                                       table->Commit(), "create table"));
+        auto created_table,
+        pgiceberg::CreateUnpartitionedIcebergTable(options, std::move(schema),
+                                                   format_version, drop_if_exists));
     (void)created_table;
-    (void)table;
 
     return static_cast<Datum>(0);
   });

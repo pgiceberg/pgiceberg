@@ -10,7 +10,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <cstdlib>
@@ -25,6 +24,7 @@
 #include <iceberg/type.h>
 
 #include "common/catalog.h"
+#include "common/fdw_path.h"
 #include "common/type_mapping.h"
 #include "fdw/modify_state.h"
 #include "fdw/options.h"
@@ -108,27 +108,9 @@ void PgIcebergGetForeignRelSize(PlannerInfo*, RelOptInfo* baserel, Oid relation_
       [&]() { return PgIcebergGetForeignRelSizeImpl(baserel, relation_oid); });
 }
 
-ForeignPath* CreateIcebergForeignScanPath(PlannerInfo* root, RelOptInfo* baserel) {
-  const auto rows = baserel->rows;
-  const auto total_cost = std::max(1.0, rows);
-
-  // PostgreSQL changed create_foreignscan_path() arguments across supported
-  // releases.  Keep the version split at the call site so the rest of the FDW
-  // path construction does not need PG-version-specific wrappers.
-#if PG_VERSION_NUM >= 180000
-  return create_foreignscan_path(root, baserel, nullptr, rows, 0, 0, total_cost, NIL,
-                                 nullptr, nullptr, NIL, NIL);
-#elif PG_VERSION_NUM >= 170000
-  return create_foreignscan_path(root, baserel, nullptr, rows, 0, total_cost, NIL,
-                                 nullptr, nullptr, NIL, NIL);
-#else
-  return create_foreignscan_path(root, baserel, nullptr, rows, 0, total_cost, NIL,
-                                 nullptr, nullptr, NIL);
-#endif
-}
-
 void PgIcebergGetForeignPaths(PlannerInfo* root, RelOptInfo* baserel, Oid) {
-  add_path(baserel, reinterpret_cast<Path*>(CreateIcebergForeignScanPath(root, baserel)));
+  add_path(baserel, reinterpret_cast<Path*>(
+                        pgiceberg::CreateSimpleForeignScanPath(root, baserel)));
 }
 
 ForeignScan* PgIcebergGetForeignPlan(PlannerInfo*, RelOptInfo* baserel, Oid, ForeignPath*,

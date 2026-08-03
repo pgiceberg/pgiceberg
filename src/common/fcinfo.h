@@ -12,24 +12,18 @@
 
 #pragma once
 
-#include <memory>
 #include <string>
-
-#include <arrow/type_fwd.h>
-#include <iceberg/type_fwd.h>
-
-#include "common/status.h"
 
 extern "C" {
 #include "postgres.h"
+#include "fmgr.h"
+#include "utils/builtins.h"
 }
 
 namespace pgiceberg {
 
-Result<std::shared_ptr<iceberg::Type>> PostgresTypeToIcebergType(Oid pg_type,
-                                                                 int32 typmod = -1);
-
-std::string IcebergTypeToSql(const iceberg::Type& type);
-std::string ArrowTypeToSql(const arrow::DataType& type);
+inline std::string TextArg(FunctionCallInfo fcinfo, int argno) {
+  return text_to_cstring(PG_GETARG_TEXT_PP(argno));
+}
 
 }  // namespace pgiceberg

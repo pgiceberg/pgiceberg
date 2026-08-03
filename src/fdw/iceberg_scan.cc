@@ -14,29 +14,17 @@
 
 #include <utility>
 
-#include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/file_scan_task_reader.h>
 #include <iceberg/schema.h>
-#include <iceberg/schema_internal.h>
 #include <iceberg/table.h>
 #include <iceberg/table_scan.h>
 
+#include "common/arrow_schema.h"
 #include "common/pg_interrupt.h"
 #include "common/status.h"
 
 namespace pgiceberg::fdw {
-
-namespace {
-
-Result<std::shared_ptr<arrow::Schema>> ArrowSchemaFor(const iceberg::Schema& schema) {
-  ArrowSchema c_schema;
-  PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(iceberg::ToArrowSchema(schema, &c_schema),
-                                            "convert Iceberg schema to Arrow"));
-  return FromArrowResult(arrow::ImportSchema(&c_schema), "import Arrow schema");
-}
-
-}  // namespace
 
 IcebergScanCursor::IcebergScanCursor(
     std::shared_ptr<iceberg::Table> table,
@@ -68,7 +56,7 @@ Status IcebergScanCursor::Init() {
       auto scan, FromIcebergResult(scan_builder->Build(), "build table scan"));
   PGICEBERG_ASSIGN_OR_RETURN(auto projected_schema,
                              FromIcebergResult(scan->schema(), "load scan schema"));
-  PGICEBERG_ASSIGN_OR_RETURN(arrow_schema_, ArrowSchemaFor(*projected_schema));
+  PGICEBERG_ASSIGN_OR_RETURN(arrow_schema_, pgiceberg::ArrowSchemaFor(*projected_schema));
   PGICEBERG_ASSIGN_OR_RETURN(tasks_,
                              FromIcebergResult(scan->PlanFiles(), "plan scan files"));
 
