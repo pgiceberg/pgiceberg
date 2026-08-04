@@ -36,54 +36,13 @@ engine. Keeping the surfaces separate preserves PostgreSQL planning and
 transaction semantics and lets the FDW, table AM, and logical worker share the
 same iceberg-cpp scan and write primitives.
 
-Systems such as pg_mooncake and Moonlink demonstrate useful product-level
-contracts: transaction-aware CDC, separate commit and flush LSNs, LSN-bounded
-reads, explicit snapshot creation, and optimization. pgiceberg implements the
-relevant behavior independently on top of PostgreSQL and iceberg-cpp.
-
-## Evidence from pg_mooncake
-
-The local analysis used pg_mooncake commit `b7c67e0`. Its Moonlink dependency
-is recorded as gitlink `c1a99ef`, but that submodule is not populated in the
-local checkout. The conclusions below distinguish observable wrapper contracts
-from unverified Moonlink internals:
-
-- `README.md` promises an Iceberg mirror with streaming and batched INSERT,
-  UPDATE, and DELETE, sub-second freshness, and DuckDB-accelerated reads.
-- `src/bgworker.rs` embeds `moonlink_service` in a Tokio-backed PostgreSQL
-  background worker, while `src/utils.rs` uses a Unix socket for RPC. This is a
-  service boundary, even though it runs under the postmaster.
-- `src/functions.rs` exposes table creation, explicit snapshot creation,
-  optimization, file loading, and both commit and flush LSNs. Snapshot creation
-  passes PostgreSQL's `XactLastCommitEnd` to the service.
-- `src/duckdb_mooncake.rs` attaches the Mooncake DuckDB extension over that
-  socket and supplies `XactLastCommitEnd` to the query layer.
-- `src/table.rs` defines a PostgreSQL table AM whose normal scan and DML hooks
-  are largely `unimplemented!()` and registers it with a DuckDB integration
-  hook. It is a marker/interception surface, not a reusable implementation of
-  PostgreSQL's native table-storage contract.
-- `tests/pg_regress/sql/sanity.sql` exercises source INSERT, UPDATE, and DELETE
-  followed by a query of the mirrored table, but the unpopulated submodule means
-  the row-index, delete-file, snapshot-handoff, and recovery algorithms are not
-  inspectable in this checkout.
-
-The pg_mooncake wrapper is MIT-licensed. Moonlink is a separate dependency, so
-this design neither assumes its licensing terms nor copies its unavailable
-implementation. The reusable part here is the system contract: durable LSN
-progress, a recovery-aware CDC pipeline, explicit maintenance, and a freshness
-boundary for reads.
-
-For pgiceberg, the capability mapping is:
-
-| Capability | Decision |
-| --- | --- |
-| Initial snapshot plus CDC handoff | Implement now with a PostgreSQL lock and a post-lock snapshot; replace with exported-snapshot parallel copy later. |
-| Durable commit and flush progress | Implement now in logged PostgreSQL state and Iceberg metadata. |
-| Replay-safe CDC batches | Implement now with an exact slot-prefix hash. |
-| INSERT/UPDATE/DELETE | Keep INSERT-only now; add equality deletes after replica-identity design. |
-| Sub-second reads | Defer; keep FDW and native table AM semantics instead of DuckDB interception. |
-| Optimization and compaction | Preserve as an explicit future maintenance surface. |
-| Rust/Tokio side service | Do not adopt for the first implementation; the existing C++ worker and iceberg-cpp stack are sufficient. |
+The logical mirror is implemented directly in pgiceberg's existing C++ stack:
+PostgreSQL logical decoding provides the ordered change stream, the pgiceberg
+worker owns replication progress, and the shared FDW write path uses
+iceberg-cpp to publish data files and metadata. The first implementation favors
+a small correctness proof over maximum concurrency; later phases can improve
+backfill throughput, change coverage, freshness, and maintenance without
+changing these ownership boundaries.
 
 ## Goals
 
