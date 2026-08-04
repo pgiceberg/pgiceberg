@@ -33,8 +33,8 @@
 #include "common/pg_error.h"
 #include "common/pg_relation.h"
 #include "common/status.h"
-#include "fdw/modify_state.h"
-#include "fdw/options.h"
+#include "engine/modify_state.h"
+#include "engine/options.h"
 
 extern "C" {
 #include "postgres.h"
@@ -508,14 +508,40 @@ Result<TupleTableSlot*> SlotFromDecodedRow(Relation relation,
   return slot;
 }
 
+// Recorded with each Iceberg commit produced by logical mirroring so a crash
+// between the Iceberg commit and slot consumption leaves the batch
+// recognizable on the target table.
+constexpr std::string_view kLogicalBatchIdProperty = "pgiceberg.logical.last-batch-id";
+constexpr std::string_view kLogicalSourceLsnProperty =
+    "pgiceberg.logical.last-source-lsn";
+
+struct LogicalCommitMetadata {
+  std::string batch_id;
+  std::string source_lsn;
+};
+
+engine::CommitProperties CommitPropertiesFor(const LogicalCommitMetadata& metadata) {
+  return {{std::string(kLogicalBatchIdProperty), metadata.batch_id},
+          {std::string(kLogicalSourceLsnProperty), metadata.source_lsn}};
+}
+
+Result<bool> IsLogicalBatchCommitted(const engine::Options& options,
+                                     const char* relation_name,
+                                     std::string_view batch_id) {
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto last_batch_id,
+      engine::ReadTableProperty(options, relation_name, kLogicalBatchIdProperty));
+  return last_batch_id.has_value() && *last_batch_id == batch_id;
+}
+
 Status AppendDecodedRows(Relation relation, const Mirror& mirror,
                          const std::vector<DecodedChange>& rows,
-                         const fdw::LogicalCommitMetadata& logical_metadata) {
+                         const LogicalCommitMetadata& logical_metadata) {
   if (rows.empty()) {
     return Ok();
   }
 
-  fdw::Options options;
+  engine::Options options;
   options.catalog = mirror.catalog;
   options.name_space = mirror.name_space;
   options.table = mirror.table_name;
@@ -527,8 +553,9 @@ Status AppendDecodedRows(Relation relation, const Mirror& mirror,
     slots.push_back(slot);
   }
 
-  Status status = fdw::AppendSlots(relation, options, slots.data(),
-                                   static_cast<int>(slots.size()), logical_metadata);
+  Status status =
+      engine::AppendSlots(relation, options, slots.data(), static_cast<int>(slots.size()),
+                          CommitPropertiesFor(logical_metadata));
   for (auto* slot : slots) {
     ExecDropSingleTupleTableSlot(slot);
   }
@@ -561,23 +588,23 @@ Status ProcessMirror(const Mirror& mirror) {
   }
 
   if (!inserts.empty()) {
-    fdw::Options options;
+    engine::Options options;
     options.catalog = mirror.catalog;
     options.name_space = mirror.name_space;
     options.table = mirror.table_name;
     PGICEBERG_ASSIGN_OR_RETURN(
         auto already_committed,
-        fdw::IsLogicalBatchCommitted(options, mirror.table_name.c_str(), batch_id));
+        IsLogicalBatchCommitted(options, mirror.table_name.c_str(), batch_id));
 
     if (!already_committed) {
       Relation relation = table_open(mirror.source_relid, AccessShareLock);
       RelationLockGuard relation_guard(relation, AccessShareLock);
       PGICEBERG_RETURN_NOT_OK(AppendDecodedRows(
           relation, mirror, inserts,
-          fdw::LogicalCommitMetadata{.batch_id = batch_id, .source_lsn = last_lsn}));
+          LogicalCommitMetadata{.batch_id = batch_id, .source_lsn = last_lsn}));
       // Commit Iceberg before consuming WAL. If the process crashes before slot
       // consumption, the persisted batch ID makes the same prefix recognizable.
-      PGICEBERG_RETURN_NOT_OK(fdw::FlushPendingModifyChanges());
+      PGICEBERG_RETURN_NOT_OK(engine::FlushPendingModifyChanges());
     }
   }
 
@@ -641,13 +668,14 @@ class BackfillSlotBatch {
     slots_.push_back(copy);
   }
 
-  Status Flush(Relation relation, const fdw::Options& options,
-               const fdw::LogicalCommitMetadata& logical_metadata) {
+  Status Flush(Relation relation, const engine::Options& options,
+               const LogicalCommitMetadata& logical_metadata) {
     if (slots_.empty()) {
       return Ok();
     }
-    auto status = fdw::AppendSlots(relation, options, slots_.data(),
-                                   static_cast<int>(slots_.size()), logical_metadata);
+    auto status = engine::AppendSlots(relation, options, slots_.data(),
+                                      static_cast<int>(slots_.size()),
+                                      CommitPropertiesFor(logical_metadata));
     if (status) {
       Clear();
     }
@@ -668,8 +696,9 @@ class BackfillSlotBatch {
   std::vector<TupleTableSlot*> slots_;
 };
 
-Status EnsureEmptyBackfillTarget(const fdw::Options& options, const char* relation_name) {
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, fdw::ToCatalogOptions(options));
+Status EnsureEmptyBackfillTarget(const engine::Options& options,
+                                 const char* relation_name) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, engine::ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(auto table,
                              pgiceberg::LoadIcebergTable(catalog_options, relation_name));
   if (table->snapshots().empty()) {
@@ -687,7 +716,7 @@ Status EnsureEmptyBackfillTarget(const fdw::Options& options, const char* relati
                 "logical mirror backfill requires an empty target Iceberg table"));
 }
 
-Result<std::int64_t> BackfillSourceTable(Oid source_relid, const fdw::Options& options,
+Result<std::int64_t> BackfillSourceTable(Oid source_relid, const engine::Options& options,
                                          int batch_size, std::string_view source_lsn,
                                          bool require_empty_target) {
   if (batch_size <= 0) {
@@ -715,7 +744,7 @@ Result<std::int64_t> BackfillSourceTable(Oid source_relid, const fdw::Options& o
   std::unique_ptr<TupleTableSlot, decltype(&ExecDropSingleTupleTableSlot)> scan_slot(
       table_slot_create(relation, nullptr), ExecDropSingleTupleTableSlot);
   BackfillSlotBatch batch(RelationGetDescr(relation));
-  fdw::LogicalCommitMetadata logical_metadata{
+  LogicalCommitMetadata logical_metadata{
       .batch_id =
           "backfill-v1:" + std::to_string(source_relid) + ":" + std::string(source_lsn),
       .source_lsn = std::string(source_lsn),
@@ -838,7 +867,7 @@ PG_FUNCTION_INFO_V1(pgiceberg_process_logical_mirrors);
 
 Datum pgiceberg_backfill_logical_mirror(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
-    pgiceberg::fdw::Options options;
+    pgiceberg::engine::Options options;
     options.catalog = pgiceberg::TextArg(fcinfo, 1);
     options.name_space = pgiceberg::TextArg(fcinfo, 2);
     options.table = pgiceberg::TextArg(fcinfo, 3);

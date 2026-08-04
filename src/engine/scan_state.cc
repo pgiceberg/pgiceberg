@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "fdw/scan_state.h"
+#include "engine/scan_state.h"
 
 #include <memory>
 #include <optional>
@@ -26,8 +26,8 @@
 #include "common/datum_convert.h"
 #include "common/pg_interrupt.h"
 #include "common/status.h"
-#include "fdw/iceberg_scan.h"
-#include "fdw/modify_state.h"
+#include "engine/iceberg_scan.h"
+#include "engine/modify_state.h"
 
 extern "C" {
 #include "postgres.h"
@@ -39,7 +39,7 @@ extern "C" {
 #include "utils/rel.h"
 }
 
-namespace pgiceberg::fdw {
+namespace pgiceberg::engine {
 namespace {
 
 Result<bool> LoadNextBatch(ScanState* state);
@@ -205,4 +205,4 @@ void EndScan(ScanState* state) {
   delete state;
 }
 
-}  // namespace pgiceberg::fdw
+}  // namespace pgiceberg::engine

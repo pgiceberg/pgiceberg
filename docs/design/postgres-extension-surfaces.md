@@ -54,8 +54,9 @@ In PostgreSQL 18.4, the relevant core paths are:
 - `src/backend/commands/foreigncmds.c`: calls `ImportForeignSchema`.
 
 In pgiceberg, the main Iceberg FDW lives under `src/fdw/`. It supports scans,
-`IMPORT FOREIGN SCHEMA`, and DML callbacks. The generic Parquet and Avro FDWs
-live under `src/utilities/` and are read-only file wrappers.
+`IMPORT FOREIGN SCHEMA`, and DML callbacks, delegating the actual Iceberg
+reads and writes to the shared engine under `src/engine/`. The generic Parquet
+and Avro FDWs live under `src/utilities/` and are read-only file wrappers.
 
 The FDW path matches Iceberg well because Iceberg tables live outside
 PostgreSQL storage. The PostgreSQL relation is a mapping over an external

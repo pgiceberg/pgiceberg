@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,7 +21,7 @@
 #include <iceberg/type_fwd.h>
 
 #include "common/status.h"
-#include "fdw/options.h"
+#include "engine/options.h"
 
 struct EState;
 struct ModifyTableState;
@@ -29,14 +30,14 @@ struct TupleTableSlot;
 struct RelationData;
 using Relation = RelationData*;
 
-namespace pgiceberg::fdw {
+namespace pgiceberg::engine {
 
 struct ModifyState;
 
-struct LogicalCommitMetadata {
-  std::string batch_id;
-  std::string source_lsn;
-};
+// Key/value pairs recorded atomically with an append: on the new snapshot's
+// summary and as table properties.  Callers use them to make a commit
+// recognizable after a crash (e.g. logical replication batch ids).
+using CommitProperties = std::map<std::string, std::string>;
 
 Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo,
                                  const Options& options);
@@ -50,12 +51,13 @@ Result<TupleTableSlot*> ExecDelete(ModifyState* state, TupleTableSlot* slot,
 Status EndModify(ModifyState* state);
 Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** slots,
                    int nslots,
-                   std::optional<LogicalCommitMetadata> logical_metadata = std::nullopt);
-Result<bool> IsLogicalBatchCommitted(const Options& options, const char* relation_name,
-                                     std::string_view batch_id);
+                   std::optional<CommitProperties> commit_properties = std::nullopt);
+Result<std::optional<std::string>> ReadTableProperty(const Options& options,
+                                                     const char* relation_name,
+                                                     std::string_view key);
 // Durably commit any pending Iceberg DML for the current PostgreSQL transaction.
 // Safe to call before PRE_COMMIT; later PRE_COMMIT becomes a no-op for flushed work.
 Status FlushPendingModifyChanges();
 void RegisterTransactionCallbacks();
 
-}  // namespace pgiceberg::fdw
+}  // namespace pgiceberg::engine

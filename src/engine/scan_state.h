@@ -15,13 +15,13 @@
 #include <vector>
 
 #include "common/status.h"
-#include "fdw/options.h"
+#include "engine/options.h"
 
 struct RelationData;
 using Relation = RelationData*;
 struct TupleTableSlot;
 
-namespace pgiceberg::fdw {
+namespace pgiceberg::engine {
 
 struct ScanState;
 
@@ -31,4 +31,4 @@ Result<TupleTableSlot*> IterateScan(ScanState* state, TupleTableSlot* slot);
 void ReScan(ScanState* state);
 void EndScan(ScanState* state);
 
-}  // namespace pgiceberg::fdw
+}  // namespace pgiceberg::engine

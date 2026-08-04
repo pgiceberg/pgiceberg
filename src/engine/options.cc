@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "fdw/options.h"
+#include "engine/options.h"
 
 #include <array>
 #include <charconv>
@@ -25,7 +25,7 @@ extern "C" {
 #include "utils/errcodes.h"
 }
 
-namespace pgiceberg::fdw {
+namespace pgiceberg::engine {
 namespace {
 
 constexpr std::array<const char*, 8> kValidOptions = {
@@ -180,4 +180,4 @@ pgiceberg::Result<pgiceberg::CatalogOptions> ToCatalogOptions(const Options& opt
   return catalog_options;
 }
 
-}  // namespace pgiceberg::fdw
+}  // namespace pgiceberg::engine

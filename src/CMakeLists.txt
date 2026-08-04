@@ -16,12 +16,12 @@ add_library(pgiceberg MODULE
             common/catalog.cc
             common/datum_convert.cc
             common/type_mapping.cc
+            engine/iceberg_scan.cc
+            engine/modify_state.cc
+            engine/options.cc
+            engine/scan_state.cc
             fdw/fdw.cc
-            fdw/iceberg_scan.cc
-            fdw/modify_state.cc
-            fdw/options.cc
             fdw/scan_projection.cc
-            fdw/scan_state.cc
             functions/create_table.cc
             functions/metadata.cc
             functions/register_table.cc

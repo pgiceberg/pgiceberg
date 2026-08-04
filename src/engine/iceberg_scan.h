@@ -30,7 +30,7 @@ namespace iceberg {
 class FileScanTaskReader;
 }  // namespace iceberg
 
-namespace pgiceberg::fdw {
+namespace pgiceberg::engine {
 
 class IcebergScanCursor {
  public:
@@ -67,4 +67,4 @@ class IcebergScanCursor {
   std::shared_ptr<arrow::RecordBatchReader> batch_reader_;
 };
 
-}  // namespace pgiceberg::fdw
+}  // namespace pgiceberg::engine
