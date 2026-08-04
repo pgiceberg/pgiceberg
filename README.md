@@ -27,6 +27,7 @@ lists, deletes, and Parquet data files are handled through iceberg-cpp.
 - Infer foreign table definitions with `IMPORT FOREIGN SCHEMA`.
 - Register existing Iceberg table metadata into a SQL catalog.
 - Read table metadata and snapshot file summaries from SQL.
+- Read a historical Iceberg snapshot with the `snapshot_id` foreign-table option.
 - Append rows with `INSERT`.
 - Rewrite unpartitioned table data files for `UPDATE` and `DELETE`.
 
@@ -116,6 +117,17 @@ OPTIONS (
   table 'trip_fixture'
 );
 ```
+
+To read a historical Iceberg snapshot through iceberg-cpp
+`TableScanBuilder::UseSnapshot`, add a `snapshot_id` foreign-table option:
+
+```sql
+ALTER FOREIGN TABLE pgiceberg_trip_fixture
+OPTIONS (ADD snapshot_id '1234567890');
+```
+
+DML is rejected while `snapshot_id` is set. Drop the option to return to the
+current table snapshot before `INSERT`, `UPDATE`, or `DELETE`.
 
 Read and write through the foreign table:
 
@@ -211,6 +223,14 @@ SELECT pgiceberg.table_snapshot_files_summary(
   'dev',
   'default',
   'trip_fixture'
+);
+
+-- Inspect manifests and data files for a specific Iceberg snapshot id.
+SELECT pgiceberg.table_snapshot_files_summary(
+  'dev',
+  'default',
+  'trip_fixture',
+  1234567890
 );
 ```
 

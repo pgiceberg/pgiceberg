@@ -776,6 +776,7 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
     return Ok();
   }
 
+  PGICEBERG_RETURN_NOT_OK(EnsureWritableOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto table,
@@ -894,6 +895,7 @@ void DeleteModifyStateAndRowContext(ModifyState* state) {
 
 Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo,
                                  const Options& options) {
+  PGICEBERG_RETURN_NOT_OK(EnsureWritableOptions(options));
   auto state = std::make_unique<ModifyState>();
   state->operation = mtstate->operation;
   state->options = options;

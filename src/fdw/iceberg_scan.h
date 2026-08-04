@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -35,7 +36,8 @@ class IcebergScanCursor {
  public:
   explicit IcebergScanCursor(
       std::shared_ptr<iceberg::Table> table,
-      std::optional<std::vector<std::string>> selected_columns = std::nullopt);
+      std::optional<std::vector<std::string>> selected_columns = std::nullopt,
+      std::optional<int64_t> snapshot_id = std::nullopt);
   ~IcebergScanCursor();
 
   IcebergScanCursor(const IcebergScanCursor&) = delete;
@@ -55,6 +57,7 @@ class IcebergScanCursor {
 
   std::shared_ptr<iceberg::Table> table_;
   std::optional<std::vector<std::string>> selected_columns_;
+  std::optional<int64_t> snapshot_id_;
   std::shared_ptr<arrow::Schema> arrow_schema_;
   std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks_;
   std::vector<std::shared_ptr<iceberg::DataFile>> data_files_;

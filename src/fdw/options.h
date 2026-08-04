@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 
 #include "common/catalog.h"
@@ -30,14 +32,20 @@ struct Options {
   std::string catalog_name = "pgiceberg";
   std::string name_space = "default";
   std::string table;
+  // When set, scans use iceberg-cpp TableScanBuilder::UseSnapshot for this id.
+  std::optional<int64_t> snapshot_id;
 };
 
 bool IsValidOption(const char* name);
 std::string ValidOptionsText();
 Status ValidateCatalogType(const char* value);
-void ApplyOption(Options& options, DefElem* def);
-void ApplyOptions(Options& options, List* option_list);
-Options OptionsForForeignTable(unsigned int foreigntableid, const char* relation_name);
+Status ValidateSnapshotIdOption(const char* value);
+Result<int64_t> ParseSnapshotIdOption(const char* value);
+Status EnsureWritableOptions(const Options& options);
+Status ApplyOption(Options& options, DefElem* def);
+Status ApplyOptions(Options& options, List* option_list);
+Result<Options> OptionsForForeignTable(unsigned int foreigntableid,
+                                       const char* relation_name);
 pgiceberg::Result<pgiceberg::CatalogOptions> ToCatalogOptions(const Options& options);
 
 }  // namespace pgiceberg::fdw

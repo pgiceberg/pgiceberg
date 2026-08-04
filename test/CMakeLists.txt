@@ -21,7 +21,8 @@ if(POSTGRESQL_REGRESS)
       fdw_avro
       fdw_register_table
       fdw_yellow_trip_dataset
-      fdw_metadata)
+      fdw_metadata
+      fdw_snapshots)
   set(PGICEBERG_REGRESS_DATASETS yellow_trip)
   set(PGICEBERG_REGRESS_EXTENSION_DIR "${CMAKE_CURRENT_BINARY_DIR}/extension")
 

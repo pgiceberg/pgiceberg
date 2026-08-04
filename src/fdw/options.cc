@@ -13,7 +13,9 @@
 #include "fdw/options.h"
 
 #include <array>
+#include <charconv>
 #include <cstring>
+#include <system_error>
 
 extern "C" {
 #include "postgres.h"
@@ -26,9 +28,9 @@ extern "C" {
 namespace pgiceberg::fdw {
 namespace {
 
-constexpr std::array<const char*, 9> kValidOptions = {
-    "catalog", "catalog_type", "catalog_uri", "warehouse",   "namespace",
-    "table",   "snapshot_id",  "config_file", "catalog_name"};
+constexpr std::array<const char*, 8> kValidOptions = {
+    "catalog",   "catalog_type", "catalog_uri", "warehouse",
+    "namespace", "table",        "snapshot_id", "catalog_name"};
 
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
 constexpr const char* kValidCatalogTypes = "sql, sqlite, rest";
@@ -80,7 +82,45 @@ Status ValidateCatalogType(const char* value) {
       std::string("Valid catalog_type values are: ") + kValidCatalogTypes + "."));
 }
 
-void ApplyOption(Options& options, DefElem* def) {
+Result<int64_t> ParseSnapshotIdOption(const char* value) {
+  if (value == nullptr || value[0] == '\0') {
+    return std::unexpected(MakeError(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
+                                     "pgiceberg option \"snapshot_id\" is empty",
+                                     "Provide a signed 64-bit Iceberg snapshot id."));
+  }
+
+  int64_t snapshot_id = 0;
+  const char* begin = value;
+  const char* end = value + std::strlen(value);
+  auto [ptr, ec] = std::from_chars(begin, end, snapshot_id);
+  if (ec != std::errc{} || ptr != end) {
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
+                  std::string("invalid pgiceberg snapshot_id \"") + value + "\"",
+                  "snapshot_id must be a signed 64-bit integer."));
+  }
+  return snapshot_id;
+}
+
+Status ValidateSnapshotIdOption(const char* value) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto ignored, ParseSnapshotIdOption(value));
+  (void)ignored;
+  return Ok();
+}
+
+Status EnsureWritableOptions(const Options& options) {
+  if (options.snapshot_id.has_value()) {
+    return std::unexpected(
+        MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                  "pgiceberg DML is not supported when foreign table option "
+                  "\"snapshot_id\" is set",
+                  "Drop snapshot_id to read the current table snapshot before INSERT, "
+                  "UPDATE, or DELETE."));
+  }
+  return Ok();
+}
+
+Status ApplyOption(Options& options, DefElem* def) {
   const char* value = defGetString(def);
   if (std::strcmp(def->defname, "catalog") == 0) {
     options.catalog = value;
@@ -96,23 +136,28 @@ void ApplyOption(Options& options, DefElem* def) {
     options.name_space = value;
   } else if (std::strcmp(def->defname, "table") == 0) {
     options.table = value;
+  } else if (std::strcmp(def->defname, "snapshot_id") == 0) {
+    PGICEBERG_ASSIGN_OR_RETURN(options.snapshot_id, ParseSnapshotIdOption(value));
   }
+  return Ok();
 }
 
-void ApplyOptions(Options& options, List* option_list) {
+Status ApplyOptions(Options& options, List* option_list) {
   ListCell* cell = nullptr;
   foreach (cell, option_list) {
     auto* def = static_cast<DefElem*>(lfirst(cell));
-    ApplyOption(options, def);
+    PGICEBERG_RETURN_NOT_OK(ApplyOption(options, def));
   }
+  return Ok();
 }
 
-Options OptionsForForeignTable(unsigned int foreigntableid, const char* relation_name) {
+Result<Options> OptionsForForeignTable(unsigned int foreigntableid,
+                                       const char* relation_name) {
   Options options;
   ForeignTable* table = GetForeignTable(foreigntableid);
   ForeignServer* server = GetForeignServer(table->serverid);
-  ApplyOptions(options, server->options);
-  ApplyOptions(options, table->options);
+  PGICEBERG_RETURN_NOT_OK(ApplyOptions(options, server->options));
+  PGICEBERG_RETURN_NOT_OK(ApplyOptions(options, table->options));
   if (options.table.empty()) {
     options.table = relation_name;
   }

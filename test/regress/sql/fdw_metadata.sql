@@ -53,6 +53,9 @@ OPTIONS (
 INSERT INTO metadata_fixture
 VALUES (1, 'one');
 
+INSERT INTO metadata_fixture
+VALUES (2, 'two');
+
 SELECT pgiceberg.table_metadata_file_location(
   'metadata_regress',
   'default',
@@ -108,6 +111,29 @@ FROM pgiceberg.table_snapshot_files_summary(
   'metadata_regress',
   'default',
   'metadata_fixture'
+) AS summary;
+
+-- Summarize the oldest snapshot from metadata JSON history without printing ids.
+WITH oldest AS (
+  SELECT (metadata -> 'snapshots' -> 0 ->> 'snapshot-id')::bigint AS snapshot_id
+  FROM (
+    SELECT pgiceberg.table_metadata_json(
+      'metadata_regress',
+      'default',
+      'metadata_fixture'
+    ) AS metadata
+  ) AS q
+)
+SELECT
+  (summary ->> 'snapshot_id')::bigint = oldest.snapshot_id AS historical_snapshot_summary,
+  summary ->> 'snapshot_id' = summary ->> 'current_snapshot_id' AS is_current,
+  summary ->> 'data_file_count' AS data_file_count
+FROM oldest,
+LATERAL pgiceberg.table_snapshot_files_summary(
+  'metadata_regress',
+  'default',
+  'metadata_fixture',
+  oldest.snapshot_id
 ) AS summary;
 
 CREATE ROLE pgiceberg_no_raw;
