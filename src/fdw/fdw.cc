@@ -73,9 +73,8 @@ void EnsureIcebergRegistrations() {
 
 pgiceberg::Status PgIcebergGetForeignRelSizeImpl(RelOptInfo* baserel, Oid relation_oid) {
   baserel->rows = 1000;
-  PGICEBERG_ASSIGN_OR_RETURN(
-      auto options,
-      pgiceberg::fdw::OptionsForForeignTable(relation_oid, get_rel_name(relation_oid)));
+  PGICEBERG_ASSIGN_OR_RETURN(auto options, pgiceberg::fdw::OptionsForForeignTable(
+                                               relation_oid, get_rel_name(relation_oid)));
   if (options.catalog.empty()) {
     return pgiceberg::Ok();
   }
@@ -143,9 +142,8 @@ pgiceberg::Status PgIcebergBeginForeignScanImpl(ForeignScanState* node, int efla
 
   Relation relation = node->ss.ss_currentRelation;
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto options,
-      pgiceberg::fdw::OptionsForForeignTable(RelationGetRelid(relation),
-                                             RelationGetRelationName(relation)));
+      auto options, pgiceberg::fdw::OptionsForForeignTable(
+                        RelationGetRelid(relation), RelationGetRelationName(relation)));
   if (options.catalog.empty()) {
     PGICEBERG_RETURN_NOT_OK(
         pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
@@ -200,9 +198,8 @@ pgiceberg::Status PgIcebergBeginForeignModifyImpl(ModifyTableState* mtstate,
                                                   ResultRelInfo* rinfo) {
   Relation relation = rinfo->ri_RelationDesc;
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto options,
-      pgiceberg::fdw::OptionsForForeignTable(RelationGetRelid(relation),
-                                             RelationGetRelationName(relation)));
+      auto options, pgiceberg::fdw::OptionsForForeignTable(
+                        RelationGetRelid(relation), RelationGetRelationName(relation)));
   if (options.catalog.empty()) {
     PGICEBERG_RETURN_NOT_OK(
         pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));

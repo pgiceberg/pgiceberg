@@ -29,8 +29,8 @@ namespace pgiceberg::fdw {
 namespace {
 
 constexpr std::array<const char*, 8> kValidOptions = {
-    "catalog",  "catalog_type", "catalog_uri", "warehouse",
-    "namespace", "table",       "snapshot_id", "catalog_name"};
+    "catalog",   "catalog_type", "catalog_uri", "warehouse",
+    "namespace", "table",        "snapshot_id", "catalog_name"};
 
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
 constexpr const char* kValidCatalogTypes = "sql, sqlite, rest";
@@ -84,9 +84,9 @@ Status ValidateCatalogType(const char* value) {
 
 Result<int64_t> ParseSnapshotIdOption(const char* value) {
   if (value == nullptr || value[0] == '\0') {
-    return std::unexpected(MakeError(
-        ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE, "pgiceberg option \"snapshot_id\" is empty",
-        "Provide a signed 64-bit Iceberg snapshot id."));
+    return std::unexpected(MakeError(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
+                                     "pgiceberg option \"snapshot_id\" is empty",
+                                     "Provide a signed 64-bit Iceberg snapshot id."));
   }
 
   int64_t snapshot_id = 0;
@@ -94,10 +94,10 @@ Result<int64_t> ParseSnapshotIdOption(const char* value) {
   const char* end = value + std::strlen(value);
   auto [ptr, ec] = std::from_chars(begin, end, snapshot_id);
   if (ec != std::errc{} || ptr != end) {
-    return std::unexpected(MakeError(
-        ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
-        std::string("invalid pgiceberg snapshot_id \"") + value + "\"",
-        "snapshot_id must be a signed 64-bit integer."));
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
+                  std::string("invalid pgiceberg snapshot_id \"") + value + "\"",
+                  "snapshot_id must be a signed 64-bit integer."));
   }
   return snapshot_id;
 }
@@ -110,12 +110,12 @@ Status ValidateSnapshotIdOption(const char* value) {
 
 Status EnsureWritableOptions(const Options& options) {
   if (options.snapshot_id.has_value()) {
-    return std::unexpected(MakeError(
-        ERRCODE_FEATURE_NOT_SUPPORTED,
-        "pgiceberg DML is not supported when foreign table option "
-        "\"snapshot_id\" is set",
-        "Drop snapshot_id to read the current table snapshot before INSERT, "
-        "UPDATE, or DELETE."));
+    return std::unexpected(
+        MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                  "pgiceberg DML is not supported when foreign table option "
+                  "\"snapshot_id\" is set",
+                  "Drop snapshot_id to read the current table snapshot before INSERT, "
+                  "UPDATE, or DELETE."));
   }
   return Ok();
 }
@@ -152,7 +152,7 @@ Status ApplyOptions(Options& options, List* option_list) {
 }
 
 Result<Options> OptionsForForeignTable(unsigned int foreigntableid,
-                                        const char* relation_name) {
+                                       const char* relation_name) {
   Options options;
   ForeignTable* table = GetForeignTable(foreigntableid);
   ForeignServer* server = GetForeignServer(table->serverid);
