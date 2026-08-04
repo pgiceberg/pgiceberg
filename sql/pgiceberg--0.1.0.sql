@@ -56,32 +56,45 @@ COMMENT ON COLUMN pgiceberg.table_bindings.namespace IS
 COMMENT ON COLUMN pgiceberg.table_bindings.table_name IS
   'Iceberg table name used to load the table.';
 
--- UNLOGGED so mirror progress/status DML is not WAL-logged. Otherwise every
--- successful apply would leave catalog updates in the same replication slot
--- that consumes source-table changes (and an in-function drain cannot see
--- those updates until the surrounding transaction commits).
-CREATE UNLOGGED TABLE pgiceberg.logical_mirrors (
+-- The logical output plugin excludes the pgiceberg schema, so this control
+-- table can remain crash-safe without feeding its progress updates back into
+-- mirror replication slots.
+CREATE TABLE pgiceberg.logical_mirrors (
   source_relid oid PRIMARY KEY,
   catalog text NOT NULL,
   namespace text NOT NULL,
   table_name text NOT NULL,
   slot_name name NOT NULL UNIQUE,
+  UNIQUE (catalog, namespace, table_name),
   enabled boolean NOT NULL DEFAULT true,
+  state text NOT NULL DEFAULT 'ready'
+    CHECK (state IN ('backfilling', 'ready', 'error')),
   batch_size integer NOT NULL DEFAULT 1024 CHECK (batch_size > 0),
+  initial_snapshot_lsn pg_lsn,
+  backfill_rows bigint NOT NULL DEFAULT 0 CHECK (backfill_rows >= 0),
   last_flushed_lsn pg_lsn,
+  last_applied_batch_id text,
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 ) USING heap;
 
 COMMENT ON TABLE pgiceberg.logical_mirrors IS
-  'Append-only logical decoding mirrors from PostgreSQL heap tables to Iceberg tables. UNLOGGED so progress updates do not enter mirror replication slots.';
+  'Crash-safe logical decoding mirror configuration and progress from PostgreSQL heap tables to Iceberg tables.';
 COMMENT ON COLUMN pgiceberg.logical_mirrors.source_relid IS
   'OID of the PostgreSQL source table consumed through logical decoding.';
 COMMENT ON COLUMN pgiceberg.logical_mirrors.slot_name IS
   'Logical replication slot consumed by the pgiceberg background worker.';
+COMMENT ON COLUMN pgiceberg.logical_mirrors.state IS
+  'Mirror lifecycle state: backfilling, ready for streaming, or stopped on error.';
+COMMENT ON COLUMN pgiceberg.logical_mirrors.initial_snapshot_lsn IS
+  'Consistent point returned when the logical replication slot was created.';
+COMMENT ON COLUMN pgiceberg.logical_mirrors.backfill_rows IS
+  'Number of source rows copied before the mirror entered ready state.';
 COMMENT ON COLUMN pgiceberg.logical_mirrors.last_flushed_lsn IS
-  'Latest LSN whose decoded changes were durably appended to Iceberg and then consumed from the slot (at-least-once).';
+  'Latest LSN whose decoded changes were durably appended to Iceberg and then consumed from the slot.';
+COMMENT ON COLUMN pgiceberg.logical_mirrors.last_applied_batch_id IS
+  'SHA-256 identity of the latest slot prefix durably applied to Iceberg and consumed.';
 
 CREATE FUNCTION pgiceberg.add_catalog(
   name text,
@@ -258,7 +271,25 @@ COMMENT ON FUNCTION pgiceberg.register_table_from_location(text, text, text, tex
 
 REVOKE EXECUTE ON FUNCTION pgiceberg.register_table_from_location(text, text, text, text, boolean) FROM PUBLIC;
 
--- Append-only logical decoding mirrors.
+-- Internal bounded initial-copy primitive. Mirror creation holds the source
+-- write barrier before calling it; direct execution is intentionally revoked.
+CREATE FUNCTION pgiceberg.backfill_logical_mirror(
+  src regclass,
+  catalog text,
+  namespace text,
+  table_name text,
+  batch_size integer,
+  source_lsn text,
+  require_empty_target boolean
+)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'pgiceberg_backfill_logical_mirror'
+LANGUAGE C STRICT SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg;
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.backfill_logical_mirror(regclass, text, text, text, integer, text, boolean) FROM PUBLIC;
+
+-- INSERT-only logical decoding mirrors with an optional consistent backfill.
 CREATE FUNCTION pgiceberg.create_logical_mirror(
   src regclass,
   catalog text,
@@ -266,7 +297,8 @@ CREATE FUNCTION pgiceberg.create_logical_mirror(
   table_name text,
   slot_name text DEFAULT NULL,
   create_iceberg_table boolean DEFAULT true,
-  batch_size integer DEFAULT 1024
+  batch_size integer DEFAULT 1024,
+  backfill boolean DEFAULT true
 )
 RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER
@@ -283,6 +315,10 @@ DECLARE
   column_required boolean[];
   source_kind "char";
   previous_slot name;
+  initial_lsn pg_lsn;
+  copied_rows bigint := 0;
+  slot_exists boolean;
+  created_slot boolean := false;
 BEGIN
   IF NOT has_table_privilege(session_user, src, 'SELECT') THEN
     RAISE EXCEPTION 'permission denied for table %', src
@@ -299,9 +335,25 @@ BEGIN
       USING ERRCODE = '0A000';
   END IF;
 
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class AS c
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE c.oid = source_oid
+      AND n.nspname = 'pgiceberg'
+  ) THEN
+    RAISE EXCEPTION 'relations in schema pgiceberg cannot be logical mirror sources'
+      USING ERRCODE = '0A000';
+  END IF;
+
   IF batch_size <= 0 THEN
     RAISE EXCEPTION 'batch_size must be greater than zero'
       USING ERRCODE = '22023';
+  END IF;
+
+  IF backfill AND current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'consistent logical mirror backfill requires READ COMMITTED isolation'
+      USING ERRCODE = '0A000';
   END IF;
 
   -- Block concurrent writers while establishing the slot so committed inserts
@@ -328,14 +380,44 @@ BEGIN
   FROM pgiceberg.logical_mirrors
   WHERE source_relid = source_oid;
 
-  -- Create the replication slot before Iceberg table setup so the slot's
-  -- start point is established as early as possible under the table lock.
-  IF NOT EXISTS (
+  IF EXISTS (
+    SELECT 1
+    FROM pgiceberg.logical_mirrors AS m
+    WHERE m.catalog = $2
+      AND m.namespace = $3
+      AND m.table_name = $4
+      AND m.source_relid <> source_oid
+  ) THEN
+    RAISE EXCEPTION 'Iceberg target %.%.% already belongs to another logical mirror',
+      catalog, namespace, table_name
+      USING ERRCODE = '23505';
+  END IF;
+
+  SELECT EXISTS (
     SELECT 1
     FROM pg_replication_slots
     WHERE pg_replication_slots.slot_name = resolved_slot::text
-  ) THEN
-    PERFORM pg_create_logical_replication_slot(resolved_slot, 'pgiceberg');
+  )
+  INTO slot_exists;
+
+  IF backfill AND (slot_exists OR previous_slot IS NOT NULL) THEN
+    RAISE EXCEPTION 'consistent backfill requires a new logical mirror and slot'
+      USING ERRCODE = '55000',
+            HINT = 'Drop the existing mirror and slot first, or call with backfill => false.';
+  END IF;
+
+  -- Create the replication slot before Iceberg table setup so the slot's
+  -- start point is established as early as possible under the table lock.
+  IF NOT slot_exists THEN
+    SELECT lsn
+    INTO initial_lsn
+    FROM pg_create_logical_replication_slot(resolved_slot, 'pgiceberg');
+    created_slot := true;
+  ELSE
+    SELECT COALESCE(confirmed_flush_lsn, restart_lsn)
+    INTO initial_lsn
+    FROM pg_replication_slots
+    WHERE pg_replication_slots.slot_name = resolved_slot::text;
   END IF;
 
   IF create_iceberg_table THEN
@@ -358,7 +440,12 @@ BEGIN
     table_name,
     slot_name,
     enabled,
+    state,
     batch_size,
+    initial_snapshot_lsn,
+    backfill_rows,
+    last_flushed_lsn,
+    last_applied_batch_id,
     last_error,
     created_at,
     updated_at
@@ -370,7 +457,12 @@ BEGIN
     table_name,
     resolved_slot,
     true,
+    CASE WHEN backfill THEN 'backfilling' ELSE 'ready' END,
     batch_size,
+    initial_lsn,
+    0,
+    NULL,
+    NULL,
     NULL,
     now(),
     now()
@@ -381,9 +473,32 @@ BEGIN
       table_name = EXCLUDED.table_name,
       slot_name = EXCLUDED.slot_name,
       enabled = true,
+      state = EXCLUDED.state,
       batch_size = EXCLUDED.batch_size,
+      initial_snapshot_lsn = EXCLUDED.initial_snapshot_lsn,
+      backfill_rows = 0,
+      last_flushed_lsn = NULL,
+      last_applied_batch_id = NULL,
       last_error = NULL,
       updated_at = now();
+
+  IF backfill THEN
+    copied_rows := pgiceberg.backfill_logical_mirror(
+      src,
+      catalog,
+      namespace,
+      table_name,
+      batch_size,
+      initial_lsn::text,
+      NOT create_iceberg_table
+    );
+
+    UPDATE pgiceberg.logical_mirrors
+    SET state = 'ready',
+        backfill_rows = copied_rows,
+        updated_at = now()
+    WHERE source_relid = source_oid;
+  END IF;
 
   IF previous_slot IS NOT NULL
      AND previous_slot IS DISTINCT FROM resolved_slot
@@ -394,13 +509,24 @@ BEGIN
      ) THEN
     PERFORM pg_drop_replication_slot(previous_slot);
   END IF;
+EXCEPTION WHEN OTHERS THEN
+  IF created_slot
+     AND EXISTS (
+       SELECT 1
+       FROM pg_replication_slots
+       WHERE pg_replication_slots.slot_name = resolved_slot::text
+         AND NOT active
+     ) THEN
+    PERFORM pg_drop_replication_slot(resolved_slot);
+  END IF;
+  RAISE;
 END;
 $$;
 
-COMMENT ON FUNCTION pgiceberg.create_logical_mirror(regclass, text, text, text, text, boolean, integer) IS
-  'Create or replace an append-only logical decoding mirror from a PostgreSQL heap table to an Iceberg table. Starts from the slot creation LSN (no automatic backfill). Requires SELECT on the source table.';
+COMMENT ON FUNCTION pgiceberg.create_logical_mirror(regclass, text, text, text, text, boolean, integer, boolean) IS
+  'Create an INSERT-only logical decoding mirror from a PostgreSQL heap table to Iceberg, with a consistent initial backfill by default. Requires SELECT on the source table.';
 
-REVOKE EXECUTE ON FUNCTION pgiceberg.create_logical_mirror(regclass, text, text, text, text, boolean, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgiceberg.create_logical_mirror(regclass, text, text, text, text, boolean, integer, boolean) FROM PUBLIC;
 
 CREATE FUNCTION pgiceberg.drop_logical_mirror(
   src regclass,
@@ -451,8 +577,12 @@ RETURNS TABLE (
   table_name text,
   slot_name name,
   enabled boolean,
+  state text,
   batch_size integer,
+  initial_snapshot_lsn pg_lsn,
+  backfill_rows bigint,
   last_flushed_lsn pg_lsn,
+  last_applied_batch_id text,
   restart_lsn pg_lsn,
   confirmed_flush_lsn pg_lsn,
   active boolean,
@@ -469,8 +599,12 @@ AS $$
     m.table_name,
     m.slot_name,
     m.enabled,
+    m.state,
     m.batch_size,
+    m.initial_snapshot_lsn,
+    m.backfill_rows,
     m.last_flushed_lsn,
+    m.last_applied_batch_id,
     s.restart_lsn,
     s.confirmed_flush_lsn,
     s.active,
@@ -490,7 +624,7 @@ AS 'MODULE_PATHNAME', 'pgiceberg_process_logical_mirrors'
 LANGUAGE C;
 
 COMMENT ON FUNCTION pgiceberg.process_logical_mirrors() IS
-  'Process enabled logical mirrors once: append INSERT changes to Iceberg, then advance each slot. Delivery is at-least-once.';
+  'Process ready logical mirrors once: idempotently append INSERT batches to Iceberg, then advance each slot.';
 
 REVOKE EXECUTE ON FUNCTION pgiceberg.process_logical_mirrors() FROM PUBLIC;
 -- Metadata inspection helpers.

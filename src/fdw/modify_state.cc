@@ -40,6 +40,7 @@
 #include <iceberg/transaction.h>
 #include <iceberg/update/fast_append.h>
 #include <iceberg/update/overwrite_files.h>
+#include <iceberg/update/update_properties.h>
 
 #include "common/arrow_schema.h"
 #include "common/catalog.h"
@@ -69,6 +70,9 @@ namespace {
 // bounded so a large rewrite does not also require materializing the whole
 // replacement file in backend memory.
 constexpr std::int64_t kDmlRewriteBatchRows = 8192;
+constexpr std::string_view kLogicalBatchIdProperty = "pgiceberg.logical.last-batch-id";
+constexpr std::string_view kLogicalSourceLsnProperty =
+    "pgiceberg.logical.last-source-lsn";
 
 // Iceberg metadata updates need to be replayable.  A PostgreSQL subtransaction
 // can abort after we have already applied an update to the in-memory Iceberg
@@ -87,17 +91,38 @@ class PendingIcebergChange {
 
 class PendingAppendChange final : public PendingIcebergChange {
  public:
-  explicit PendingAppendChange(std::shared_ptr<iceberg::DataFile> data_file)
-      : data_file_(std::move(data_file)) {}
+  explicit PendingAppendChange(
+      std::shared_ptr<iceberg::DataFile> data_file,
+      std::optional<LogicalCommitMetadata> logical_metadata = std::nullopt)
+      : data_file_(std::move(data_file)),
+        logical_metadata_(std::move(logical_metadata)) {}
 
   Status Apply(iceberg::Transaction& transaction) override {
-    if (data_file_ == nullptr) {
-      return Ok();
+    if (data_file_ != nullptr) {
+      PGICEBERG_ASSIGN_OR_RETURN(
+          auto append,
+          FromIcebergResult(transaction.NewFastAppend(), "create append update"));
+      append->AppendFile(data_file_);
+      if (logical_metadata_.has_value()) {
+        append->Set(std::string(kLogicalBatchIdProperty), logical_metadata_->batch_id);
+        append->Set(std::string(kLogicalSourceLsnProperty),
+                    logical_metadata_->source_lsn);
+      }
+      PGICEBERG_RETURN_NOT_OK(
+          FromIcebergStatus(append->Commit(), "apply pending Iceberg append"));
     }
-    PGICEBERG_ASSIGN_OR_RETURN(auto append, FromIcebergResult(transaction.NewFastAppend(),
-                                                              "create append update"));
-    append->AppendFile(data_file_);
-    return FromIcebergStatus(append->Commit(), "apply pending Iceberg append");
+
+    if (logical_metadata_.has_value()) {
+      PGICEBERG_ASSIGN_OR_RETURN(
+          auto properties, FromIcebergResult(transaction.NewUpdateProperties(),
+                                             "create logical batch property update"));
+      properties->Set(std::string(kLogicalBatchIdProperty), logical_metadata_->batch_id);
+      properties->Set(std::string(kLogicalSourceLsnProperty),
+                      logical_metadata_->source_lsn);
+      PGICEBERG_RETURN_NOT_OK(
+          FromIcebergStatus(properties->Commit(), "apply logical batch property update"));
+    }
+    return Ok();
   }
 
   std::vector<std::string> NewDataFilePaths() const override {
@@ -109,6 +134,7 @@ class PendingAppendChange final : public PendingIcebergChange {
 
  private:
   std::shared_ptr<iceberg::DataFile> data_file_;
+  std::optional<LogicalCommitMetadata> logical_metadata_;
 };
 
 class PendingOverwriteChange final : public PendingIcebergChange {
@@ -770,8 +796,18 @@ Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
 
 Status FlushPendingModifyChanges() { return CommitPendingModifyChanges(); }
 
+Result<bool> IsLogicalBatchCommitted(const Options& options, const char* relation_name,
+                                     std::string_view batch_id) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
+  PGICEBERG_ASSIGN_OR_RETURN(auto table,
+                             pgiceberg::LoadIcebergTable(catalog_options, relation_name));
+  const auto& properties = table->properties().configs();
+  auto it = properties.find(std::string(kLogicalBatchIdProperty));
+  return it != properties.end() && it->second == batch_id;
+}
+
 Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** slots,
-                   int nslots) {
+                   int nslots, std::optional<LogicalCommitMetadata> logical_metadata) {
   if (nslots <= 0) {
     return Ok();
   }
@@ -833,9 +869,9 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
     CleanupDataFiles(table, NewDataFilePaths(data_file));
     return std::unexpected(pending_table_result.error());
   }
-  return QueuePendingModifyChange(
-      **pending_table_result,
-      std::make_unique<PendingAppendChange>(std::move(data_file)));
+  return QueuePendingModifyChange(**pending_table_result,
+                                  std::make_unique<PendingAppendChange>(
+                                      std::move(data_file), std::move(logical_metadata)));
 }
 
 // ModifyState is statement-local executor state.  It owns transient row and

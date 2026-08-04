@@ -24,11 +24,30 @@ SELECT pgiceberg.add_catalog(
   '/tmp/pgiceberg_warehouse_logical_regress'
 );
 
+CREATE TABLE logical_repeatable_source (id integer);
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT pgiceberg.create_logical_mirror(
+  'logical_repeatable_source',
+  'logical_catalog',
+  'default',
+  'logical_repeatable_target',
+  'pgiceberg_logical_repeatable'
+);
+ROLLBACK;
+
+SELECT count(*) AS repeatable_slots
+FROM pg_replication_slots
+WHERE slot_name = 'pgiceberg_logical_repeatable';
+
+DROP TABLE logical_repeatable_source;
+
 CREATE TABLE logical_source (
   id integer NOT NULL,
   name text,
   amount integer
 );
+
+INSERT INTO logical_source VALUES (0, 'before', 5);
 
 SELECT pgiceberg.create_logical_mirror(
   'logical_source',
@@ -40,8 +59,10 @@ SELECT pgiceberg.create_logical_mirror(
   8
 );
 
-SELECT source_table::text, slot_name::text, enabled, batch_size,
-       last_flushed_lsn IS NULL AS no_flushed_lsn
+SELECT source_table::text, slot_name::text, enabled, state, batch_size,
+       initial_snapshot_lsn IS NOT NULL AS has_initial_lsn,
+       backfill_rows, last_flushed_lsn IS NULL AS no_flushed_lsn,
+       last_applied_batch_id IS NULL AS no_stream_batch
 FROM pgiceberg.logical_mirror_status();
 
 CREATE SERVER logical_iceberg
@@ -59,7 +80,12 @@ OPTIONS (
   table 'logical_target'
 );
 
--- Slot should have no pending changes after mirror setup (catalog table is UNLOGGED).
+-- The row committed before mirror creation is included by the initial copy.
+SELECT id, name, amount
+FROM logical_target
+ORDER BY id;
+
+-- Logged mirror metadata is filtered by the output plugin.
 SELECT count(*) AS setup_changes
 FROM pg_logical_slot_get_changes('pgiceberg_logical_regress', NULL, NULL);
 
@@ -77,9 +103,30 @@ SELECT id, name, amount
 FROM logical_target
 ORDER BY id;
 
-SELECT enabled, last_flushed_lsn IS NULL AS no_flushed_lsn,
+SELECT enabled, state, backfill_rows,
+       last_flushed_lsn IS NULL AS no_flushed_lsn,
+       last_applied_batch_id IS NULL AS no_stream_batch,
        last_error IS NULL AS no_error
 FROM pgiceberg.logical_mirror_status();
+
+WITH mirror AS (
+  SELECT last_applied_batch_id AS batch_id
+  FROM pgiceberg.logical_mirror_status()
+), metadata AS (
+  SELECT pgiceberg.table_metadata_json(
+           'logical_catalog', 'default', 'logical_target'
+         ) AS document
+)
+SELECT document -> 'properties' ->> 'pgiceberg.logical.last-batch-id' =
+         batch_id AS table_property,
+       EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements(document -> 'snapshots') AS snapshot
+         WHERE snapshot ->> 'snapshot-id' = document ->> 'current-snapshot-id'
+           AND snapshot -> 'summary' ->>
+                 'pgiceberg.logical.last-batch-id' = batch_id
+       ) AS snapshot_summary
+FROM mirror, metadata;
 
 SELECT count(*) AS remaining_slot_changes
 FROM pg_logical_slot_peek_changes('pgiceberg_logical_regress', NULL, NULL);
@@ -96,7 +143,7 @@ ORDER BY lsn, data;
 -- Unsupported changes must parse cleanly, advance the slot, and disable the mirror.
 SELECT pgiceberg.process_logical_mirrors();
 
-SELECT enabled, last_error
+SELECT enabled, state, last_error
 FROM pgiceberg.logical_mirror_status();
 
 SELECT count(*) AS remaining_slot_changes_after_unsupported
