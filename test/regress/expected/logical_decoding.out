@@ -22,11 +22,30 @@ SELECT pgiceberg.add_catalog(
 add_catalog
 
 (1 row)
+CREATE TABLE logical_repeatable_source (id integer);
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT pgiceberg.create_logical_mirror(
+  'logical_repeatable_source',
+  'logical_catalog',
+  'default',
+  'logical_repeatable_target',
+  'pgiceberg_logical_repeatable'
+);
+ERROR:  consistent logical mirror backfill requires READ COMMITTED isolation
+ROLLBACK;
+SELECT count(*) AS repeatable_slots
+FROM pg_replication_slots
+WHERE slot_name = 'pgiceberg_logical_repeatable';
+repeatable_slots
+0
+(1 row)
+DROP TABLE logical_repeatable_source;
 CREATE TABLE logical_source (
   id integer NOT NULL,
   name text,
   amount integer
 );
+INSERT INTO logical_source VALUES (0, 'before', 5);
 SELECT pgiceberg.create_logical_mirror(
   'logical_source',
   'logical_catalog',
@@ -39,11 +58,13 @@ SELECT pgiceberg.create_logical_mirror(
 create_logical_mirror
 
 (1 row)
-SELECT source_table::text, slot_name::text, enabled, batch_size,
-       last_flushed_lsn IS NULL AS no_flushed_lsn
+SELECT source_table::text, slot_name::text, enabled, state, batch_size,
+       initial_snapshot_lsn IS NOT NULL AS has_initial_lsn,
+       backfill_rows, last_flushed_lsn IS NULL AS no_flushed_lsn,
+       last_applied_batch_id IS NULL AS no_stream_batch
 FROM pgiceberg.logical_mirror_status();
-source_table|slot_name|enabled|batch_size|no_flushed_lsn
-logical_source|pgiceberg_logical_regress|t|8|t
+source_table|slot_name|enabled|state|batch_size|has_initial_lsn|backfill_rows|no_flushed_lsn|no_stream_batch
+logical_source|pgiceberg_logical_regress|t|ready|8|t|1|t|t
 (1 row)
 CREATE SERVER logical_iceberg
 FOREIGN DATA WRAPPER pgiceberg
@@ -58,7 +79,14 @@ OPTIONS (
   namespace 'default',
   table 'logical_target'
 );
--- Slot should have no pending changes after mirror setup (catalog table is UNLOGGED).
+-- The row committed before mirror creation is included by the initial copy.
+SELECT id, name, amount
+FROM logical_target
+ORDER BY id;
+id|name|amount
+0|before|5
+(1 row)
+-- Logged mirror metadata is filtered by the output plugin.
 SELECT count(*) AS setup_changes
 FROM pg_logical_slot_get_changes('pgiceberg_logical_regress', NULL, NULL);
 setup_changes
@@ -82,14 +110,38 @@ SELECT id, name, amount
 FROM logical_target
 ORDER BY id;
 id|name|amount
+0|before|5
 1|alpha|12
 2||
-(2 rows)
-SELECT enabled, last_flushed_lsn IS NULL AS no_flushed_lsn,
+(3 rows)
+SELECT enabled, state, backfill_rows,
+       last_flushed_lsn IS NULL AS no_flushed_lsn,
+       last_applied_batch_id IS NULL AS no_stream_batch,
        last_error IS NULL AS no_error
 FROM pgiceberg.logical_mirror_status();
-enabled|no_flushed_lsn|no_error
-t|f|t
+enabled|state|backfill_rows|no_flushed_lsn|no_stream_batch|no_error
+t|ready|1|f|f|t
+(1 row)
+WITH mirror AS (
+  SELECT last_applied_batch_id AS batch_id
+  FROM pgiceberg.logical_mirror_status()
+), metadata AS (
+  SELECT pgiceberg.table_metadata_json(
+           'logical_catalog', 'default', 'logical_target'
+         ) AS document
+)
+SELECT document -> 'properties' ->> 'pgiceberg.logical.last-batch-id' =
+         batch_id AS table_property,
+       EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements(document -> 'snapshots') AS snapshot
+         WHERE snapshot ->> 'snapshot-id' = document ->> 'current-snapshot-id'
+           AND snapshot -> 'summary' ->>
+                 'pgiceberg.logical.last-batch-id' = batch_id
+       ) AS snapshot_summary
+FROM mirror, metadata;
+table_property|snapshot_summary
+t|t
 (1 row)
 SELECT count(*) AS remaining_slot_changes
 FROM pg_logical_slot_peek_changes('pgiceberg_logical_regress', NULL, NULL);
@@ -114,10 +166,10 @@ WARNING:  pgiceberg logical mirrors currently support only INSERT changes
 process_logical_mirrors
 
 (1 row)
-SELECT enabled, last_error
+SELECT enabled, state, last_error
 FROM pgiceberg.logical_mirror_status();
-enabled|last_error
-f|pgiceberg logical mirrors currently support only INSERT changes
+enabled|state|last_error
+f|error|pgiceberg logical mirrors currently support only INSERT changes
 (1 row)
 SELECT count(*) AS remaining_slot_changes_after_unsupported
 FROM pg_logical_slot_peek_changes('pgiceberg_logical_regress', NULL, NULL);

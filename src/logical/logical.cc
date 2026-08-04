@@ -12,16 +12,24 @@
 
 #include "logical/logical.h"
 
+#include <array>
 #include <charconv>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include <iceberg/snapshot.h>
+#include <iceberg/table.h>
+
+#include "common/catalog.h"
+#include "common/fcinfo.h"
 #include "common/pg_error.h"
 #include "common/pg_relation.h"
 #include "common/status.h"
@@ -33,8 +41,10 @@ extern "C" {
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
+#include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/pg_type_d.h"
+#include "common/cryptohash.h"
 #include "executor/spi.h"
 #include "executor/tuptable.h"
 #include "fmgr.h"
@@ -138,6 +148,66 @@ struct Mirror {
   std::string slot_name;
   int batch_size = kDefaultBatchSize;
 };
+
+using SlotChange = std::pair<std::string, std::string>;
+
+Result<std::string> LogicalBatchId(const Mirror& mirror,
+                                   const std::vector<SlotChange>& rows) {
+  auto* raw_context = pg_cryptohash_create(PG_SHA256);
+  if (raw_context == nullptr) {
+    return std::unexpected(
+        MakeError(ERRCODE_OUT_OF_MEMORY, "could not create logical batch hash"));
+  }
+  std::unique_ptr<pg_cryptohash_ctx, decltype(&pg_cryptohash_free)> context(
+      raw_context, pg_cryptohash_free);
+  if (pg_cryptohash_init(context.get()) < 0) {
+    return std::unexpected(MakeError(
+        ERRCODE_INTERNAL_ERROR, std::string("could not initialize logical batch hash: ") +
+                                    pg_cryptohash_error(context.get())));
+  }
+
+  auto update = [&](std::string_view value) -> Status {
+    std::array<std::uint8_t, sizeof(std::uint64_t)> encoded_length{};
+    std::uint64_t length = value.size();
+    for (std::size_t i = 0; i < encoded_length.size(); i++) {
+      encoded_length[encoded_length.size() - i - 1] =
+          static_cast<std::uint8_t>(length & 0xff);
+      length >>= 8;
+    }
+    if (pg_cryptohash_update(context.get(), encoded_length.data(),
+                             encoded_length.size()) < 0 ||
+        pg_cryptohash_update(context.get(),
+                             reinterpret_cast<const std::uint8_t*>(value.data()),
+                             value.size()) < 0) {
+      return std::unexpected(MakeError(
+          ERRCODE_INTERNAL_ERROR, std::string("could not update logical batch hash: ") +
+                                      pg_cryptohash_error(context.get())));
+    }
+    return Ok();
+  };
+
+  PGICEBERG_RETURN_NOT_OK(update(mirror.slot_name));
+  for (const auto& [lsn, data] : rows) {
+    PGICEBERG_RETURN_NOT_OK(update(lsn));
+    PGICEBERG_RETURN_NOT_OK(update(data));
+  }
+
+  std::array<std::uint8_t, 32> digest{};
+  if (pg_cryptohash_final(context.get(), digest.data(), digest.size()) < 0) {
+    return std::unexpected(MakeError(
+        ERRCODE_INTERNAL_ERROR, std::string("could not finalize logical batch hash: ") +
+                                    pg_cryptohash_error(context.get())));
+  }
+
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string result = "v1:" + std::to_string(rows.size()) + ":";
+  result.reserve(result.size() + digest.size() * 2);
+  for (std::uint8_t byte : digest) {
+    result.push_back(kHex[byte >> 4]);
+    result.push_back(kHex[byte & 0x0f]);
+  }
+  return result;
+}
 
 struct DecodedChange {
   char action = '\0';
@@ -263,7 +333,7 @@ Result<std::vector<Mirror>> LoadMirrors() {
       "SELECT source_relid, catalog, \"namespace\", table_name, slot_name::text, "
       "batch_size "
       "FROM pgiceberg.logical_mirrors "
-      "WHERE enabled "
+      "WHERE enabled AND state = 'ready' "
       "ORDER BY source_relid";
   const int result = SPI_execute(sql, true, 0);
   PGICEBERG_RETURN_NOT_OK(
@@ -294,8 +364,7 @@ Result<std::vector<Mirror>> LoadMirrors() {
   return mirrors;
 }
 
-Result<std::vector<std::pair<std::string, std::string>>> PeekSlotChanges(
-    const Mirror& mirror) {
+Result<std::vector<SlotChange>> PeekSlotChanges(const Mirror& mirror) {
   const char* sql =
       "SELECT lsn::text, data "
       "FROM pg_logical_slot_peek_changes($1::text::name, NULL, $2::integer)";
@@ -306,7 +375,7 @@ Result<std::vector<std::pair<std::string, std::string>>> PeekSlotChanges(
   PGICEBERG_RETURN_NOT_OK(
       EnsureSpiOk(result, SPI_OK_SELECT, "could not peek pgiceberg logical slot"));
 
-  std::vector<std::pair<std::string, std::string>> rows;
+  std::vector<SlotChange> rows;
   rows.reserve(SPI_processed);
   TupleDesc desc = SPI_tuptable->tupdesc;
   for (uint64 i = 0; i < SPI_processed; i++) {
@@ -345,9 +414,9 @@ Status AdvanceSlotByCount(const Mirror& mirror, int change_count) {
   return Ok();
 }
 
-// Safety net for non-source changes that somehow land in a mirror slot
-// (logical_mirrors itself is UNLOGGED so progress/status DML is not WAL-logged).
-// Stops without consuming when a change for the mirrored source table is next.
+// Safety net for non-source changes that somehow land in a mirror slot. The output
+// plugin filters pgiceberg's own logged metadata tables, but a per-table slot still
+// sees changes for unrelated user tables. Stop when the mirrored source is next.
 Status DrainNonSourceSlotChanges(const Mirror& mirror) {
   for (;;) {
     PGICEBERG_ASSIGN_OR_RETURN(auto rows, PeekSlotChanges(mirror));
@@ -367,32 +436,35 @@ Status DrainNonSourceSlotChanges(const Mirror& mirror) {
 }
 
 Status UpdateMirrorProgress(const Mirror& mirror, const std::string& lsn,
-                            const char* error_message) {
+                            const std::string& batch_id, const char* error_message) {
   const char* sql =
       "UPDATE pgiceberg.logical_mirrors "
       "SET last_flushed_lsn = CASE WHEN $2::pg_lsn IS NULL THEN last_flushed_lsn "
       "                            ELSE $2::pg_lsn END, "
-      "    last_error = $3, "
+      "    last_applied_batch_id = CASE WHEN $3::text IS NULL "
+      "                                 THEN last_applied_batch_id ELSE $3 END, "
+      "    last_error = $4, "
       "    updated_at = now() "
       "WHERE source_relid = $1";
-  Oid argtypes[] = {OIDOID, LSNOID, TEXTOID};
-  char nulls[] = {' ', lsn.empty() ? 'n' : ' ', error_message == nullptr ? 'n' : ' ',
-                  '\0'};
+  Oid argtypes[] = {OIDOID, LSNOID, TEXTOID, TEXTOID};
+  char nulls[] = {' ', lsn.empty() ? 'n' : ' ', batch_id.empty() ? 'n' : ' ',
+                  error_message == nullptr ? 'n' : ' ', '\0'};
   Datum values[] = {
       ObjectIdGetDatum(mirror.source_relid),
       lsn.empty() ? static_cast<Datum>(0)
                   : DirectFunctionCall1(pg_lsn_in, CStringGetDatum(lsn.c_str())),
+      batch_id.empty() ? static_cast<Datum>(0) : CStringGetTextDatum(batch_id.c_str()),
       error_message == nullptr ? static_cast<Datum>(0)
                                : CStringGetTextDatum(error_message),
   };
-  const int result = SPI_execute_with_args(sql, 3, argtypes, values, nulls, false, 1);
+  const int result = SPI_execute_with_args(sql, 4, argtypes, values, nulls, false, 1);
   return EnsureSpiOk(result, SPI_OK_UPDATE, "could not update pgiceberg logical mirror");
 }
 
 Status DisableMirror(const Mirror& mirror, const char* error_message) {
   const char* sql =
       "UPDATE pgiceberg.logical_mirrors "
-      "SET enabled = false, last_error = $2, updated_at = now() "
+      "SET enabled = false, state = 'error', last_error = $2, updated_at = now() "
       "WHERE source_relid = $1";
   Oid argtypes[] = {OIDOID, TEXTOID};
   Datum values[] = {ObjectIdGetDatum(mirror.source_relid),
@@ -437,7 +509,8 @@ Result<TupleTableSlot*> SlotFromDecodedRow(Relation relation,
 }
 
 Status AppendDecodedRows(Relation relation, const Mirror& mirror,
-                         const std::vector<DecodedChange>& rows) {
+                         const std::vector<DecodedChange>& rows,
+                         const fdw::LogicalCommitMetadata& logical_metadata) {
   if (rows.empty()) {
     return Ok();
   }
@@ -454,8 +527,8 @@ Status AppendDecodedRows(Relation relation, const Mirror& mirror,
     slots.push_back(slot);
   }
 
-  Status status =
-      fdw::AppendSlots(relation, options, slots.data(), static_cast<int>(slots.size()));
+  Status status = fdw::AppendSlots(relation, options, slots.data(),
+                                   static_cast<int>(slots.size()), logical_metadata);
   for (auto* slot : slots) {
     ExecDropSingleTupleTableSlot(slot);
   }
@@ -467,6 +540,7 @@ Status ProcessMirror(const Mirror& mirror) {
   if (rows.empty()) {
     return Ok();
   }
+  PGICEBERG_ASSIGN_OR_RETURN(auto batch_id, LogicalBatchId(mirror, rows));
 
   std::vector<DecodedChange> inserts;
   std::string last_lsn;
@@ -486,19 +560,31 @@ Status ProcessMirror(const Mirror& mirror) {
     }
   }
 
-  {
-    Relation relation = table_open(mirror.source_relid, AccessShareLock);
-    RelationLockGuard relation_guard(relation, AccessShareLock);
-    PGICEBERG_RETURN_NOT_OK(AppendDecodedRows(relation, mirror, inserts));
-    // Commit Iceberg before consuming WAL so a failed/crashy Iceberg commit cannot
-    // lose changes. At-least-once delivery may produce duplicates if the process
-    // crashes after Iceberg commit and before slot advancement.
-    PGICEBERG_RETURN_NOT_OK(fdw::FlushPendingModifyChanges());
+  if (!inserts.empty()) {
+    fdw::Options options;
+    options.catalog = mirror.catalog;
+    options.name_space = mirror.name_space;
+    options.table = mirror.table_name;
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto already_committed,
+        fdw::IsLogicalBatchCommitted(options, mirror.table_name.c_str(), batch_id));
+
+    if (!already_committed) {
+      Relation relation = table_open(mirror.source_relid, AccessShareLock);
+      RelationLockGuard relation_guard(relation, AccessShareLock);
+      PGICEBERG_RETURN_NOT_OK(AppendDecodedRows(
+          relation, mirror, inserts,
+          fdw::LogicalCommitMetadata{.batch_id = batch_id, .source_lsn = last_lsn}));
+      // Commit Iceberg before consuming WAL. If the process crashes before slot
+      // consumption, the persisted batch ID makes the same prefix recognizable.
+      PGICEBERG_RETURN_NOT_OK(fdw::FlushPendingModifyChanges());
+    }
   }
 
   if (!last_lsn.empty()) {
     PGICEBERG_RETURN_NOT_OK(AdvanceSlotByCount(mirror, static_cast<int>(rows.size())));
-    PGICEBERG_RETURN_NOT_OK(UpdateMirrorProgress(mirror, last_lsn, nullptr));
+    PGICEBERG_RETURN_NOT_OK(UpdateMirrorProgress(
+        mirror, last_lsn, inserts.empty() ? std::string{} : batch_id, nullptr));
     PGICEBERG_RETURN_NOT_OK(DrainNonSourceSlotChanges(mirror));
   }
   if (saw_unsupported) {
@@ -517,6 +603,135 @@ Status ProcessMirrors() {
     PGICEBERG_RETURN_NOT_OK(ProcessMirror(mirror));
   }
   return Ok();
+}
+
+class TableScanGuard {
+ public:
+  explicit TableScanGuard(TableScanDesc scan) : scan_(scan) {}
+  ~TableScanGuard() {
+    if (scan_ != nullptr) {
+      table_endscan(scan_);
+    }
+  }
+
+  TableScanGuard(const TableScanGuard&) = delete;
+  TableScanGuard& operator=(const TableScanGuard&) = delete;
+
+ private:
+  TableScanDesc scan_ = nullptr;
+};
+
+class ActiveSnapshotGuard {
+ public:
+  ActiveSnapshotGuard() { PushActiveSnapshot(GetLatestSnapshot()); }
+  ~ActiveSnapshotGuard() { PopActiveSnapshot(); }
+
+  ActiveSnapshotGuard(const ActiveSnapshotGuard&) = delete;
+  ActiveSnapshotGuard& operator=(const ActiveSnapshotGuard&) = delete;
+};
+
+class BackfillSlotBatch {
+ public:
+  explicit BackfillSlotBatch(TupleDesc tuple_desc) : tuple_desc_(tuple_desc) {}
+  ~BackfillSlotBatch() { Clear(); }
+
+  void Add(TupleTableSlot* source) {
+    auto* copy = MakeSingleTupleTableSlot(tuple_desc_, &TTSOpsMinimalTuple);
+    ExecCopySlot(copy, source);
+    slots_.push_back(copy);
+  }
+
+  Status Flush(Relation relation, const fdw::Options& options,
+               const fdw::LogicalCommitMetadata& logical_metadata) {
+    if (slots_.empty()) {
+      return Ok();
+    }
+    auto status = fdw::AppendSlots(relation, options, slots_.data(),
+                                   static_cast<int>(slots_.size()), logical_metadata);
+    if (status) {
+      Clear();
+    }
+    return status;
+  }
+
+  std::size_t size() const { return slots_.size(); }
+
+ private:
+  void Clear() {
+    for (auto* slot : slots_) {
+      ExecDropSingleTupleTableSlot(slot);
+    }
+    slots_.clear();
+  }
+
+  TupleDesc tuple_desc_ = nullptr;
+  std::vector<TupleTableSlot*> slots_;
+};
+
+Status EnsureEmptyBackfillTarget(const fdw::Options& options, const char* relation_name) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, fdw::ToCatalogOptions(options));
+  PGICEBERG_ASSIGN_OR_RETURN(auto table,
+                             pgiceberg::LoadIcebergTable(catalog_options, relation_name));
+  if (table->snapshots().empty()) {
+    return Ok();
+  }
+  PGICEBERG_ASSIGN_OR_RETURN(auto snapshot, FromIcebergResult(table->current_snapshot(),
+                                                              "load current snapshot"));
+  auto total_records =
+      snapshot->summary.find(iceberg::SnapshotSummaryFields::kTotalRecords);
+  if (total_records != snapshot->summary.end() && total_records->second == "0") {
+    return Ok();
+  }
+  return std::unexpected(
+      MakeError(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "logical mirror backfill requires an empty target Iceberg table"));
+}
+
+Result<std::int64_t> BackfillSourceTable(Oid source_relid, const fdw::Options& options,
+                                         int batch_size, std::string_view source_lsn,
+                                         bool require_empty_target) {
+  if (batch_size <= 0) {
+    return std::unexpected(MakeError(ERRCODE_INVALID_PARAMETER_VALUE,
+                                     "batch_size must be greater than zero"));
+  }
+  if (IsolationUsesXactSnapshot()) {
+    return std::unexpected(MakeError(
+        ERRCODE_FEATURE_NOT_SUPPORTED,
+        "consistent logical mirror backfill requires READ COMMITTED isolation"));
+  }
+  if (require_empty_target) {
+    PGICEBERG_RETURN_NOT_OK(EnsureEmptyBackfillTarget(options, options.table.c_str()));
+  }
+
+  Relation relation = table_open(source_relid, ShareRowExclusiveLock);
+  RelationLockGuard relation_guard(relation, ShareRowExclusiveLock);
+  // The SQL statement invoking mirror creation may have acquired its active
+  // snapshot before waiting for the write-conflicting table lock. Take a fresh
+  // snapshot after the lock so every transaction that committed before the
+  // handoff barrier is included in the copy.
+  ActiveSnapshotGuard snapshot_guard;
+  TableScanDesc scan = table_beginscan(relation, GetActiveSnapshot(), 0, nullptr);
+  TableScanGuard scan_guard(scan);
+  std::unique_ptr<TupleTableSlot, decltype(&ExecDropSingleTupleTableSlot)> scan_slot(
+      table_slot_create(relation, nullptr), ExecDropSingleTupleTableSlot);
+  BackfillSlotBatch batch(RelationGetDescr(relation));
+  fdw::LogicalCommitMetadata logical_metadata{
+      .batch_id =
+          "backfill-v1:" + std::to_string(source_relid) + ":" + std::string(source_lsn),
+      .source_lsn = std::string(source_lsn),
+  };
+
+  std::int64_t rows = 0;
+  while (table_scan_getnextslot(scan, ForwardScanDirection, scan_slot.get())) {
+    CHECK_FOR_INTERRUPTS();
+    batch.Add(scan_slot.get());
+    rows++;
+    if (batch.size() >= static_cast<std::size_t>(batch_size)) {
+      PGICEBERG_RETURN_NOT_OK(batch.Flush(relation, options, logical_metadata));
+    }
+  }
+  PGICEBERG_RETURN_NOT_OK(batch.Flush(relation, options, logical_metadata));
+  return rows;
 }
 
 void RunWorkerLoop() {
@@ -618,7 +833,22 @@ Status ProcessLogicalMirrorsOnce() { return ProcessMirrors(); }
 
 extern "C" {
 
+PG_FUNCTION_INFO_V1(pgiceberg_backfill_logical_mirror);
 PG_FUNCTION_INFO_V1(pgiceberg_process_logical_mirrors);
+
+Datum pgiceberg_backfill_logical_mirror(PG_FUNCTION_ARGS) {
+  return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
+    pgiceberg::fdw::Options options;
+    options.catalog = pgiceberg::TextArg(fcinfo, 1);
+    options.name_space = pgiceberg::TextArg(fcinfo, 2);
+    options.table = pgiceberg::TextArg(fcinfo, 3);
+    PGICEBERG_ASSIGN_OR_RETURN(auto rows,
+                               pgiceberg::logical::BackfillSourceTable(
+                                   PG_GETARG_OID(0), options, PG_GETARG_INT32(4),
+                                   pgiceberg::TextArg(fcinfo, 5), PG_GETARG_BOOL(6)));
+    return Int64GetDatum(rows);
+  });
+}
 
 Datum pgiceberg_process_logical_mirrors(PG_FUNCTION_ARGS) {
   (void)fcinfo;
@@ -657,8 +887,21 @@ static HeapTuple PgIcebergOutputNewTuple(ReorderBufferChange* change) {
 #endif
 }
 
+static bool PgIcebergOutputSkipsRelation(Relation relation) {
+  char* namespace_name = get_namespace_name(RelationGetNamespace(relation));
+  if (namespace_name == nullptr) {
+    return false;
+  }
+  const bool skip = std::strcmp(namespace_name, "pgiceberg") == 0;
+  pfree(namespace_name);
+  return skip;
+}
+
 static void PgIcebergOutputChange(LogicalDecodingContext* ctx, ReorderBufferTXN*,
                                   Relation relation, ReorderBufferChange* change) {
+  if (PgIcebergOutputSkipsRelation(relation)) {
+    return;
+  }
   char action = '\0';
   HeapTuple tuple = nullptr;
   switch (change->action) {
@@ -714,6 +957,9 @@ static void PgIcebergOutputTruncate(LogicalDecodingContext* ctx, ReorderBufferTX
                                     int nrelations, Relation relations[],
                                     ReorderBufferChange*) {
   for (int i = 0; i < nrelations; i++) {
+    if (PgIcebergOutputSkipsRelation(relations[i])) {
+      continue;
+    }
     OutputPluginPrepareWrite(ctx, true);
     appendStringInfo(ctx->out, "T\t%u", RelationGetRelid(relations[i]));
     OutputPluginWrite(ctx, true);

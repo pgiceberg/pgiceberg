@@ -124,16 +124,20 @@ In PostgreSQL 18.4, the relevant core paths are:
 
 In pgiceberg, logical decoding is implemented as an append-only mirror from a
 PostgreSQL heap table to an Iceberg table. `pgiceberg.create_logical_mirror`
-creates a logical replication slot and mirror metadata. A background worker,
-or `pgiceberg.process_logical_mirrors()`, peeks slot changes, converts
-decoded inserts into tuple slots, appends them to Iceberg, commits Iceberg,
-and then advances the slot.
+creates a logical replication slot and, by default, copies the existing source
+rows under a write-conflicting handoff lock. A background worker, or
+`pgiceberg.process_logical_mirrors()`, peeks slot changes, converts decoded
+inserts into tuple slots, appends them to Iceberg, commits Iceberg, and then
+advances the slot.
 
-The current semantics are at-least-once. pgiceberg commits Iceberg before
-advancing the replication slot so it does not lose changes if the Iceberg
-commit fails. A crash after the Iceberg commit and before slot advancement can
-replay the same rows. Current logical mirrors support only `INSERT`; update,
-delete, and truncate records are parsed but disable the mirror.
+pgiceberg commits Iceberg before advancing the replication slot so it does not
+lose changes if the Iceberg commit fails. Each bounded slot prefix has a stable
+batch identifier persisted in Iceberg snapshot metadata and table properties.
+A crash after the Iceberg commit and before slot advancement can therefore be
+recognized and consumed without appending the same rows twice. Current logical
+mirrors support only `INSERT`; update, delete, and truncate records are parsed
+but disable the mirror. The complete rationale and follow-up architecture are
+in [Real-time PostgreSQL-to-Iceberg Mirrors](realtime-iceberg-mirrors.md).
 
 Use this path when PostgreSQL heap is the source of truth and Iceberg is an
 asynchronous downstream copy. Do not use it to expose existing Iceberg data to

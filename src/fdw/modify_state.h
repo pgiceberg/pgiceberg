@@ -13,6 +13,9 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 
 #include <iceberg/type_fwd.h>
 
@@ -30,6 +33,11 @@ namespace pgiceberg::fdw {
 
 struct ModifyState;
 
+struct LogicalCommitMetadata {
+  std::string batch_id;
+  std::string source_lsn;
+};
+
 Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo,
                                  const Options& options);
 Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
@@ -41,7 +49,10 @@ Result<TupleTableSlot*> ExecDelete(ModifyState* state, TupleTableSlot* slot,
                                    TupleTableSlot* plan_slot);
 Status EndModify(ModifyState* state);
 Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** slots,
-                   int nslots);
+                   int nslots,
+                   std::optional<LogicalCommitMetadata> logical_metadata = std::nullopt);
+Result<bool> IsLogicalBatchCommitted(const Options& options, const char* relation_name,
+                                     std::string_view batch_id);
 // Durably commit any pending Iceberg DML for the current PostgreSQL transaction.
 // Safe to call before PRE_COMMIT; later PRE_COMMIT becomes a no-op for flushed work.
 Status FlushPendingModifyChanges();
