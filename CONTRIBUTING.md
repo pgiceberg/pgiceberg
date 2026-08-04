@@ -19,7 +19,9 @@ and SQL usage examples, see [README.md](README.md).
 
 ## Source Layout
 
-- `src/fdw/`: PostgreSQL Foreign Data Wrapper callbacks and scan state.
+- `src/engine/`: shared Iceberg read/write engine (options, scans, DML, pending
+  transaction state) used by the FDW, table AM, and logical mirroring.
+- `src/fdw/`: PostgreSQL Foreign Data Wrapper callbacks.
 - `src/common/`: PostgreSQL and C++ boundary helpers.
 - `src/functions/`: SQL-callable helper functions.
 - `docs/design/`: internal design notes for PostgreSQL extension surfaces and

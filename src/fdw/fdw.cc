@@ -26,10 +26,10 @@
 #include "common/catalog.h"
 #include "common/fdw_path.h"
 #include "common/type_mapping.h"
-#include "fdw/modify_state.h"
-#include "fdw/options.h"
+#include "engine/modify_state.h"
+#include "engine/options.h"
+#include "engine/scan_state.h"
 #include "fdw/scan_projection.h"
-#include "fdw/scan_state.h"
 
 extern "C" {
 #include "postgres.h"
@@ -73,18 +73,18 @@ void EnsureIcebergRegistrations() {
 
 pgiceberg::Status PgIcebergGetForeignRelSizeImpl(RelOptInfo* baserel, Oid relation_oid) {
   baserel->rows = 1000;
-  PGICEBERG_ASSIGN_OR_RETURN(auto options, pgiceberg::fdw::OptionsForForeignTable(
+  PGICEBERG_ASSIGN_OR_RETURN(auto options, pgiceberg::engine::OptionsForForeignTable(
                                                relation_oid, get_rel_name(relation_oid)));
   if (options.catalog.empty()) {
     return pgiceberg::Ok();
   }
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options,
-                             pgiceberg::fdw::ToCatalogOptions(options));
+                             pgiceberg::engine::ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto table, pgiceberg::LoadIcebergTable(catalog_options, options.table.c_str()));
   if (!options.snapshot_id.has_value()) {
     PGICEBERG_ASSIGN_OR_RETURN(
-        table, pgiceberg::fdw::ReadTableForCurrentTransaction(options, table));
+        table, pgiceberg::engine::ReadTableForCurrentTransaction(options, table));
   }
 
   std::shared_ptr<iceberg::Snapshot> snapshot;
@@ -142,16 +142,16 @@ pgiceberg::Status PgIcebergBeginForeignScanImpl(ForeignScanState* node, int efla
 
   Relation relation = node->ss.ss_currentRelation;
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto options, pgiceberg::fdw::OptionsForForeignTable(
+      auto options, pgiceberg::engine::OptionsForForeignTable(
                         RelationGetRelid(relation), RelationGetRelationName(relation)));
   if (options.catalog.empty()) {
     PGICEBERG_RETURN_NOT_OK(
-        pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+        pgiceberg::engine::ValidateCatalogType(options.catalog_type.c_str()));
   }
   auto* plan = castNode(ForeignScan, node->ss.ps.plan);
   auto projected_attnums = pgiceberg::fdw::FdwScanProjectionFromPlan(plan);
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto scan, pgiceberg::fdw::BeginScan(relation, options, projected_attnums));
+      auto scan, pgiceberg::engine::BeginScan(relation, options, projected_attnums));
   node->fdw_state = scan;
   return pgiceberg::Ok();
 }
@@ -162,8 +162,8 @@ void PgIcebergBeginForeignScan(ForeignScanState* node, int eflags) {
 
 pgiceberg::Result<TupleTableSlot*> PgIcebergIterateForeignScanImpl(
     ForeignScanState* node) {
-  auto* state = static_cast<pgiceberg::fdw::ScanState*>(node->fdw_state);
-  return pgiceberg::fdw::IterateScan(state, node->ss.ss_ScanTupleSlot);
+  auto* state = static_cast<pgiceberg::engine::ScanState*>(node->fdw_state);
+  return pgiceberg::engine::IterateScan(state, node->ss.ss_ScanTupleSlot);
 }
 
 TupleTableSlot* PgIcebergIterateForeignScan(ForeignScanState* node) {
@@ -172,13 +172,13 @@ TupleTableSlot* PgIcebergIterateForeignScan(ForeignScanState* node) {
 }
 
 void PgIcebergReScanForeignScan(ForeignScanState* node) {
-  auto* state = static_cast<pgiceberg::fdw::ScanState*>(node->fdw_state);
-  pgiceberg::fdw::ReScan(state);
+  auto* state = static_cast<pgiceberg::engine::ScanState*>(node->fdw_state);
+  pgiceberg::engine::ReScan(state);
 }
 
 void PgIcebergEndForeignScan(ForeignScanState* node) {
-  auto* state = static_cast<pgiceberg::fdw::ScanState*>(node->fdw_state);
-  pgiceberg::fdw::EndScan(state);
+  auto* state = static_cast<pgiceberg::engine::ScanState*>(node->fdw_state);
+  pgiceberg::engine::EndScan(state);
   node->fdw_state = nullptr;
 }
 
@@ -198,15 +198,15 @@ pgiceberg::Status PgIcebergBeginForeignModifyImpl(ModifyTableState* mtstate,
                                                   ResultRelInfo* rinfo) {
   Relation relation = rinfo->ri_RelationDesc;
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto options, pgiceberg::fdw::OptionsForForeignTable(
+      auto options, pgiceberg::engine::OptionsForForeignTable(
                         RelationGetRelid(relation), RelationGetRelationName(relation)));
   if (options.catalog.empty()) {
     PGICEBERG_RETURN_NOT_OK(
-        pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+        pgiceberg::engine::ValidateCatalogType(options.catalog_type.c_str()));
   }
-  PGICEBERG_RETURN_NOT_OK(pgiceberg::fdw::EnsureWritableOptions(options));
+  PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::EnsureWritableOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(auto state,
-                             pgiceberg::fdw::BeginModify(mtstate, rinfo, options));
+                             pgiceberg::engine::BeginModify(mtstate, rinfo, options));
   rinfo->ri_FdwState = state;
   return pgiceberg::Ok();
 }
@@ -219,8 +219,8 @@ void PgIcebergBeginForeignModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
 
 pgiceberg::Result<TupleTableSlot*> PgIcebergExecForeignInsertImpl(ResultRelInfo* rinfo,
                                                                   TupleTableSlot* slot) {
-  auto* state = static_cast<pgiceberg::fdw::ModifyState*>(rinfo->ri_FdwState);
-  return pgiceberg::fdw::ExecInsert(state, slot);
+  auto* state = static_cast<pgiceberg::engine::ModifyState*>(rinfo->ri_FdwState);
+  return pgiceberg::engine::ExecInsert(state, slot);
 }
 
 TupleTableSlot* PgIcebergExecForeignInsert(EState*, ResultRelInfo* rinfo,
@@ -231,8 +231,8 @@ TupleTableSlot* PgIcebergExecForeignInsert(EState*, ResultRelInfo* rinfo,
 
 pgiceberg::Result<TupleTableSlot*> PgIcebergExecForeignUpdateImpl(
     ResultRelInfo* rinfo, TupleTableSlot* slot, TupleTableSlot* plan_slot) {
-  auto* state = static_cast<pgiceberg::fdw::ModifyState*>(rinfo->ri_FdwState);
-  return pgiceberg::fdw::ExecUpdate(state, slot, plan_slot);
+  auto* state = static_cast<pgiceberg::engine::ModifyState*>(rinfo->ri_FdwState);
+  return pgiceberg::engine::ExecUpdate(state, slot, plan_slot);
 }
 
 TupleTableSlot* PgIcebergExecForeignUpdate(EState*, ResultRelInfo* rinfo,
@@ -244,8 +244,8 @@ TupleTableSlot* PgIcebergExecForeignUpdate(EState*, ResultRelInfo* rinfo,
 
 pgiceberg::Result<TupleTableSlot*> PgIcebergExecForeignDeleteImpl(
     ResultRelInfo* rinfo, TupleTableSlot* slot, TupleTableSlot* plan_slot) {
-  auto* state = static_cast<pgiceberg::fdw::ModifyState*>(rinfo->ri_FdwState);
-  return pgiceberg::fdw::ExecDelete(state, slot, plan_slot);
+  auto* state = static_cast<pgiceberg::engine::ModifyState*>(rinfo->ri_FdwState);
+  return pgiceberg::engine::ExecDelete(state, slot, plan_slot);
 }
 
 TupleTableSlot* PgIcebergExecForeignDelete(EState*, ResultRelInfo* rinfo,
@@ -256,8 +256,8 @@ TupleTableSlot* PgIcebergExecForeignDelete(EState*, ResultRelInfo* rinfo,
 }
 
 pgiceberg::Status PgIcebergEndForeignModifyImpl(ResultRelInfo* rinfo) {
-  auto* state = static_cast<pgiceberg::fdw::ModifyState*>(rinfo->ri_FdwState);
-  PGICEBERG_RETURN_NOT_OK(pgiceberg::fdw::EndModify(state));
+  auto* state = static_cast<pgiceberg::engine::ModifyState*>(rinfo->ri_FdwState);
+  PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::EndModify(state));
   rinfo->ri_FdwState = nullptr;
   return pgiceberg::Ok();
 }
@@ -270,8 +270,8 @@ int PgIcebergIsForeignRelUpdatable(Relation) {
   return (1 << CMD_INSERT) | (1 << CMD_UPDATE) | (1 << CMD_DELETE);
 }
 
-pgiceberg::Result<std::string> TableNameFromImport(const pgiceberg::fdw::Options& options,
-                                                   ImportForeignSchemaStmt* stmt) {
+pgiceberg::Result<std::string> TableNameFromImport(
+    const pgiceberg::engine::Options& options, ImportForeignSchemaStmt* stmt) {
   if (!options.table.empty()) {
     return options.table;
   }
@@ -288,10 +288,10 @@ pgiceberg::Result<std::string> TableNameFromImport(const pgiceberg::fdw::Options
 
 pgiceberg::Result<List*> PgIcebergImportForeignSchemaImpl(ImportForeignSchemaStmt* stmt,
                                                           Oid server_oid) {
-  pgiceberg::fdw::Options options;
+  pgiceberg::engine::Options options;
   ForeignServer* server = GetForeignServer(server_oid);
-  PGICEBERG_RETURN_NOT_OK(pgiceberg::fdw::ApplyOptions(options, server->options));
-  PGICEBERG_RETURN_NOT_OK(pgiceberg::fdw::ApplyOptions(options, stmt->options));
+  PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ApplyOptions(options, server->options));
+  PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ApplyOptions(options, stmt->options));
   if (options.name_space == "default" && stmt->remote_schema != nullptr &&
       std::strlen(stmt->remote_schema) > 0) {
     options.name_space = stmt->remote_schema;
@@ -300,11 +300,11 @@ pgiceberg::Result<List*> PgIcebergImportForeignSchemaImpl(ImportForeignSchemaStm
   options.table = std::move(table_name);
   if (options.catalog.empty()) {
     PGICEBERG_RETURN_NOT_OK(
-        pgiceberg::fdw::ValidateCatalogType(options.catalog_type.c_str()));
+        pgiceberg::engine::ValidateCatalogType(options.catalog_type.c_str()));
   }
 
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options,
-                             pgiceberg::fdw::ToCatalogOptions(options));
+                             pgiceberg::engine::ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto table, pgiceberg::LoadIcebergTable(catalog_options, options.table.c_str()));
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -363,12 +363,12 @@ pgiceberg::Result<Datum> PgIcebergFdwHandlerImpl() {
 pgiceberg::Status PgIcebergFdwValidatorImpl(Datum raw_options) {
   List* options = untransformRelOptions(raw_options);
   ListCell* cell = nullptr;
-  pgiceberg::fdw::Options parsed_options;
+  pgiceberg::engine::Options parsed_options;
 
   foreach (cell, options) {
     DefElem* def = static_cast<DefElem*>(lfirst(cell));
-    if (!pgiceberg::fdw::IsValidOption(def->defname)) {
-      const std::string valid_options = pgiceberg::fdw::ValidOptionsText();
+    if (!pgiceberg::engine::IsValidOption(def->defname)) {
+      const std::string valid_options = pgiceberg::engine::ValidOptionsText();
       return std::unexpected(pgiceberg::MakeError(
           ERRCODE_FDW_INVALID_OPTION_NAME,
           std::string("invalid pgiceberg option \"") + def->defname + "\"",
@@ -376,13 +376,13 @@ pgiceberg::Status PgIcebergFdwValidatorImpl(Datum raw_options) {
     }
 
     if (std::strcmp(def->defname, "catalog_type") == 0) {
-      PGICEBERG_RETURN_NOT_OK(pgiceberg::fdw::ValidateCatalogType(defGetString(def)));
+      PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ValidateCatalogType(defGetString(def)));
     }
     if (std::strcmp(def->defname, "snapshot_id") == 0) {
       PGICEBERG_RETURN_NOT_OK(
-          pgiceberg::fdw::ValidateSnapshotIdOption(defGetString(def)));
+          pgiceberg::engine::ValidateSnapshotIdOption(defGetString(def)));
     }
-    PGICEBERG_RETURN_NOT_OK(pgiceberg::fdw::ApplyOption(parsed_options, def));
+    PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ApplyOption(parsed_options, def));
   }
 
   return pgiceberg::Ok();

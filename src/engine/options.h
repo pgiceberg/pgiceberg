@@ -22,7 +22,7 @@
 struct DefElem;
 struct List;
 
-namespace pgiceberg::fdw {
+namespace pgiceberg::engine {
 
 struct Options {
   std::string catalog;
@@ -48,4 +48,4 @@ Result<Options> OptionsForForeignTable(unsigned int foreigntableid,
                                        const char* relation_name);
 pgiceberg::Result<pgiceberg::CatalogOptions> ToCatalogOptions(const Options& options);
 
-}  // namespace pgiceberg::fdw
+}  // namespace pgiceberg::engine

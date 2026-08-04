@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "fdw/modify_state.h"
+#include "engine/modify_state.h"
 
 #include <unistd.h>
 
@@ -49,7 +49,7 @@
 #include "common/pg_interrupt.h"
 #include "common/pg_memory_context.h"
 #include "common/status.h"
-#include "fdw/iceberg_scan.h"
+#include "engine/iceberg_scan.h"
 
 extern "C" {
 #include "postgres.h"
@@ -63,16 +63,13 @@ extern "C" {
 #include "utils/rel.h"
 }
 
-namespace pgiceberg::fdw {
+namespace pgiceberg::engine {
 namespace {
 
 // UPDATE/DELETE rewrite whole Iceberg data files today.  Keep the Arrow batch
 // bounded so a large rewrite does not also require materializing the whole
 // replacement file in backend memory.
 constexpr std::int64_t kDmlRewriteBatchRows = 8192;
-constexpr std::string_view kLogicalBatchIdProperty = "pgiceberg.logical.last-batch-id";
-constexpr std::string_view kLogicalSourceLsnProperty =
-    "pgiceberg.logical.last-source-lsn";
 
 // Iceberg metadata updates need to be replayable.  A PostgreSQL subtransaction
 // can abort after we have already applied an update to the in-memory Iceberg
@@ -93,9 +90,9 @@ class PendingAppendChange final : public PendingIcebergChange {
  public:
   explicit PendingAppendChange(
       std::shared_ptr<iceberg::DataFile> data_file,
-      std::optional<LogicalCommitMetadata> logical_metadata = std::nullopt)
+      std::optional<CommitProperties> commit_properties = std::nullopt)
       : data_file_(std::move(data_file)),
-        logical_metadata_(std::move(logical_metadata)) {}
+        commit_properties_(std::move(commit_properties)) {}
 
   Status Apply(iceberg::Transaction& transaction) override {
     if (data_file_ != nullptr) {
@@ -103,24 +100,24 @@ class PendingAppendChange final : public PendingIcebergChange {
           auto append,
           FromIcebergResult(transaction.NewFastAppend(), "create append update"));
       append->AppendFile(data_file_);
-      if (logical_metadata_.has_value()) {
-        append->Set(std::string(kLogicalBatchIdProperty), logical_metadata_->batch_id);
-        append->Set(std::string(kLogicalSourceLsnProperty),
-                    logical_metadata_->source_lsn);
+      if (commit_properties_.has_value()) {
+        for (const auto& [key, value] : *commit_properties_) {
+          append->Set(key, value);
+        }
       }
       PGICEBERG_RETURN_NOT_OK(
           FromIcebergStatus(append->Commit(), "apply pending Iceberg append"));
     }
 
-    if (logical_metadata_.has_value()) {
-      PGICEBERG_ASSIGN_OR_RETURN(
-          auto properties, FromIcebergResult(transaction.NewUpdateProperties(),
-                                             "create logical batch property update"));
-      properties->Set(std::string(kLogicalBatchIdProperty), logical_metadata_->batch_id);
-      properties->Set(std::string(kLogicalSourceLsnProperty),
-                      logical_metadata_->source_lsn);
+    if (commit_properties_.has_value()) {
+      PGICEBERG_ASSIGN_OR_RETURN(auto properties,
+                                 FromIcebergResult(transaction.NewUpdateProperties(),
+                                                   "create commit property update"));
+      for (const auto& [key, value] : *commit_properties_) {
+        properties->Set(key, value);
+      }
       PGICEBERG_RETURN_NOT_OK(
-          FromIcebergStatus(properties->Commit(), "apply logical batch property update"));
+          FromIcebergStatus(properties->Commit(), "apply commit property update"));
     }
     return Ok();
   }
@@ -134,7 +131,7 @@ class PendingAppendChange final : public PendingIcebergChange {
 
  private:
   std::shared_ptr<iceberg::DataFile> data_file_;
-  std::optional<LogicalCommitMetadata> logical_metadata_;
+  std::optional<CommitProperties> commit_properties_;
 };
 
 class PendingOverwriteChange final : public PendingIcebergChange {
@@ -796,18 +793,22 @@ Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
 
 Status FlushPendingModifyChanges() { return CommitPendingModifyChanges(); }
 
-Result<bool> IsLogicalBatchCommitted(const Options& options, const char* relation_name,
-                                     std::string_view batch_id) {
+Result<std::optional<std::string>> ReadTableProperty(const Options& options,
+                                                     const char* relation_name,
+                                                     std::string_view key) {
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(auto table,
                              pgiceberg::LoadIcebergTable(catalog_options, relation_name));
   const auto& properties = table->properties().configs();
-  auto it = properties.find(std::string(kLogicalBatchIdProperty));
-  return it != properties.end() && it->second == batch_id;
+  auto it = properties.find(std::string(key));
+  if (it == properties.end()) {
+    return std::nullopt;
+  }
+  return it->second;
 }
 
 Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** slots,
-                   int nslots, std::optional<LogicalCommitMetadata> logical_metadata) {
+                   int nslots, std::optional<CommitProperties> commit_properties) {
   if (nslots <= 0) {
     return Ok();
   }
@@ -869,9 +870,9 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
     CleanupDataFiles(table, NewDataFilePaths(data_file));
     return std::unexpected(pending_table_result.error());
   }
-  return QueuePendingModifyChange(**pending_table_result,
-                                  std::make_unique<PendingAppendChange>(
-                                      std::move(data_file), std::move(logical_metadata)));
+  return QueuePendingModifyChange(
+      **pending_table_result, std::make_unique<PendingAppendChange>(
+                                  std::move(data_file), std::move(commit_properties)));
 }
 
 // ModifyState is statement-local executor state.  It owns transient row and
@@ -1107,4 +1108,4 @@ Status EndModify(ModifyState* state) {
   return Ok();
 }
 
-}  // namespace pgiceberg::fdw
+}  // namespace pgiceberg::engine

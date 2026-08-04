@@ -29,9 +29,9 @@
 #include "common/pg_relation.h"
 #include "common/status.h"
 #include "common/type_mapping.h"
-#include "fdw/modify_state.h"
-#include "fdw/options.h"
-#include "fdw/scan_state.h"
+#include "engine/modify_state.h"
+#include "engine/options.h"
+#include "engine/scan_state.h"
 
 extern "C" {
 #include "postgres.h"
@@ -110,7 +110,7 @@ struct ActiveSnapshotGuard {
 
 struct IcebergScanDesc {
   TableScanDescData base;
-  pgiceberg::fdw::ScanState* state = nullptr;
+  pgiceberg::engine::ScanState* state = nullptr;
 };
 
 struct Binding {
@@ -294,9 +294,9 @@ Result<Binding> LoadBinding(Relation relation) {
   return *binding;
 }
 
-Result<fdw::Options> OptionsFromBinding(Relation relation) {
+Result<engine::Options> OptionsFromBinding(Relation relation) {
   PGICEBERG_ASSIGN_OR_RETURN(auto binding, LoadBinding(relation));
-  fdw::Options options;
+  engine::Options options;
   options.catalog = binding.catalog;
   options.name_space = binding.name_space;
   options.table = binding.table_name;
@@ -686,7 +686,7 @@ TableScanDesc IcebergScanBegin(Relation rel, Snapshot snapshot, int nkeys,
   PgStatusGuard([&]() -> Status {
     PGICEBERG_ASSIGN_OR_RETURN(auto options, OptionsFromBinding(rel));
     PGICEBERG_ASSIGN_OR_RETURN(scan->state,
-                               fdw::BeginScan(rel, options, AllTableColumns(rel)));
+                               engine::BeginScan(rel, options, AllTableColumns(rel)));
     return Ok();
   });
   return reinterpret_cast<TableScanDesc>(scan);
@@ -694,7 +694,7 @@ TableScanDesc IcebergScanBegin(Relation rel, Snapshot snapshot, int nkeys,
 
 void IcebergScanEnd(TableScanDesc sscan) {
   auto* scan = reinterpret_cast<IcebergScanDesc*>(sscan);
-  fdw::EndScan(scan->state);
+  engine::EndScan(scan->state);
   pfree(scan);
 }
 
@@ -703,7 +703,7 @@ void IcebergScanRescan(TableScanDesc sscan, ScanKeyData* key, bool, bool, bool, 
     ErrorUnsupported("scan keys");
   }
   auto* scan = reinterpret_cast<IcebergScanDesc*>(sscan);
-  fdw::ReScan(scan->state);
+  engine::ReScan(scan->state);
 }
 
 bool IcebergScanGetNextSlot(TableScanDesc sscan, ScanDirection direction,
@@ -713,7 +713,7 @@ bool IcebergScanGetNextSlot(TableScanDesc sscan, ScanDirection direction,
   }
   auto* scan = reinterpret_cast<IcebergScanDesc*>(sscan);
   return PgResultGuard([&]() -> Result<bool> {
-    PGICEBERG_ASSIGN_OR_RETURN(auto result, fdw::IterateScan(scan->state, slot));
+    PGICEBERG_ASSIGN_OR_RETURN(auto result, engine::IterateScan(scan->state, slot));
     return !TupIsNull(result);
   });
 }
@@ -766,7 +766,7 @@ void IcebergTupleInsert(Relation rel, TupleTableSlot* slot, CommandId, int,
   TupleTableSlot* slots[] = {slot};
   PgStatusGuard([&]() -> Status {
     PGICEBERG_ASSIGN_OR_RETURN(auto options, OptionsFromBinding(rel));
-    return fdw::AppendSlots(rel, options, slots, 1);
+    return engine::AppendSlots(rel, options, slots, 1);
   });
   ItemPointerSetInvalid(&slot->tts_tid);
 }
@@ -784,7 +784,7 @@ void IcebergMultiInsert(Relation rel, TupleTableSlot** slots, int nslots, Comman
                         BulkInsertStateData*) {
   PgStatusGuard([&]() -> Status {
     PGICEBERG_ASSIGN_OR_RETURN(auto options, OptionsFromBinding(rel));
-    return fdw::AppendSlots(rel, options, slots, nslots);
+    return engine::AppendSlots(rel, options, slots, nslots);
   });
   for (int i = 0; i < nslots; i++) {
     ItemPointerSetInvalid(&slots[i]->tts_tid);

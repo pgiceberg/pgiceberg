@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "fdw/modify_state.h"
+#include "engine/modify_state.h"
 #include "logical/logical.h"
 #include "tableam/tableam.h"
 
@@ -135,7 +135,7 @@ void _PG_init(void) {
 
   EnsureIcebergRegistrations();
   RegisterArrowThreadPoolGucs();
-  pgiceberg::fdw::RegisterTransactionCallbacks();
+  pgiceberg::engine::RegisterTransactionCallbacks();
   pgiceberg::tableam::RegisterTableAmHooks();
   pgiceberg::logical::RegisterLogicalWorker();
 }

@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "fdw/iceberg_scan.h"
+#include "engine/iceberg_scan.h"
 
 #include <utility>
 
@@ -25,7 +25,7 @@
 #include "common/pg_interrupt.h"
 #include "common/status.h"
 
-namespace pgiceberg::fdw {
+namespace pgiceberg::engine {
 
 IcebergScanCursor::IcebergScanCursor(
     std::shared_ptr<iceberg::Table> table,
@@ -132,4 +132,4 @@ void IcebergScanCursor::Reset() {
   task_index_ = 0;
 }
 
-}  // namespace pgiceberg::fdw
+}  // namespace pgiceberg::engine
