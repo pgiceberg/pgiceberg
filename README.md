@@ -16,20 +16,27 @@ limitations under the License.
 
 pgiceberg is a PostgreSQL extension for working with Apache Iceberg tables.
 
-It provides a Foreign Data Wrapper and SQL helper functions on top of
-apache/iceberg-cpp. Iceberg catalog access, metadata, manifests, manifest
-lists, deletes, and Parquet data files are handled through iceberg-cpp.
+It provides three independent PostgreSQL surfaces on top of apache/iceberg-cpp:
+a Foreign Data Wrapper, a native table access method, and logical-decoding
+mirrors. Iceberg catalog access, metadata, manifests, manifest lists, deletes,
+and Parquet data files are handled through iceberg-cpp. The surfaces share a
+common Iceberg engine; they do not call into each other. See
+[PostgreSQL Extension Surfaces](docs/design/postgres-extension-surfaces.md)
+for when to use each path.
 
 ## Features
 
 - Create Iceberg tables from PostgreSQL SQL helper functions.
-- Map Iceberg tables into PostgreSQL as foreign tables.
+- Map Iceberg tables into PostgreSQL as foreign tables (FDW).
 - Infer foreign table definitions with `IMPORT FOREIGN SCHEMA`.
+- Create native Iceberg-backed tables with `CREATE TABLE ... USING iceberg`.
+- Mirror PostgreSQL heap inserts into Iceberg with logical decoding.
 - Register existing Iceberg table metadata into a SQL catalog.
 - Read table metadata and snapshot file summaries from SQL.
 - Read a historical Iceberg snapshot with the `snapshot_id` foreign-table option.
 - Append rows with `INSERT`.
-- Rewrite unpartitioned table data files for `UPDATE` and `DELETE`.
+- Rewrite unpartitioned table data files for `UPDATE` and `DELETE` on foreign
+  tables.
 
 ## Install
 

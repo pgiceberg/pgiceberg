@@ -19,17 +19,33 @@ and SQL usage examples, see [README.md](README.md).
 
 ## Source Layout
 
+pgiceberg has three independent PostgreSQL surfaces over one shared Iceberg
+engine. See
+[docs/design/postgres-extension-surfaces.md](docs/design/postgres-extension-surfaces.md)
+for roles, overlap, and the dependency rules.
+
 - `src/engine/`: shared Iceberg read/write engine (options, scans, DML, pending
   transaction state) used by the FDW, table AM, and logical mirroring.
-- `src/fdw/`: PostgreSQL Foreign Data Wrapper callbacks.
+- `src/fdw/`: Iceberg Foreign Data Wrapper callbacks and shared FDW planner
+  helpers (also used by the Parquet/Avro utilities).
+- `src/tableam/`: native `CREATE TABLE ... USING iceberg` table access method.
+- `src/logical/`: logical decoding output plugin, background worker, and
+  mirror SQL helpers.
 - `src/common/`: PostgreSQL and C++ boundary helpers.
-- `src/functions/`: SQL-callable helper functions.
+- `src/functions/`: SQL-callable catalog/table helper functions.
+- `src/utilities/`: read-only Parquet and Avro FDWs.
+- `src/copy/`: reserved for a future COPY format handler (no stable PG API yet).
 - `docs/design/`: internal design notes for PostgreSQL extension surfaces and
   implementation tradeoffs.
 - `sql/` and `pgiceberg.control`: extension install metadata.
 - `test/regress/`: `pg_regress` SQL tests.
 - `test/datasets/`: small regression fixtures.
 - `scripts/`: local build helpers.
+
+Keep surface modules independent: `fdw/`, `tableam/`, and `logical/` must not
+include each other. Shared Iceberg behavior goes in `engine/` or `common/`.
+`scripts/check-surface-includes.sh` (also a local pre-commit hook) enforces
+that include rule.
 
 ## PostgreSQL With pgenv
 

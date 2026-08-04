@@ -38,7 +38,7 @@ same iceberg-cpp scan and write primitives.
 
 The logical mirror is implemented directly in pgiceberg's existing C++ stack:
 PostgreSQL logical decoding provides the ordered change stream, the pgiceberg
-worker owns replication progress, and the shared FDW write path uses
+worker owns replication progress, and the shared engine write path uses
 iceberg-cpp to publish data files and metadata. The first implementation favors
 a small correctness proof over maximum concurrency; later phases can improve
 backfill throughput, change coverage, freshness, and maintenance without
