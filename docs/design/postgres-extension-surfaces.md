@@ -19,6 +19,42 @@ table access methods, and logical decoding. They overlap in the user-visible
 ability to read or write rows, but they enter PostgreSQL at different layers
 and should be used for different product goals.
 
+## Independence
+
+The three surfaces are product-independent. Each has its own PostgreSQL entry
+point, control catalog, and supported operations. None of them calls into
+another surface's module:
+
+| Surface | Source | Entry point | Own control state | Can stand alone for |
+| --- | --- | --- | --- | --- |
+| FDW | `src/fdw/` | `FOREIGN DATA WRAPPER pgiceberg` | Foreign server / foreign table options | Mapping and querying existing Iceberg tables |
+| Table AM | `src/tableam/` | `ACCESS METHOD iceberg` | `pgiceberg.table_bindings` | `CREATE TABLE ... USING iceberg` scans and appends |
+| Logical | `src/logical/` | output plugin + background worker | `pgiceberg.logical_mirrors` | Heap → Iceberg CDC mirrors |
+
+They share lower-level Iceberg work through `src/engine/` (options, scans,
+appends, pending transaction commits) and `src/common/` (catalog loading,
+type mapping, Status helpers). That sharing is intentional: one iceberg-cpp
+integration, three PostgreSQL contracts.
+
+```text
+  fdw/ ────────┐
+  tableam/ ────┼──► engine/ ──► common/ ──► iceberg-cpp
+  logical/ ────┘
+```
+
+What independence does *not* mean today:
+
+- The extension still ships as one shared library and one `CREATE EXTENSION`.
+  Operators enable all three surfaces together; there is no compile-time
+  "FDW-only" or "logical-only" build.
+- Capability depth differs. FDW is the most complete read/write path. Table AM
+  is intentionally narrow (append/scan focused). Logical mirrors are
+  INSERT-only CDC. Independence of *role* is not equality of *maturity*.
+
+Do not merge the surfaces. A foreign table, a `USING iceberg` relation, and a
+logical mirror answer different ownership questions (external mapping, native
+storage, downstream copy) even when they all end in Iceberg files.
+
 ## Summary
 
 Use the FDW path when Iceberg, Parquet, or Avro data is external to
@@ -94,11 +130,11 @@ In pgiceberg, the table AM registers `CREATE ACCESS METHOD iceberg TYPE TABLE`
 and supports `CREATE TABLE ... USING iceberg`. It stores a PostgreSQL relation
 OID to Iceberg catalog/table binding in `pgiceberg.table_bindings`.
 
-The current table AM implementation is intentionally narrow. It reuses the
-FDW scan and append machinery for scans and inserts, and rejects many native
-table operations, including `ALTER TABLE`, `UPDATE`, `DELETE`, `TRUNCATE`,
-parallel scans, row locking, index tuple fetches, `CREATE INDEX`, `VACUUM`,
-and `TABLESAMPLE`.
+The current table AM implementation is intentionally narrow. It calls the
+shared engine under `src/engine/` for scans and inserts, and rejects many
+native table operations, including `ALTER TABLE`, `UPDATE`, `DELETE`,
+`TRUNCATE`, parallel scans, row locking, index tuple fetches, `CREATE INDEX`,
+`VACUUM`, and `TABLESAMPLE`.
 
 This path is the right long-term surface if pgiceberg wants Iceberg to behave
 like a native PostgreSQL table storage engine. It is also the more natural
@@ -147,8 +183,8 @@ queries or to make Iceberg a native table storage engine.
 ## Overlap
 
 FDW and table AM can both return rows to PostgreSQL and can both write rows to
-Iceberg. In pgiceberg they already share much of the lower-level scan and
-append machinery.
+Iceberg. In pgiceberg they share the engine scan and append APIs, not each
+other's PostgreSQL callback layers.
 
 FDW and logical decoding can both write Iceberg files and commit Iceberg
 metadata. Their transaction models differ: FDW writes are part of the user's
@@ -159,6 +195,22 @@ Table AM and logical decoding can both present a normal PostgreSQL table as
 the user-facing object, but they put the source of truth in different places.
 With table AM, Iceberg is the table storage. With logical decoding, heap is
 the source table and Iceberg is the downstream mirror.
+
+## Source Layout
+
+| Directory | Responsibility | May depend on |
+| --- | --- | --- |
+| `src/fdw/` | Iceberg FDW planner/executor callbacks | `engine/`, `common/` |
+| `src/tableam/` | `TableAmRoutine` and binding catalog | `engine/`, `common/` |
+| `src/logical/` | Output plugin, worker, mirror SQL | `engine/`, `common/` |
+| `src/engine/` | Shared Iceberg options, scan, DML, xact | `common/`, iceberg-cpp |
+| `src/common/` | Catalog, types, Status, PG helpers | iceberg-cpp, PostgreSQL |
+| `src/functions/` | SQL helpers (create/register/metadata) | `common/` |
+| `src/utilities/` | Read-only Parquet/Avro FDWs | `common/`, shared FDW helpers in `fdw/` |
+| `src/copy/` | Reserved; no custom COPY format API yet | — |
+
+Surface modules must not include each other. If a helper is needed by more
+than one surface, it belongs in `engine/` or `common/`.
 
 ## Schema Evolution
 
