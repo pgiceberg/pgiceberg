@@ -21,8 +21,8 @@ logical mirrors:
 - scan state (`scan_state`, `iceberg_scan`)
 - modify/append state and PostgreSQL transaction hooks (`modify_state`)
 
-**Depends on:** `common/`, iceberg-cpp  
-**Must not depend on:** `fdw/`, `tableam/`, `logical/`
+- **Depends on:** `common/`, iceberg-cpp
+- **Must not depend on:** `fdw/`, `tableam/`, `logical/`
 
 Callers that need crash-recognizable commits pass generic `CommitProperties`
 into `AppendSlots`; logical batch-id bookkeeping stays in `src/logical/`.

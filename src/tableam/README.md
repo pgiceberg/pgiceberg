@@ -21,5 +21,5 @@ Bindings from relation OID to Iceberg catalog identity live in
 `pgiceberg.table_bindings`. Scans and appends call `src/engine/`; many native
 table operations are still rejected.
 
-**Depends on:** `engine/`, `common/`  
-**Must not depend on:** `fdw/`, `logical/`
+- **Depends on:** `engine/`, `common/`
+- **Must not depend on:** `fdw/`, `logical/`
