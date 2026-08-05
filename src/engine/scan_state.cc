@@ -25,6 +25,7 @@
 #include "common/catalog.h"
 #include "common/datum_convert.h"
 #include "common/pg_interrupt.h"
+#include "common/pg_logger.h"
 #include "common/status.h"
 #include "engine/iceberg_scan.h"
 #include "engine/modify_state.h"
@@ -118,6 +119,7 @@ void DetachMemoryContextCleanup(ScanState* state) {
 
 Result<ScanState*> BeginScan(Relation relation, const Options& options,
                              const std::vector<int>& projected_attnums) {
+  OperationLoggerScope log_scope("scan", RelationGetRelationName(relation));
   auto state = std::make_unique<ScanState>();
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(

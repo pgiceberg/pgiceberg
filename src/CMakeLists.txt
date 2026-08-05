@@ -15,6 +15,7 @@ add_library(pgiceberg MODULE
             common/arrow_schema.cc
             common/catalog.cc
             common/datum_convert.cc
+            common/pg_logger.cc
             common/type_mapping.cc
             engine/iceberg_scan.cc
             engine/modify_state.cc

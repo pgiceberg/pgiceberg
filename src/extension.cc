@@ -10,6 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "common/pg_logger.h"
 #include "engine/modify_state.h"
 #include "logical/logical.h"
 #include "tableam/tableam.h"
@@ -136,6 +137,8 @@ void _PG_init(void) {
   initialized = true;
 
   EnsureIcebergRegistrations();
+  pgiceberg::RegisterIcebergLoggingGucs();
+  pgiceberg::InstallDefaultIcebergLogger();
   RegisterArrowThreadPoolGucs();
   pgiceberg::engine::RegisterTransactionCallbacks();
   pgiceberg::tableam::RegisterTableAmHooks();
