@@ -35,8 +35,8 @@ for when to use each path.
 - Read table metadata and snapshot file summaries from SQL.
 - Read a historical Iceberg snapshot with the `snapshot_id` foreign-table option.
 - Append rows with `INSERT`.
-- Rewrite unpartitioned table data files for `UPDATE` and `DELETE` on foreign
-  tables.
+- Apply `UPDATE` and `DELETE` to unpartitioned foreign tables, using deletion
+  vectors for Iceberg v3 and data-file rewrites for Iceberg v2.
 
 ## Install
 

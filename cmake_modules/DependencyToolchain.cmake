@@ -31,7 +31,7 @@ endmacro()
 # Apache Iceberg C++
 
 set(PGICEBERG_ICEBERG_GIT_TAG
-    "93577b3fe713912b3017e5e3374e89d64c4d0c7a"
+    "ab083862eab5ac1a002200bcc174e51697851afc"
     CACHE STRING "apache/iceberg-cpp commit or tag to fetch")
 
 function(resolve_iceberg_dependency out_target)
@@ -72,6 +72,15 @@ function(resolve_iceberg_dependency out_target)
                        GIT_REPOSITORY https://github.com/apache/iceberg-cpp.git
                        GIT_TAG ${PGICEBERG_ICEBERG_GIT_TAG})
   fetchcontent_makeavailable(Iceberg)
+
+  # iceberg-cpp generates iceberg/version.h relative to the top-level build
+  # directory. When it is embedded with FetchContent, expose that generated
+  # header to the data target that includes it for deletion-vector writers.
+  foreach(candidate iceberg_data_static iceberg_data_shared)
+    if(TARGET ${candidate})
+      target_include_directories(${candidate} PRIVATE "${CMAKE_BINARY_DIR}/src")
+    endif()
+  endforeach()
 
   set(iceberg_targets)
 

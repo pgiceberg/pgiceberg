@@ -51,7 +51,7 @@ OPTIONS (
 );
 
 INSERT INTO metadata_fixture
-VALUES (1, 'one');
+VALUES (1, 'one'), (3, 'three');
 
 INSERT INTO metadata_fixture
 VALUES (2, 'two');
@@ -105,6 +105,54 @@ SELECT
   summary ->> 'data_manifest_count' AS data_manifest_count,
   summary ->> 'delete_manifest_count' AS delete_manifest_count,
   summary ->> 'data_file_count' AS data_file_count,
+  summary ->> 'delete_file_count' AS delete_file_count,
+  summary ->> 'deletion_vector_file_count' AS deletion_vector_file_count
+FROM pgiceberg.table_snapshot_files_summary(
+  'metadata_regress',
+  'default',
+  'metadata_fixture'
+) AS summary;
+
+-- V3 row-level changes use Puffin deletion vectors. Repeated changes against
+-- one data file merge the previous DV, and scans apply the replacement DV.
+DELETE FROM metadata_fixture
+WHERE id = 1
+RETURNING id, payload;
+
+SELECT id, payload
+FROM metadata_fixture
+ORDER BY id;
+
+SELECT
+  summary ->> 'delete_file_count' AS delete_file_count,
+  summary ->> 'deletion_vector_file_count' AS deletion_vector_file_count
+FROM pgiceberg.table_snapshot_files_summary(
+  'metadata_regress',
+  'default',
+  'metadata_fixture'
+) AS summary;
+
+BEGIN;
+DELETE FROM metadata_fixture WHERE id = 3;
+SELECT id, payload FROM metadata_fixture ORDER BY id;
+ROLLBACK;
+
+SELECT id, payload
+FROM metadata_fixture
+ORDER BY id;
+
+DELETE FROM metadata_fixture WHERE id = 3;
+
+UPDATE metadata_fixture
+SET payload = 'two-updated'
+WHERE id = 2
+RETURNING id, payload;
+
+SELECT id, payload
+FROM metadata_fixture
+ORDER BY id;
+
+SELECT
   summary ->> 'delete_file_count' AS delete_file_count,
   summary ->> 'deletion_vector_file_count' AS deletion_vector_file_count
 FROM pgiceberg.table_snapshot_files_summary(

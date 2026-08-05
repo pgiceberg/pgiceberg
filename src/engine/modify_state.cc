@@ -21,6 +21,9 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -30,16 +33,23 @@
 #include <arrow/extension_type.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/data_writer.h>
+#include <iceberg/data/delete_loader.h>
+#include <iceberg/data/deletion_vector_writer.h>
+#include <iceberg/data/writer.h>
+#include <iceberg/deletes/position_delete_index.h>
 #include <iceberg/file_io.h>
 #include <iceberg/file_format.h>
 #include <iceberg/manifest/manifest_entry.h>
+#include <iceberg/metadata_columns.h>
 #include <iceberg/partition_spec.h>
+#include <iceberg/row/partition_values.h>
 #include <iceberg/schema.h>
 #include <iceberg/table.h>
 #include <iceberg/table_metadata.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/fast_append.h>
 #include <iceberg/update/overwrite_files.h>
+#include <iceberg/update/row_delta.h>
 #include <iceberg/update/update_properties.h>
 
 #include "common/arrow_schema.h"
@@ -66,9 +76,9 @@ extern "C" {
 namespace pgiceberg::engine {
 namespace {
 
-// UPDATE/DELETE rewrite whole Iceberg data files today.  Keep the Arrow batch
-// bounded so a large rewrite does not also require materializing the whole
-// replacement file in backend memory.
+// Iceberg v2 UPDATE/DELETE rewrite whole data files.  V3 UPDATE also buffers
+// replacement rows before appending them alongside a deletion vector.  Keep
+// each Arrow batch bounded in both paths.
 constexpr std::int64_t kDmlRewriteBatchRows = 8192;
 
 // Iceberg metadata updates need to be replayable.  A PostgreSQL subtransaction
@@ -164,6 +174,69 @@ class PendingOverwriteChange final : public PendingIcebergChange {
  private:
   std::vector<std::shared_ptr<iceberg::DataFile>> deleted_files_;
   std::shared_ptr<iceberg::DataFile> replacement_file_;
+};
+
+class PendingRowDeltaChange final : public PendingIcebergChange {
+ public:
+  PendingRowDeltaChange(
+      std::shared_ptr<iceberg::DataFile> added_data_file,
+      std::vector<std::shared_ptr<iceberg::DataFile>> added_delete_files,
+      std::vector<std::shared_ptr<iceberg::DataFile>> removed_delete_files)
+      : added_data_file_(std::move(added_data_file)),
+        added_delete_files_(std::move(added_delete_files)),
+        removed_delete_files_(std::move(removed_delete_files)) {}
+
+  Status Apply(iceberg::Transaction& transaction) override {
+    const int64_t starting_snapshot_id = transaction.current().current_snapshot_id;
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto row_delta,
+        FromIcebergResult(transaction.NewRowDelta(), "create row delta update"));
+    row_delta->ValidateFromSnapshot(starting_snapshot_id);
+    if (added_data_file_ != nullptr) {
+      row_delta->AddRows(added_data_file_);
+    }
+    for (const auto& delete_file : removed_delete_files_) {
+      row_delta->RemoveDeletes(delete_file);
+    }
+    for (const auto& delete_file : added_delete_files_) {
+      row_delta->AddDeletes(delete_file);
+    }
+    std::vector<std::string> referenced_data_files;
+    referenced_data_files.reserve(added_delete_files_.size());
+    for (const auto& delete_file : added_delete_files_) {
+      if (delete_file->referenced_data_file.has_value()) {
+        referenced_data_files.push_back(*delete_file->referenced_data_file);
+      }
+    }
+    row_delta->ValidateDataFilesExist(referenced_data_files);
+    if (added_data_file_ != nullptr) {
+      // UPDATE read and re-appended rows, so concurrent removal or deletion of
+      // those rows must fail instead of resurrecting them.
+      row_delta->ValidateDeletedFiles();
+      row_delta->ValidateNoConflictingDeleteFiles();
+    }
+    return FromIcebergStatus(row_delta->Commit(), "apply pending Iceberg row delta");
+  }
+
+  std::vector<std::string> NewDataFilePaths() const override {
+    std::vector<std::string> paths;
+    std::unordered_set<std::string> unique_paths;
+    auto add_path = [&](const std::shared_ptr<iceberg::DataFile>& file) {
+      if (file != nullptr && unique_paths.insert(file->file_path).second) {
+        paths.push_back(file->file_path);
+      }
+    };
+    add_path(added_data_file_);
+    for (const auto& delete_file : added_delete_files_) {
+      add_path(delete_file);
+    }
+    return paths;
+  }
+
+ private:
+  std::shared_ptr<iceberg::DataFile> added_data_file_;
+  std::vector<std::shared_ptr<iceberg::DataFile>> added_delete_files_;
+  std::vector<std::shared_ptr<iceberg::DataFile>> removed_delete_files_;
 };
 
 // A pending change is tagged with the current PostgreSQL subtransaction so an
@@ -307,6 +380,26 @@ void CleanupDataFiles(const std::shared_ptr<iceberg::Table>& table,
     elog(WARNING, "%s", status.error().message().c_str());
   }
 }
+
+class NewDataFilesCleanupGuard {
+ public:
+  NewDataFilesCleanupGuard(std::shared_ptr<iceberg::Table> table,
+                           std::vector<std::string> paths)
+      : table_(std::move(table)), paths_(std::move(paths)) {}
+
+  ~NewDataFilesCleanupGuard() {
+    if (active_) {
+      CleanupDataFiles(table_, paths_);
+    }
+  }
+
+  void Release() { active_ = false; }
+
+ private:
+  std::shared_ptr<iceberg::Table> table_;
+  std::vector<std::string> paths_;
+  bool active_ = true;
+};
 
 void ClearPendingTableChanges(bool cleanup_data_files) {
   if (cleanup_data_files) {
@@ -454,10 +547,11 @@ struct Value {
 
 using Row = std::vector<Value>;
 
-std::string DataFilePath(const iceberg::Table& table) {
+std::string DataFilePath(const iceberg::Table& table, std::string_view extension) {
   auto now = std::chrono::system_clock::now().time_since_epoch().count();
   std::ostringstream name;
-  name << table.location() << "/data/pgiceberg-" << getpid() << "-" << now << ".parquet";
+  name << table.location() << "/data/pgiceberg-" << getpid() << "-" << now << "."
+       << extension;
 
   if (!table.location().starts_with("s3://") && !table.location().starts_with("gs://")) {
     std::filesystem::create_directories(
@@ -625,7 +719,7 @@ Result<std::shared_ptr<iceberg::DataFile>> WriteRows(
 
   PGICEBERG_ASSIGN_OR_RETURN(
       auto writer, FromIcebergResult(iceberg::DataWriter::Make(iceberg::DataWriterOptions{
-                                         .path = DataFilePath(table),
+                                         .path = DataFilePath(table, "parquet"),
                                          .schema = iceberg_schema,
                                          .spec = spec,
                                          .format = iceberg::FileFormatType::kParquet,
@@ -648,11 +742,11 @@ class RowBatchWriter {
   static Result<std::unique_ptr<RowBatchWriter>> Make(
       iceberg::Table& table, std::shared_ptr<iceberg::Schema> iceberg_schema,
       std::shared_ptr<iceberg::PartitionSpec> spec,
-      std::shared_ptr<arrow::Schema> arrow_schema) {
+      std::shared_ptr<arrow::Schema> arrow_schema, std::string path) {
     PGICEBERG_ASSIGN_OR_RETURN(auto builders, MakeBuilders(*arrow_schema));
-    return std::unique_ptr<RowBatchWriter>(
-        new RowBatchWriter(table, std::move(iceberg_schema), std::move(spec),
-                           std::move(arrow_schema), std::move(builders)));
+    return std::unique_ptr<RowBatchWriter>(new RowBatchWriter(
+        table, std::move(iceberg_schema), std::move(spec), std::move(arrow_schema),
+        std::move(path), std::move(builders)));
   }
 
   Status Append(const std::vector<int>& attr_numbers, TupleDesc desc, const Row& row) {
@@ -683,12 +777,13 @@ class RowBatchWriter {
  private:
   RowBatchWriter(iceberg::Table& table, std::shared_ptr<iceberg::Schema> iceberg_schema,
                  std::shared_ptr<iceberg::PartitionSpec> spec,
-                 std::shared_ptr<arrow::Schema> arrow_schema,
+                 std::shared_ptr<arrow::Schema> arrow_schema, std::string path,
                  std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders)
       : table_(table),
         iceberg_schema_(std::move(iceberg_schema)),
         spec_(std::move(spec)),
         arrow_schema_(std::move(arrow_schema)),
+        path_(std::move(path)),
         builders_(std::move(builders)) {}
 
   Status EnsureWriter() {
@@ -698,7 +793,7 @@ class RowBatchWriter {
     PGICEBERG_ASSIGN_OR_RETURN(
         auto writer,
         FromIcebergResult(iceberg::DataWriter::Make(iceberg::DataWriterOptions{
-                              .path = DataFilePath(table_),
+                              .path = path_,
                               .schema = iceberg_schema_,
                               .spec = spec_,
                               .format = iceberg::FileFormatType::kParquet,
@@ -739,6 +834,7 @@ class RowBatchWriter {
   std::shared_ptr<iceberg::Schema> iceberg_schema_;
   std::shared_ptr<iceberg::PartitionSpec> spec_;
   std::shared_ptr<arrow::Schema> arrow_schema_;
+  std::string path_;
   std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders_;
   std::unique_ptr<iceberg::DataWriter> writer_;
   std::int64_t rows_in_batch_ = 0;
@@ -770,6 +866,44 @@ Result<Row> RowFromRecordBatch(const arrow::RecordBatch& batch, std::int64_t row
         Value{.datum = datumCopy(datum, attr->attbyval, attr->attlen), .is_null = false};
   }
   return row;
+}
+
+struct RowLocation {
+  std::string file_path;
+  std::int64_t position = 0;
+};
+
+Result<RowLocation> RowLocationFromRecordBatch(const arrow::RecordBatch& batch,
+                                               std::int64_t row_index) {
+  const int file_index =
+      batch.schema()->GetFieldIndex(iceberg::MetadataColumns::kFilePath.name());
+  const int position_index =
+      batch.schema()->GetFieldIndex(iceberg::MetadataColumns::kRowPosition.name());
+  if (file_index < 0 || position_index < 0) {
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_ERROR, "Iceberg row location metadata is missing"));
+  }
+
+  auto file_array = batch.column(file_index);
+  auto position_array = batch.column(position_index);
+  if (file_array->type_id() != arrow::Type::STRING ||
+      position_array->type_id() != arrow::Type::INT64 || file_array->IsNull(row_index) ||
+      position_array->IsNull(row_index)) {
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_ERROR, "Iceberg row location metadata is invalid"));
+  }
+
+  const auto& files = static_cast<const arrow::StringArray&>(*file_array);
+  const auto& positions = static_cast<const arrow::Int64Array&>(*position_array);
+  return RowLocation{.file_path = std::string(files.GetView(row_index)),
+                     .position = positions.Value(row_index)};
+}
+
+std::vector<std::string> DmlScanColumns(const arrow::Schema& schema) {
+  std::vector<std::string> columns = schema.field_names();
+  columns.emplace_back(iceberg::MetadataColumns::kFilePath.name());
+  columns.emplace_back(iceberg::MetadataColumns::kRowPosition.name());
+  return columns;
 }
 
 }  // namespace
@@ -1053,14 +1187,141 @@ Status EndModify(ModifyState* state) {
     return Ok();
   }
 
+  if (state->read_table->metadata()->format_version >= 3) {
+    IcebergScanCursor current(state->read_table, DmlScanColumns(*state->arrow_schema));
+    PGICEBERG_RETURN_NOT_OK(current.Init());
+
+    std::unordered_map<std::string, std::shared_ptr<iceberg::DataFile>> data_files;
+    data_files.reserve(current.data_files().size());
+    for (const auto& data_file : current.data_files()) {
+      data_files.emplace(data_file->file_path, data_file);
+    }
+
+    iceberg::DeleteLoader delete_loader(state->table->io());
+    const std::string deletion_vector_path = DataFilePath(*state->table, "puffin");
+    const std::string replacement_path = DataFilePath(*state->table, "parquet");
+    NewDataFilesCleanupGuard cleanup_new_files(state->table,
+                                               {deletion_vector_path, replacement_path});
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto deletion_vector_writer,
+        FromIcebergResult(
+            iceberg::DeletionVectorWriter::Make(iceberg::DeletionVectorWriterOptions{
+                .path = deletion_vector_path,
+                .io = state->table->io(),
+                .load_previous_deletes = [&](std::string_view data_file_path)
+                    -> iceberg::Result<std::optional<iceberg::PositionDeleteIndex>> {
+                  auto delete_files = current.PositionDeleteFilesFor(data_file_path);
+                  if (delete_files.empty()) {
+                    return std::optional<iceberg::PositionDeleteIndex>{};
+                  }
+                  auto loaded =
+                      delete_loader.LoadPositionDeletes(delete_files, data_file_path);
+                  if (!loaded) {
+                    return std::unexpected(loaded.error());
+                  }
+                  return std::optional<iceberg::PositionDeleteIndex>(
+                      std::move(loaded).value());
+                },
+            }),
+            "create deletion vector writer"));
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto update_writer,
+        RowBatchWriter::Make(*state->table, state->iceberg_schema, state->spec,
+                             state->arrow_schema, replacement_path));
+    std::vector<bool> used_changes(state->old_rows.size(), false);
+
+    std::shared_ptr<arrow::RecordBatch> batch;
+    while (true) {
+      PGICEBERG_RETURN_NOT_OK(pgiceberg::CheckForInterrupts());
+      PGICEBERG_ASSIGN_OR_RETURN(auto has_batch, current.NextBatch(&batch));
+      if (!has_batch) {
+        break;
+      }
+      for (std::int64_t row_index = 0; row_index < batch->num_rows(); row_index++) {
+        PGICEBERG_ASSIGN_OR_RETURN(
+            Row current_row, RowFromRecordBatch(*batch, row_index, state->tuple_desc));
+
+        std::optional<std::size_t> matched_change;
+        for (std::size_t i = 0; i < state->old_rows.size(); i++) {
+          PGICEBERG_ASSIGN_OR_RETURN(
+              auto rows_equal,
+              RowEquals(current_row, state->old_rows[i], state->tuple_desc));
+          if (!used_changes[i] && rows_equal) {
+            matched_change = i;
+            used_changes[i] = true;
+            break;
+          }
+        }
+        if (!matched_change.has_value()) {
+          continue;
+        }
+
+        PGICEBERG_ASSIGN_OR_RETURN(auto location,
+                                   RowLocationFromRecordBatch(*batch, row_index));
+        auto data_file = data_files.find(location.file_path);
+        if (data_file == data_files.end()) {
+          return std::unexpected(MakeError(
+              ERRCODE_FDW_ERROR, "Iceberg data file for deleted row does not exist"));
+        }
+        PGICEBERG_RETURN_NOT_OK(FromIcebergStatus(
+            deletion_vector_writer->Delete(location.file_path, location.position,
+                                           state->spec, data_file->second->partition),
+            "write deletion vector"));
+        if (state->operation == CMD_UPDATE) {
+          PGICEBERG_RETURN_NOT_OK(update_writer->Append(
+              state->attr_numbers, state->tuple_desc, state->new_rows[*matched_change]));
+        }
+      }
+    }
+
+    if (std::ranges::find(used_changes, false) != used_changes.end()) {
+      return std::unexpected(
+          MakeError(ERRCODE_FDW_ERROR,
+                    "could not locate every Iceberg row selected for modification"));
+    }
+
+    auto close_status = FromIcebergStatus(deletion_vector_writer->Close(),
+                                          "close deletion vector writer");
+    if (!close_status) {
+      return std::unexpected(close_status.error());
+    }
+    auto deletion_metadata = FromIcebergResult(deletion_vector_writer->Metadata(),
+                                               "read deletion vector metadata");
+    if (!deletion_metadata) {
+      return std::unexpected(deletion_metadata.error());
+    }
+
+    auto replacement_result = update_writer->Finish();
+    if (!replacement_result) {
+      return std::unexpected(replacement_result.error());
+    }
+    auto replacement = std::move(replacement_result).value();
+
+    auto pending_table_result = EnsurePendingTableChange(state->options, state->table);
+    if (!pending_table_result) {
+      return std::unexpected(pending_table_result.error());
+    }
+    auto metadata = std::move(deletion_metadata).value();
+    // The pending queue takes ownership of the generated files and cleans them
+    // itself if applying the RowDelta fails or PostgreSQL aborts.
+    cleanup_new_files.Release();
+    PGICEBERG_RETURN_NOT_OK(QueuePendingModifyChange(
+        **pending_table_result,
+        std::make_unique<PendingRowDeltaChange>(
+            std::move(replacement), std::move(metadata.data_files),
+            std::move(metadata.rewritten_delete_files))));
+    return Ok();
+  }
+
   // UPDATE and DELETE rewrite the files visible to this statement.  read_table
   // may already include earlier pending writes from the same PostgreSQL
   // transaction, so the rewrite preserves read-your-writes across statements.
   IcebergScanCursor current(state->read_table);
   PGICEBERG_RETURN_NOT_OK(current.Init());
-  PGICEBERG_ASSIGN_OR_RETURN(auto rewrite_writer,
-                             RowBatchWriter::Make(*state->table, state->iceberg_schema,
-                                                  state->spec, state->arrow_schema));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto rewrite_writer,
+      RowBatchWriter::Make(*state->table, state->iceberg_schema, state->spec,
+                           state->arrow_schema, DataFilePath(*state->table, "parquet")));
   std::vector<bool> used_changes(state->old_rows.size(), false);
 
   std::shared_ptr<arrow::RecordBatch> batch;
