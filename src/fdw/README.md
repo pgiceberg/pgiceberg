@@ -20,8 +20,8 @@ into SQL (`FOREIGN DATA WRAPPER pgiceberg`).
 This module owns planner and executor entry points only. Iceberg scans, DML,
 options, and transaction commits live in `src/engine/`.
 
-**Depends on:** `engine/`, `common/`  
-**Must not depend on:** `tableam/`, `logical/`
+- **Depends on:** `engine/`, `common/`
+- **Must not depend on:** `tableam/`, `logical/`
 
 Shared FDW planner helpers such as scan projection may be used by the
 Parquet/Avro wrappers under `src/utilities/`.

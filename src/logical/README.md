@@ -21,7 +21,7 @@ Mirror configuration and progress live in `pgiceberg.logical_mirrors`. The
 output plugin and worker own replication progress; Iceberg appends and
 idempotent batch commits go through `src/engine/`.
 
-**Depends on:** `engine/`, `common/`  
-**Must not depend on:** `fdw/`, `tableam/`
+- **Depends on:** `engine/`, `common/`
+- **Must not depend on:** `fdw/`, `tableam/`
 
 See [Real-time PostgreSQL-to-Iceberg Mirrors](../../docs/design/realtime-iceberg-mirrors.md).
