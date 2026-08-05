@@ -33,10 +33,11 @@ namespace pgiceberg::engine {
 IcebergScanCursor::IcebergScanCursor(
     std::shared_ptr<iceberg::Table> table,
     std::optional<std::vector<std::string>> selected_columns,
-    std::optional<int64_t> snapshot_id)
+    std::optional<int64_t> snapshot_id, std::shared_ptr<iceberg::Expression> filter)
     : table_(std::move(table)),
       selected_columns_(std::move(selected_columns)),
-      snapshot_id_(snapshot_id) {}
+      snapshot_id_(snapshot_id),
+      filter_(std::move(filter)) {}
 
 Status IcebergScanCursor::Init() {
   PGICEBERG_ASSIGN_OR_RETURN(auto schema,
@@ -56,6 +57,12 @@ Status IcebergScanCursor::Init() {
     // iceberg-cpp validates the id against table metadata and plans manifests for
     // that historical snapshot (time travel), including delete files for the scan.
     scan_builder->UseSnapshot(*snapshot_id_);
+  }
+  if (filter_ != nullptr) {
+    // Prunes manifests and data files during PlanFiles via partition values and
+    // column metrics.  Row-level filtering still happens in PostgreSQL, which
+    // re-evaluates every scan clause locally.
+    scan_builder->Filter(filter_);
   }
   if (selected_columns_.has_value()) {
     if (selected_columns_->empty()) {

@@ -117,7 +117,8 @@ void DetachMemoryContextCleanup(ScanState* state) {
 }
 
 Result<ScanState*> BeginScan(Relation relation, const Options& options,
-                             const std::vector<int>& projected_attnums) {
+                             const std::vector<int>& projected_attnums,
+                             const ScanFilterBuilder& filter_builder) {
   auto state = std::make_unique<ScanState>();
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -130,9 +131,20 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options,
     PGICEBERG_ASSIGN_OR_RETURN(state->table,
                                ReadTableForCurrentTransaction(options, state->table));
   }
+  // Filters translate against the schema the scan binds to.  Time-travel scans
+  // may use an older snapshot schema, so restrict pushdown to current-snapshot
+  // reads where the table schema is authoritative.
+  std::shared_ptr<iceberg::Expression> filter;
+  if (filter_builder && !options.snapshot_id.has_value()) {
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto schema, pgiceberg::FromIcebergResult(state->table->schema(),
+                                                  "load schema for scan filter"));
+    filter = filter_builder(*schema);
+  }
   TupleDesc desc = RelationGetDescr(relation);
   state->cursor = std::make_unique<IcebergScanCursor>(
-      state->table, ProjectedColumnNames(desc, projected_attnums), options.snapshot_id);
+      state->table, ProjectedColumnNames(desc, projected_attnums), options.snapshot_id,
+      std::move(filter));
   PGICEBERG_RETURN_NOT_OK(state->cursor->Init());
 
   auto projected = ProjectedAttributeSet(projected_attnums);
@@ -203,6 +215,13 @@ void ReScan(ScanState* state) {
 void EndScan(ScanState* state) {
   DetachMemoryContextCleanup(state);
   delete state;
+}
+
+std::size_t ScanTaskCount(const ScanState* state) {
+  if (state == nullptr || state->cursor == nullptr) {
+    return 0;
+  }
+  return state->cursor->task_count();
 }
 
 }  // namespace pgiceberg::engine

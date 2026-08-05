@@ -38,7 +38,8 @@ class IcebergScanCursor {
   explicit IcebergScanCursor(
       std::shared_ptr<iceberg::Table> table,
       std::optional<std::vector<std::string>> selected_columns = std::nullopt,
-      std::optional<int64_t> snapshot_id = std::nullopt);
+      std::optional<int64_t> snapshot_id = std::nullopt,
+      std::shared_ptr<iceberg::Expression> filter = nullptr);
   ~IcebergScanCursor();
 
   IcebergScanCursor(const IcebergScanCursor&) = delete;
@@ -48,6 +49,7 @@ class IcebergScanCursor {
   const std::vector<std::shared_ptr<iceberg::DataFile>>& data_files() const {
     return data_files_;
   }
+  std::size_t task_count() const { return tasks_.size(); }
   std::vector<std::shared_ptr<iceberg::DataFile>> PositionDeleteFilesFor(
       std::string_view data_file_path) const;
 
@@ -61,6 +63,7 @@ class IcebergScanCursor {
   std::shared_ptr<iceberg::Table> table_;
   std::optional<std::vector<std::string>> selected_columns_;
   std::optional<int64_t> snapshot_id_;
+  std::shared_ptr<iceberg::Expression> filter_;
   std::shared_ptr<arrow::Schema> arrow_schema_;
   std::vector<std::shared_ptr<iceberg::FileScanTask>> tasks_;
   std::vector<std::shared_ptr<iceberg::DataFile>> data_files_;
