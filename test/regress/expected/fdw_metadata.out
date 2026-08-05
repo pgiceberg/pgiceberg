@@ -45,7 +45,7 @@ OPTIONS (
   table 'metadata_fixture'
 );
 INSERT INTO metadata_fixture
-VALUES (1, 'one');
+VALUES (1, 'one'), (3, 'three');
 INSERT INTO metadata_fixture
 VALUES (2, 'two');
 SELECT pgiceberg.table_metadata_file_location(
@@ -116,6 +116,71 @@ FROM pgiceberg.table_snapshot_files_summary(
 ) AS summary;
 snapshot_count|current_snapshot_summary|manifest_count|data_manifest_count|delete_manifest_count|data_file_count|delete_file_count|deletion_vector_file_count
 2|t|2|2|0|2|0|0
+(1 row)
+-- V3 row-level changes use Puffin deletion vectors. Repeated changes against
+-- one data file merge the previous DV, and scans apply the replacement DV.
+DELETE FROM metadata_fixture
+WHERE id = 1
+RETURNING id, payload;
+id|payload
+1|one
+(1 row)
+SELECT id, payload
+FROM metadata_fixture
+ORDER BY id;
+id|payload
+2|two
+3|three
+(2 rows)
+SELECT
+  summary ->> 'delete_file_count' AS delete_file_count,
+  summary ->> 'deletion_vector_file_count' AS deletion_vector_file_count
+FROM pgiceberg.table_snapshot_files_summary(
+  'metadata_regress',
+  'default',
+  'metadata_fixture'
+) AS summary;
+delete_file_count|deletion_vector_file_count
+1|1
+(1 row)
+BEGIN;
+DELETE FROM metadata_fixture WHERE id = 3;
+SELECT id, payload FROM metadata_fixture ORDER BY id;
+id|payload
+2|two
+(1 row)
+ROLLBACK;
+SELECT id, payload
+FROM metadata_fixture
+ORDER BY id;
+id|payload
+2|two
+3|three
+(2 rows)
+DELETE FROM metadata_fixture WHERE id = 3;
+UPDATE metadata_fixture
+SET payload = 'two-updated'
+WHERE id = 2
+RETURNING id, payload;
+id|payload
+2|two-updated
+(1 row)
+SELECT id, payload
+FROM metadata_fixture
+ORDER BY id;
+id|payload
+2|two-updated
+(1 row)
+SELECT
+  summary ->> 'delete_file_count' AS delete_file_count,
+  summary ->> 'deletion_vector_file_count' AS deletion_vector_file_count
+FROM pgiceberg.table_snapshot_files_summary(
+  'metadata_regress',
+  'default',
+  'metadata_fixture'
+) AS summary;
+delete_file_count|deletion_vector_file_count
+2|2
 (1 row)
 -- Summarize the oldest snapshot from metadata JSON history without printing ids.
 WITH oldest AS (

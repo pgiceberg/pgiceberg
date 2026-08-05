@@ -64,9 +64,9 @@ changing these ownership boundaries.
 - The worker still owns one logical slot per mirror.
 - Iceberg data becomes visible at Iceberg commit boundaries; there is no hot
   Arrow overlay or LSN-bounded union read.
-- The implementation does not use Iceberg v3 deletion vectors. The pinned
-  iceberg-cpp revision cannot yet load a deletion vector during a scan or merge
-  multiple deletion vectors for one data file.
+- Logical mirrors do not produce Iceberg v3 deletion vectors because the first
+  implementation is INSERT-only. FDW scans can apply deletion vectors written
+  by other engines, while row-level FDW writes use them for v3 tables.
 
 ## First implementation
 
@@ -173,9 +173,9 @@ identity values. For mirrors with a primary key or suitable replica identity:
 - INSERT remains an append.
 
 Iceberg v2 equality deletes are the appropriate first target because the
-pinned reader supports them. Arbitrary FDW and table-AM UPDATE/DELETE should
-instead project Iceberg `_file` and `_pos`, write position-delete files, and
-commit a `RowDelta`.
+pinned reader supports them. Arbitrary FDW and table-AM UPDATE/DELETE project
+Iceberg `_file` and `_pos`; v3 tables write deletion vectors and commit a
+`RowDelta`, while v2 tables keep the data-file rewrite path.
 
 ### Shared replication streams
 

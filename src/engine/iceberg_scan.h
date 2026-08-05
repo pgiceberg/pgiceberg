@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <arrow/record_batch.h>
@@ -47,6 +48,8 @@ class IcebergScanCursor {
   const std::vector<std::shared_ptr<iceberg::DataFile>>& data_files() const {
     return data_files_;
   }
+  std::vector<std::shared_ptr<iceberg::DataFile>> PositionDeleteFilesFor(
+      std::string_view data_file_path) const;
 
   Status Init();
   Result<bool> NextBatch(std::shared_ptr<arrow::RecordBatch>* batch);

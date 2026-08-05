@@ -13,10 +13,13 @@
 #include "engine/iceberg_scan.h"
 
 #include <utility>
+#include <vector>
 
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/file_scan_task_reader.h>
+#include <iceberg/manifest/manifest_entry.h>
+#include <iceberg/metadata_columns.h>
 #include <iceberg/schema.h>
 #include <iceberg/table.h>
 #include <iceberg/table_scan.h>
@@ -58,7 +61,32 @@ Status IcebergScanCursor::Init() {
     if (selected_columns_->empty()) {
       scan_builder->Project(iceberg::Schema::EmptySchema());
     } else {
-      scan_builder->Select(*selected_columns_);
+      std::vector<std::string> data_columns;
+      std::vector<iceberg::SchemaField> metadata_columns;
+      for (const auto& column : *selected_columns_) {
+        if (iceberg::MetadataColumns::IsMetadataColumn(column)) {
+          PGICEBERG_ASSIGN_OR_RETURN(
+              auto metadata_column,
+              FromIcebergResult(iceberg::MetadataColumns::MetadataColumn(column),
+                                "resolve metadata column"));
+          metadata_columns.push_back(*metadata_column);
+        } else {
+          data_columns.push_back(column);
+        }
+      }
+
+      if (metadata_columns.empty()) {
+        scan_builder->Select(data_columns);
+      } else {
+        PGICEBERG_ASSIGN_OR_RETURN(
+            auto projected_data,
+            FromIcebergResult(schema->Select(data_columns), "project data columns"));
+        std::vector<iceberg::SchemaField> fields(projected_data->fields().begin(),
+                                                 projected_data->fields().end());
+        fields.insert(fields.end(), metadata_columns.begin(), metadata_columns.end());
+        scan_builder->Project(
+            std::make_shared<iceberg::Schema>(std::move(fields), schema->schema_id()));
+      }
     }
   }
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -87,6 +115,22 @@ Status IcebergScanCursor::Init() {
 }
 
 IcebergScanCursor::~IcebergScanCursor() { Reset(); }
+
+std::vector<std::shared_ptr<iceberg::DataFile>> IcebergScanCursor::PositionDeleteFilesFor(
+    std::string_view data_file_path) const {
+  std::vector<std::shared_ptr<iceberg::DataFile>> delete_files;
+  for (const auto& task : tasks_) {
+    if (task->data_file()->file_path != data_file_path) {
+      continue;
+    }
+    for (const auto& delete_file : task->delete_files()) {
+      if (delete_file->content == iceberg::DataFile::Content::kPositionDeletes) {
+        delete_files.push_back(delete_file);
+      }
+    }
+  }
+  return delete_files;
+}
 
 Result<bool> IcebergScanCursor::OpenCurrentTask() {
   if (task_index_ >= tasks_.size()) {
