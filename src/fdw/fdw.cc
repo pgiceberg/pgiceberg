@@ -30,6 +30,7 @@
 #include "engine/modify_state.h"
 #include "engine/options.h"
 #include "engine/scan_state.h"
+#include "fdw/qual_pushdown.h"
 #include "fdw/scan_projection.h"
 
 extern "C" {
@@ -38,6 +39,8 @@ extern "C" {
 #include "catalog/pg_foreign_server_d.h"
 #include "catalog/pg_foreign_table_d.h"
 #include "commands/defrem.h"
+#include "commands/explain_format.h"
+#include "commands/explain_state.h"
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
@@ -45,6 +48,8 @@ extern "C" {
 #include "lib/stringinfo.h"
 #include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
+#include "nodes/pathnodes.h"
+#include "nodes/value.h"
 #include "optimizer/appendinfo.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
@@ -73,6 +78,29 @@ void EnsureIcebergRegistrations() {
   (void)registered;
 }
 
+// Translate the relation's restriction clauses and remember the readable
+// filter text so EXPLAIN can show what the scan will push down.  Best-effort:
+// planning continues without a filter annotation on any failure.
+void StashPushdownFilterText(RelOptInfo* baserel, Oid relation_oid,
+                             const std::shared_ptr<iceberg::Table>& table) {
+  auto schema_result =
+      pgiceberg::FromIcebergResult(table->schema(), "load schema for pushdown");
+  if (!schema_result.has_value() || *schema_result == nullptr) {
+    return;
+  }
+  List* clauses = extract_actual_clauses(baserel->baserestrictinfo, false);
+  auto filter = pgiceberg::fdw::TranslateQualsForPushdown(clauses, baserel->relid,
+                                                          relation_oid, **schema_result);
+  if (filter == nullptr) {
+    return;
+  }
+  try {
+    baserel->fdw_private = pstrdup(filter->ToString().c_str());
+  } catch (...) {
+    baserel->fdw_private = nullptr;
+  }
+}
+
 pgiceberg::Status PgIcebergGetForeignRelSizeImpl(RelOptInfo* baserel, Oid relation_oid) {
   baserel->rows = 1000;
   PGICEBERG_ASSIGN_OR_RETURN(auto options, pgiceberg::engine::OptionsForForeignTable(
@@ -87,6 +115,8 @@ pgiceberg::Status PgIcebergGetForeignRelSizeImpl(RelOptInfo* baserel, Oid relati
   if (!options.snapshot_id.has_value()) {
     PGICEBERG_ASSIGN_OR_RETURN(
         table, pgiceberg::engine::ReadTableForCurrentTransaction(options, table));
+    // Pushdown is limited to current-snapshot scans; see engine::BeginScan.
+    StashPushdownFilterText(baserel, relation_oid, table);
   }
 
   std::shared_ptr<iceberg::Snapshot> snapshot;
@@ -128,11 +158,21 @@ void PgIcebergGetForeignPaths(PlannerInfo* root, RelOptInfo* baserel, Oid) {
                         pgiceberg::CreateSimpleForeignScanPath(root, baserel)));
 }
 
+// fdw_private layout for pgiceberg foreign scans.
+enum FdwPrivateIndex {
+  kFdwPrivateProjection = 0,
+  kFdwPrivateFilterText = 1,
+};
+
 ForeignScan* PgIcebergGetForeignPlan(PlannerInfo*, RelOptInfo* baserel, Oid, ForeignPath*,
                                      List* tlist, List* scan_clauses, Plan* outer_plan) {
   scan_clauses = extract_actual_clauses(scan_clauses, false);
-  auto* fdw_private =
+  List* projection =
       pgiceberg::fdw::BuildFdwScanProjectionPrivate(baserel, tlist, scan_clauses);
+  const char* filter_text = baserel->fdw_private == nullptr
+                                ? ""
+                                : static_cast<const char*>(baserel->fdw_private);
+  List* fdw_private = list_make2(projection, makeString(pstrdup(filter_text)));
   return make_foreignscan(tlist, scan_clauses, baserel->relid, NIL, fdw_private, NIL, NIL,
                           outer_plan);
 }
@@ -151,9 +191,22 @@ pgiceberg::Status PgIcebergBeginForeignScanImpl(ForeignScanState* node, int efla
         pgiceberg::engine::ValidateCatalogType(options.catalog_type.c_str()));
   }
   auto* plan = castNode(ForeignScan, node->ss.ps.plan);
-  auto projected_attnums = pgiceberg::fdw::FdwScanProjectionFromPlan(plan);
+  auto projected_attnums = pgiceberg::fdw::FdwScanProjectionFromList(
+      list_nth_node(List, plan->fdw_private, kFdwPrivateProjection));
+
+  // Re-translate the scan clauses once the engine has loaded the table, so
+  // literals convert against the authoritative Iceberg schema.
+  List* quals = plan->scan.plan.qual;
+  const Index scanrelid = plan->scan.scanrelid;
+  const Oid relation_oid = RelationGetRelid(relation);
+  auto filter_builder = [quals, scanrelid, relation_oid](const iceberg::Schema& schema) {
+    return pgiceberg::fdw::TranslateQualsForPushdown(quals, scanrelid, relation_oid,
+                                                     schema);
+  };
+
   PGICEBERG_ASSIGN_OR_RETURN(
-      auto scan, pgiceberg::engine::BeginScan(relation, options, projected_attnums));
+      auto scan,
+      pgiceberg::engine::BeginScan(relation, options, projected_attnums, filter_builder));
   node->fdw_state = scan;
   return pgiceberg::Ok();
 }
@@ -182,6 +235,26 @@ void PgIcebergEndForeignScan(ForeignScanState* node) {
   auto* state = static_cast<pgiceberg::engine::ScanState*>(node->fdw_state);
   pgiceberg::engine::EndScan(state);
   node->fdw_state = nullptr;
+}
+
+void PgIcebergExplainForeignScan(ForeignScanState* node, ExplainState* es) {
+  auto* plan = castNode(ForeignScan, node->ss.ps.plan);
+  if (list_length(plan->fdw_private) > kFdwPrivateFilterText) {
+    auto* filter_node =
+        static_cast<Node*>(list_nth(plan->fdw_private, kFdwPrivateFilterText));
+    if (filter_node != nullptr && IsA(filter_node, String)) {
+      const char* filter_text = strVal(filter_node);
+      if (filter_text[0] != '\0') {
+        ExplainPropertyText("Iceberg Filter", filter_text, es);
+      }
+    }
+  }
+  if (es->analyze && node->fdw_state != nullptr) {
+    auto* state = static_cast<pgiceberg::engine::ScanState*>(node->fdw_state);
+    ExplainPropertyUInteger("Iceberg Scan Tasks", nullptr,
+                            static_cast<uint64>(pgiceberg::engine::ScanTaskCount(state)),
+                            es);
+  }
 }
 
 List* PgIcebergPlanForeignModify(PlannerInfo*, ModifyTable*, Index, int) { return NIL; }
@@ -350,6 +423,7 @@ pgiceberg::Result<Datum> PgIcebergFdwHandlerImpl() {
   routine->IterateForeignScan = PgIcebergIterateForeignScan;
   routine->ReScanForeignScan = PgIcebergReScanForeignScan;
   routine->EndForeignScan = PgIcebergEndForeignScan;
+  routine->ExplainForeignScan = PgIcebergExplainForeignScan;
   routine->AddForeignUpdateTargets = PgIcebergAddForeignUpdateTargets;
   routine->PlanForeignModify = PgIcebergPlanForeignModify;
   routine->BeginForeignModify = PgIcebergBeginForeignModify;

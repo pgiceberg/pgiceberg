@@ -23,7 +23,8 @@ if(POSTGRESQL_REGRESS)
       fdw_yellow_trip_dataset
       fdw_metadata
       fdw_snapshots
-      logging)
+      logging
+      fdw_pushdown)
   set(PGICEBERG_REGRESS_DATASETS yellow_trip)
   set(PGICEBERG_REGRESS_EXTENSION_DIR "${CMAKE_CURRENT_BINARY_DIR}/extension")
 

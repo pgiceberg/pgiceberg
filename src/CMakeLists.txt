@@ -22,6 +22,7 @@ add_library(pgiceberg MODULE
             engine/options.cc
             engine/scan_state.cc
             fdw/fdw.cc
+            fdw/qual_pushdown.cc
             fdw/scan_projection.cc
             functions/create_table.cc
             functions/metadata.cc

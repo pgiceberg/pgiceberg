@@ -86,13 +86,17 @@ List* BuildFdwScanProjectionPrivate(RelOptInfo* baserel, List* target_list,
   return projected;
 }
 
-std::vector<int> FdwScanProjectionFromPlan(const ForeignScan* plan) {
+std::vector<int> FdwScanProjectionFromList(const List* projected_list) {
   std::vector<int> projected;
-  ListCell* cell = nullptr;
-  foreach (cell, plan->fdw_private) {
+  const ListCell* cell = nullptr;
+  foreach (cell, projected_list) {
     projected.push_back(intVal(lfirst(cell)));
   }
   return projected;
+}
+
+std::vector<int> FdwScanProjectionFromPlan(const ForeignScan* plan) {
+  return FdwScanProjectionFromList(plan->fdw_private);
 }
 
 }  // namespace pgiceberg::fdw

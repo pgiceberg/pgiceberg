@@ -25,3 +25,7 @@ options, and transaction commits live in `src/engine/`.
 
 Shared FDW planner helpers such as scan projection may be used by the
 Parquet/Avro wrappers under `src/utilities/`.
+
+`qual_pushdown.{h,cc}` translates PostgreSQL scan clauses into Iceberg filter
+expressions for scan-time file pruning; see
+`docs/design/fdw-expression-pushdown.md`.
