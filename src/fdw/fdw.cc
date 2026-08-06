@@ -18,6 +18,7 @@
 #include <iceberg/arrow/arrow_register.h>
 #include <iceberg/avro/avro_register.h>
 #include <iceberg/data/puffin_dv_register.h>
+#include <iceberg/expression/expression.h>
 #include <iceberg/parquet/parquet_register.h>
 #include <iceberg/schema.h>
 #include <iceberg/snapshot.h>
@@ -39,7 +40,11 @@ extern "C" {
 #include "catalog/pg_foreign_server_d.h"
 #include "catalog/pg_foreign_table_d.h"
 #include "commands/defrem.h"
+#if PG_VERSION_NUM >= 180000
 #include "commands/explain_format.h"
+#else
+#include "commands/explain.h"
+#endif
 #include "commands/explain_state.h"
 #include "executor/executor.h"
 #include "fmgr.h"
