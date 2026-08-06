@@ -39,6 +39,7 @@
 #include <iceberg/deletes/position_delete_index.h>
 #include <iceberg/file_io.h>
 #include <iceberg/file_format.h>
+#include <iceberg/logging/logger.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/metadata_columns.h>
 #include <iceberg/partition_spec.h>
@@ -1081,6 +1082,8 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
       pgiceberg::LoadIcebergTable(catalog_options, RelationGetRelationName(relation)));
   PGICEBERG_ASSIGN_OR_RETURN(state->read_table,
                              ReadTableForCurrentTransaction(options, state->table));
+  iceberg::Log(iceberg::LogLevel::kInfo, "modify begin for operation {}",
+               static_cast<int>(state->operation));
 
   PGICEBERG_ASSIGN_OR_RETURN(
       state->iceberg_schema,

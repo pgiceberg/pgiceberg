@@ -20,6 +20,7 @@
 
 #include <arrow/array.h>
 #include <arrow/record_batch.h>
+#include <iceberg/logging/logger.h>
 #include <iceberg/table.h>
 
 #include "common/catalog.h"
@@ -136,6 +137,8 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options,
   state->cursor = std::make_unique<IcebergScanCursor>(
       state->table, ProjectedColumnNames(desc, projected_attnums), options.snapshot_id);
   PGICEBERG_RETURN_NOT_OK(state->cursor->Init());
+  iceberg::Log(iceberg::LogLevel::kInfo, "scan ready for {} projected columns",
+               projected_attnums.size());
 
   auto projected = ProjectedAttributeSet(projected_attnums);
   state->columns.resize(desc->natts);
