@@ -114,7 +114,7 @@ Status IcebergScanCursor::Init() {
       task_reader_, FromIcebergResult(std::move(reader), "create scan task reader"));
 
   iceberg::Log(iceberg::LogLevel::kInfo, "planned {} scan tasks across {} data files",
-                 tasks_.size(), data_files_.size());
+               tasks_.size(), data_files_.size());
   if (snapshot_id_.has_value()) {
     iceberg::Log(iceberg::LogLevel::kInfo, "reading snapshot {}", *snapshot_id_);
   }

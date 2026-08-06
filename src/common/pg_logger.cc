@@ -87,11 +87,10 @@ std::string FormatAttributes(const std::vector<iceberg::LogAttribute>& attribute
 std::string FormatLine(const iceberg::LogMessage& message) {
   const auto now =
       std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
-  return std::format(
-      "{:%Y-%m-%dT%H:%M:%S}Z {} [{}:{}] {}{}",
-      now, iceberg::ToString(message.level),
-      Basename(message.location.file_name()), message.location.line(), message.message,
-      FormatAttributes(message.attributes));
+  return std::format("{:%Y-%m-%dT%H:%M:%S}Z {} [{}:{}] {}{}", now,
+                     iceberg::ToString(message.level),
+                     Basename(message.location.file_name()), message.location.line(),
+                     message.message, FormatAttributes(message.attributes));
 }
 
 void EmitToStderr(std::string_view line) noexcept {
@@ -133,7 +132,7 @@ class PgElogLogger final : public iceberg::Logger {
       try {
         std::lock_guard lock(mutex_);
         EmitToStderr("pgiceberg: <log formatting error>");
-      } catch (...) {
+      } catch (...) {  // NOLINT(bugprone-empty-catch)
       }
     }
   }
@@ -187,17 +186,17 @@ void ApplyConfiguredIcebergLogLevel() {
 }
 
 void InstallFatalHandler() {
-  iceberg::SetFatalHandler([](const std::source_location& location,
-                              std::string_view message) {
-    if (g_pg_logger == nullptr) {
-      return;
-    }
-    g_pg_logger->Log(iceberg::LogMessage{
-        .level = iceberg::LogLevel::kFatal,
-        .message = std::string(message),
-        .location = location,
-    });
-  });
+  iceberg::SetFatalHandler(
+      [](const std::source_location& location, std::string_view message) {
+        if (g_pg_logger == nullptr) {
+          return;
+        }
+        g_pg_logger->Log(iceberg::LogMessage{
+            .level = iceberg::LogLevel::kFatal,
+            .message = std::string(message),
+            .location = location,
+        });
+      });
 }
 
 }  // namespace
