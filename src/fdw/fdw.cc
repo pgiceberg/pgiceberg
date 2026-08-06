@@ -11,6 +11,7 @@
 // limitations under the License.
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <string>
@@ -41,11 +42,11 @@ extern "C" {
 #include "catalog/pg_foreign_table_d.h"
 #include "commands/defrem.h"
 #if PG_VERSION_NUM >= 180000
-#include "commands/explain_format.h"
+#  include "commands/explain_format.h"
+#  include "commands/explain_state.h"
 #else
-#include "commands/explain.h"
+#  include "commands/explain.h"
 #endif
-#include "commands/explain_state.h"
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
@@ -164,7 +165,7 @@ void PgIcebergGetForeignPaths(PlannerInfo* root, RelOptInfo* baserel, Oid) {
 }
 
 // fdw_private layout for pgiceberg foreign scans.
-enum FdwPrivateIndex {
+enum FdwPrivateIndex : std::uint8_t {
   kFdwPrivateProjection = 0,
   kFdwPrivateFilterText = 1,
 };
