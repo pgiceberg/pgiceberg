@@ -49,8 +49,7 @@ execute_process(
     "@CMAKE_COMMAND@" -E env
     "PG_REGRESS_SOCK_DIR=/tmp"
     "@POSTGRESQL_REGRESS@" --bindir "@POSTGRESQL_BIN_DIR@" --inputdir
-    "@CMAKE_CURRENT_SOURCE_DIR@/regress" --expecteddir
-    "@CMAKE_CURRENT_SOURCE_DIR@/regress/expected" --outputdir
+    "@PGICEBERG_REGRESS_INPUT_DIR@" --outputdir
     "@CMAKE_CURRENT_BINARY_DIR@/regress" --temp-config
     "@CMAKE_CURRENT_BINARY_DIR@/pg_regress.conf" --temp-instance
     "@CMAKE_CURRENT_BINARY_DIR@/tmp_check" ${PGICEBERG_REGRESS_TESTS}
