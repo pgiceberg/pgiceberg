@@ -60,7 +60,7 @@ constexpr std::int64_t kPostgresUnixEpochOffsetDays = 10957;
 constexpr std::int64_t kPostgresUnixEpochOffsetMicros = 946684800000000LL;
 constexpr int kMaxIcebergDecimalPrecision = 38;
 
-enum class PgComparison {
+enum class PgComparison : std::uint8_t {
   kEq,
   kNotEq,
   kLt,
@@ -75,7 +75,7 @@ enum class PgComparison {
 // (=, IN) tolerates lossy narrowing casts because a rounded literal can only
 // match extra rows, never fewer; every other operator needs an exact literal
 // or pruning could skip files that contain qualifying rows.
-enum class LiteralUse {
+enum class LiteralUse : std::uint8_t {
   kEqualityMember,
   kExact,
 };
