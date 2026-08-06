@@ -51,7 +51,6 @@
             "settings": {
                 "C_Cpp.intelliSenseEngine": "disabled",
                 "clangd.arguments": [
-                    "--compile-commands-dir=/tmp/pgiceberg-build/pg18.4",
                     "--background-index",
                     "--header-insertion=never",
                     "--completion-style=detailed",
