@@ -23,8 +23,7 @@ and data files are pruned via per-column metrics (lower/upper bounds, null
 counts). Rows inside surviving files are still filtered by PostgreSQL, which
 keeps evaluating every scan clause locally.
 
-The supported predicate surface matches the Supabase Wrappers
-`iceberg_fdw` pushdown (`pushdown.rs`): comparison operators, `IS [NOT]
+The supported predicate surface includes comparison operators, `IS [NOT]
 NULL`, `IN`/`NOT IN` lists, prefix `LIKE`/`NOT LIKE`, and boolean columns.
 
 ## Correctness model
