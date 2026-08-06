@@ -12,3 +12,14 @@
 
 CompileFlags:
   CompilationDatabase: build/pg18.4-debug
+
+---
+If:
+  PathMatch: 'src/.*\.(cc|cpp|cxx|h|hh|hpp|hxx)$'
+CompileFlags:
+  # clangd 18 reports an older concepts feature level than GCC 14's
+  # libstdc++ expects, which hides C++23 facilities such as std::expected.
+  Add:
+    - -std=c++23
+    - -D__cpp_concepts=202002L
+    - -Wno-builtin-macro-redefined

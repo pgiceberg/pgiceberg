@@ -45,7 +45,7 @@ extension. The vendored iceberg-cpp dependency requires a C++23 compiler such
 as GCC 14 or newer.
 
 ```sh
-BUILD_DIR=/tmp/pgiceberg-build/pg18.4
+BUILD_DIR=build/pg18.4-debug
 cmake -S . -B "$BUILD_DIR" -GNinja -DPG_CONFIG="$(command -v pg_config)"
 cmake --build "$BUILD_DIR"
 cmake --install "$BUILD_DIR" --component pgiceberg

@@ -65,13 +65,53 @@ pgenv build 18.4
 pgenv switch 18.4
 ```
 
+### Debugging PostgreSQL Internals
+
+For source-level debugging of PostgreSQL backend functions, edit the pgenv
+configuration for the version used by pgiceberg:
+
+```sh
+pgenv config edit 18.4
+```
+
+Set the PostgreSQL configure and compiler options to:
+
+```sh
+PGENV_CONFIGURE_OPTIONS=(
+    --enable-debug
+    --enable-cassert
+    'CFLAGS=-O0 -g3 -fno-omit-frame-pointer'
+)
+export PGENV_CONFIGURE_OPTIONS
+```
+
+The active version must be cleared before pgenv will replace its binaries.
+`rebuild` preserves the existing `PGDATA` directory.
+
+```sh
+pgenv clear
+pgenv rebuild 18.4
+pgenv use 18.4
+```
+
+With the default `PGENV_ROOT`, the matching build source is retained under
+`~/.pgenv/src/postgresql-18.4`. Debuggers use that exact source tree for
+PostgreSQL backend breakpoints. PostgreSQL itself remains owned by pgenv; no
+source copy is kept in the pgiceberg CMake `_deps` directory.
+
+The repository `.clangd` reads the selected compiler and flags from
+`compile_commands.json`; it does not hard-code a GCC installation path.
+
+Reconfigure, rebuild, and reinstall pgiceberg after rebuilding PostgreSQL so
+the extension uses the headers and build settings from the new pgenv binary.
+
 ## Build
 
 Configure with the `pg_config` from the PostgreSQL installation that should
 load pgiceberg:
 
 ```sh
-BUILD_DIR=/tmp/pgiceberg-build/pg18.4
+BUILD_DIR=build/pg18.4-debug
 cmake -S . -B "$BUILD_DIR" -GNinja -DPG_CONFIG="$(command -v pg_config)"
 cmake --build "$BUILD_DIR"
 cmake --install "$BUILD_DIR" --component pgiceberg
@@ -92,13 +132,13 @@ scripts/pgenv-build.sh 18.4
 Run all configured tests from the build directory:
 
 ```sh
-ctest --test-dir /tmp/pgiceberg-build/pg18.4 --output-on-failure
+ctest --test-dir build/pg18.4-debug --output-on-failure
 ```
 
 Run only the FDW regression target:
 
 ```sh
-ctest --test-dir /tmp/pgiceberg-build/pg18.4 --output-on-failure -R regress_fdw
+ctest --test-dir build/pg18.4-debug --output-on-failure -R regress_fdw
 ```
 
 The CTest regression wrapper sets `PG_REGRESS_SOCK_DIR=/tmp` and validates the
@@ -142,7 +182,7 @@ ctest --test-dir "$BUILD_DIR" --output-on-failure
 REST catalog support is off by default. Enable it at configure time:
 
 ```sh
-BUILD_DIR=/tmp/pgiceberg-build/pg18.4
+BUILD_DIR=build/pg18.4-debug
 cmake -S . -B "$BUILD_DIR" -GNinja \
   -DPG_CONFIG="$(command -v pg_config)" \
   -DPGICEBERG_ENABLE_REST_CATALOG=ON

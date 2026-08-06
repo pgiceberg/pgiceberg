@@ -14,9 +14,9 @@
 set -euo pipefail
 
 pg_version="${1:-18.4}"
-build_dir="${BUILD_DIR:-/tmp/pgiceberg-build/pg${pg_version}}"
+build_dir="${BUILD_DIR:-${PWD}/build/pg${pg_version}-debug}"
 export CCACHE_DIR="${CCACHE_DIR:-${PWD}/build/.ccache}"
-mkdir -p "${CCACHE_DIR}"
+mkdir -p "${CCACHE_DIR}" "${build_dir}"
 
 if ! command -v pgenv >/dev/null 2>&1; then
   echo "pgenv is required. Install https://github.com/theory/pgenv and add it to PATH." >&2
