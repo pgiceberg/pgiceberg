@@ -1,0 +1,53 @@
+-- Licensed under the Apache License, Version 2.0 (the "License");
+-- you may not use this file except in compliance with the License.
+-- You may obtain a copy of the License at
+--
+--     http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing, software
+-- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
+
+CREATE EXTENSION pgiceberg;
+
+\pset format unaligned
+\set VERBOSITY terse
+
+DO $$
+BEGIN
+  PERFORM pgiceberg.add_catalog(
+    'logging_regress',
+    'sqlite',
+    '/tmp/pgiceberg_catalog_yellow_trip_dataset_regress.db',
+    '/tmp/pgiceberg_yellow_trip_dataset_regress'
+  );
+END $$;
+
+SELECT pgiceberg.register_table_from_location(
+  'logging_regress',
+  'default',
+  'yellow_trip',
+  '/tmp/pgiceberg_yellow_trip_dataset_regress/default/yellow_trip',
+  true
+);
+
+CREATE SERVER logging_server
+FOREIGN DATA WRAPPER pgiceberg
+OPTIONS (catalog 'logging_regress');
+
+CREATE SCHEMA logging_imported;
+
+IMPORT FOREIGN SCHEMA "default"
+LIMIT TO (yellow_trip)
+FROM SERVER logging_server
+INTO logging_imported;
+
+SET pgiceberg.iceberg_log_level = 'info';
+
+SELECT count(*) AS row_count FROM logging_imported.yellow_trip;
+
+DROP SCHEMA logging_imported CASCADE;
+DROP SERVER logging_server;
+DROP EXTENSION pgiceberg;

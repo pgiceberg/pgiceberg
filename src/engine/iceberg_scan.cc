@@ -18,6 +18,7 @@
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
 #include <iceberg/data/file_scan_task_reader.h>
+#include <iceberg/logging/logger.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/metadata_columns.h>
 #include <iceberg/schema.h>
@@ -111,6 +112,12 @@ Status IcebergScanCursor::Init() {
   });
   PGICEBERG_ASSIGN_OR_RETURN(
       task_reader_, FromIcebergResult(std::move(reader), "create scan task reader"));
+
+  iceberg::Log(iceberg::LogLevel::kInfo, "planned {} scan tasks across {} data files",
+               tasks_.size(), data_files_.size());
+  if (snapshot_id_.has_value()) {
+    iceberg::Log(iceberg::LogLevel::kInfo, "reading snapshot {}", *snapshot_id_);
+  }
   return Ok();
 }
 

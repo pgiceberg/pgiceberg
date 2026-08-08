@@ -20,11 +20,13 @@
 
 #include <arrow/array.h>
 #include <arrow/record_batch.h>
+#include <iceberg/logging/logger.h>
 #include <iceberg/table.h>
 
 #include "common/catalog.h"
 #include "common/datum_convert.h"
 #include "common/pg_interrupt.h"
+#include "common/pg_logger.h"
 #include "common/status.h"
 #include "engine/iceberg_scan.h"
 #include "engine/modify_state.h"
@@ -118,6 +120,7 @@ void DetachMemoryContextCleanup(ScanState* state) {
 
 Result<ScanState*> BeginScan(Relation relation, const Options& options,
                              const std::vector<int>& projected_attnums) {
+  OperationLoggerScope log_scope("scan", RelationGetRelationName(relation));
   auto state = std::make_unique<ScanState>();
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -134,6 +137,8 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options,
   state->cursor = std::make_unique<IcebergScanCursor>(
       state->table, ProjectedColumnNames(desc, projected_attnums), options.snapshot_id);
   PGICEBERG_RETURN_NOT_OK(state->cursor->Init());
+  iceberg::Log(iceberg::LogLevel::kInfo, "scan ready for {} projected columns",
+               projected_attnums.size());
 
   auto projected = ProjectedAttributeSet(projected_attnums);
   state->columns.resize(desc->natts);

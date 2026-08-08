@@ -39,6 +39,7 @@
 #include <iceberg/deletes/position_delete_index.h>
 #include <iceberg/file_io.h>
 #include <iceberg/file_format.h>
+#include <iceberg/logging/logger.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/metadata_columns.h>
 #include <iceberg/partition_spec.h>
@@ -57,6 +58,7 @@
 #include "common/datum_convert.h"
 #include "common/pg_error.h"
 #include "common/pg_interrupt.h"
+#include "common/pg_logger.h"
 #include "common/pg_memory_context.h"
 #include "common/status.h"
 #include "engine/iceberg_scan.h"
@@ -947,6 +949,7 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
     return Ok();
   }
 
+  OperationLoggerScope log_scope("append", RelationGetRelationName(relation));
   PGICEBERG_RETURN_NOT_OK(EnsureWritableOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -1071,6 +1074,7 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
   state->operation = mtstate->operation;
   state->options = options;
   Relation relation = rinfo->ri_RelationDesc;
+  OperationLoggerScope log_scope("modify", RelationGetRelationName(relation));
   state->tuple_desc = RelationGetDescr(relation);
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -1078,6 +1082,8 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
       pgiceberg::LoadIcebergTable(catalog_options, RelationGetRelationName(relation)));
   PGICEBERG_ASSIGN_OR_RETURN(state->read_table,
                              ReadTableForCurrentTransaction(options, state->table));
+  iceberg::Log(iceberg::LogLevel::kInfo, "modify begin for operation {}",
+               static_cast<int>(state->operation));
 
   PGICEBERG_ASSIGN_OR_RETURN(
       state->iceberg_schema,
