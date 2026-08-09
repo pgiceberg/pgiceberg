@@ -26,6 +26,7 @@ namespace pgiceberg::fdw {
 
 List* BuildFdwScanProjectionPrivate(RelOptInfo* baserel, List* target_list,
                                     List* scan_clauses);
+std::vector<int> FdwScanProjectionFromList(const List* projected);
 std::vector<int> FdwScanProjectionFromPlan(const ForeignScan* plan);
 
 }  // namespace pgiceberg::fdw

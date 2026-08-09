@@ -1,0 +1,498 @@
+-- Licensed under the Apache License, Version 2.0 (the "License");
+-- you may not use this file except in compliance with the License.
+-- You may obtain a copy of the License at
+--
+--     http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing, software
+-- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
+CREATE EXTENSION pgiceberg;
+\pset format unaligned
+\set VERBOSITY terse
+SET DateStyle = 'ISO, YMD';
+SET TIME ZONE 'UTC';
+DO $$
+BEGIN
+  PERFORM pgiceberg.add_catalog(
+    'pushdown_regress',
+    'sqlite',
+    '/tmp/pgiceberg_catalog_pushdown_regress.db',
+    '/tmp/pgiceberg_warehouse_pushdown_regress'
+  );
+
+  PERFORM pgiceberg.create_table(
+    'pushdown_regress',
+    'default',
+    'type_probe',
+    ARRAY['id', 'big', 'price', 'ratio', 'amount', 'label', 'flag',
+          'created', 'event_time', 'event_ts', 'event_tstz', 'payload',
+          'token'],
+    ARRAY[
+      'integer'::regtype,
+      'bigint'::regtype,
+      'double precision'::regtype,
+      'real'::regtype,
+      'numeric'::regtype,
+      'text'::regtype,
+      'boolean'::regtype,
+      'date'::regtype,
+      'time'::regtype,
+      'timestamp'::regtype,
+      'timestamptz'::regtype,
+      'bytea'::regtype,
+      'uuid'::regtype
+    ],
+    ARRAY[true, false, false, false, false, false, false,
+          false, false, false, false, false, false],
+    true
+  );
+
+  PERFORM pgiceberg.create_table(
+    'pushdown_regress',
+    'default',
+    'pruning_probe',
+    ARRAY['id', 'category', 'amount'],
+    ARRAY['bigint'::regtype, 'text'::regtype, 'double precision'::regtype],
+    ARRAY[true, false, false],
+    true
+  );
+END $$;
+CREATE SERVER pushdown_iceberg
+FOREIGN DATA WRAPPER pgiceberg
+OPTIONS (catalog 'pushdown_regress');
+CREATE FOREIGN TABLE type_probe (
+  id integer,
+  big bigint,
+  price double precision,
+  ratio real,
+  amount numeric,
+  label text,
+  flag boolean,
+  created date,
+  event_time time,
+  event_ts timestamp,
+  event_tstz timestamptz,
+  payload bytea,
+  token uuid
+)
+SERVER pushdown_iceberg
+OPTIONS (namespace 'default', table 'type_probe');
+CREATE FOREIGN TABLE pruning_probe (
+  id bigint,
+  category text,
+  amount double precision
+)
+SERVER pushdown_iceberg
+OPTIONS (namespace 'default', table 'pruning_probe');
+-- ---------------------------------------------------------------------
+-- Comparison operators
+-- ---------------------------------------------------------------------
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id = 1;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id = 1)
+  Iceberg Filter: ref(name="id") == 1
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id <> 1;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id <> 1)
+  Iceberg Filter: ref(name="id") != 1
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id < 5;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id < 5)
+  Iceberg Filter: ref(name="id") < 5
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id <= 5;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id <= 5)
+  Iceberg Filter: ref(name="id") <= 5
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id > 5;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id > 5)
+  Iceberg Filter: ref(name="id") > 5
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id >= 5;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id >= 5)
+  Iceberg Filter: ref(name="id") >= 5
+(3 rows)
+-- Commuted constant-first comparison flips the operator.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE 5 > id;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (5 > id)
+  Iceberg Filter: ref(name="id") < 5
+(3 rows)
+-- Multiple pushable clauses combine with AND.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id > 1 AND id < 10;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: ((id > 1) AND (id < 10))
+  Iceberg Filter: (ref(name="id") > 1 and ref(name="id") < 10)
+(3 rows)
+-- ---------------------------------------------------------------------
+-- Literal types
+-- ---------------------------------------------------------------------
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE big = 10000000000;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (big = '10000000000'::bigint)
+  Iceberg Filter: ref(name="big") == 10000000000
+(3 rows)
+-- int constant against a bigint column (cross-type operator).
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE big = 7;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (big = 7)
+  Iceberg Filter: ref(name="big") == 7
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE price > 1.5;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (price > '1.5'::double precision)
+  Iceberg Filter: ref(name="price") > 1.500000
+(3 rows)
+-- float4 column with a float4 constant is exact.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE ratio = 1.5::real;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (ratio = '1.5'::real)
+  Iceberg Filter: ref(name="ratio") == 1.500000
+(3 rows)
+-- numeric constant with no fractional part rescales exactly to decimal(38,0).
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE amount = 12345;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (amount = '12345'::numeric)
+  Iceberg Filter: ref(name="amount") == 12345
+(3 rows)
+-- fractional numeric cannot rescale to scale 0: not pushed.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE amount = 123.45;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (amount = 123.45)
+(2 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label = 'alpha';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label = 'alpha'::text)
+  Iceberg Filter: ref(name="label") == "alpha"
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE created = DATE '2026-01-15';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (created = '2026-01-15'::date)
+  Iceberg Filter: ref(name="created") == 20468
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE created > DATE '2026-01-15';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (created > '2026-01-15'::date)
+  Iceberg Filter: ref(name="created") > 20468
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE event_time = TIME '12:34:56';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (event_time = '12:34:56'::time without time zone)
+  Iceberg Filter: ref(name="event_time") == 45296000000
+(3 rows)
+EXPLAIN (COSTS OFF)
+SELECT id FROM type_probe WHERE event_ts >= TIMESTAMP '2026-01-15 08:00:00';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (event_ts >= '2026-01-15 08:00:00'::timestamp without time zone)
+  Iceberg Filter: ref(name="event_ts") >= 1768464000000000
+(3 rows)
+EXPLAIN (COSTS OFF)
+SELECT id FROM type_probe
+WHERE event_tstz = TIMESTAMPTZ '2026-01-15 08:00:00+00';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (event_tstz = '2026-01-15 08:00:00+00'::timestamp with time zone)
+  Iceberg Filter: ref(name="event_tstz") == 1768464000000000
+(3 rows)
+EXPLAIN (COSTS OFF)
+SELECT id FROM type_probe
+WHERE token = '11111111-2222-3333-4444-555555555555';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (token = '11111111-2222-3333-4444-555555555555'::uuid)
+  Iceberg Filter: ref(name="token") == 11111111-2222-3333-4444-555555555555
+(3 rows)
+EXPLAIN (COSTS OFF)
+SELECT id FROM type_probe WHERE payload = decode('c0ffee', 'hex');
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (payload = '\xc0ffee'::bytea)
+  Iceberg Filter: ref(name="payload") == X'C0FFEE'
+(3 rows)
+-- ---------------------------------------------------------------------
+-- NULL tests, IN lists, LIKE, booleans
+-- ---------------------------------------------------------------------
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label IS NULL;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label IS NULL)
+  Iceberg Filter: is_null(ref(name="label"))
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label IS NOT NULL;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label IS NOT NULL)
+  Iceberg Filter: not_null(ref(name="label"))
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id IN (1, 2, 3);
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id = ANY ('{1,2,3}'::integer[]))
+  Iceberg Filter: ref(name="id") in [1, 2, 3]
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id NOT IN (1, 2);
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id <> ALL ('{1,2}'::integer[]))
+  Iceberg Filter: ref(name="id") not in [1, 2]
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label IN ('alpha', 'beta');
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label = ANY ('{alpha,beta}'::text[]))
+  Iceberg Filter: ref(name="label") in ["alpha", "beta"]
+(3 rows)
+-- NULL list elements are dropped from the pushed IN list.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id IN (1, NULL);
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id = ANY ('{1,NULL}'::integer[]))
+  Iceberg Filter: ref(name="id") in [1]
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label LIKE 'al%';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label ~~ 'al%'::text)
+  Iceberg Filter: ref(name="label") startsWith "al"
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label NOT LIKE 'al%';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label !~~ 'al%'::text)
+  Iceberg Filter: ref(name="label") notStartsWith "al"
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE flag;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: flag
+  Iceberg Filter: ref(name="flag") == true
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE NOT flag;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (NOT flag)
+  Iceberg Filter: ref(name="flag") == false
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE flag = true;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: flag
+  Iceberg Filter: ref(name="flag") == true
+(3 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE flag IS TRUE;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (flag IS TRUE)
+  Iceberg Filter: ref(name="flag") == true
+(3 rows)
+-- ---------------------------------------------------------------------
+-- Collation rules for text
+-- ---------------------------------------------------------------------
+-- Ordering comparison under the default collation is not pushed...
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label < 'beta';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label < 'beta'::text)
+(2 rows)
+-- ...but is pushed under the byte-ordered C collation.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label < 'beta' COLLATE "C";
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label < 'beta'::text COLLATE "C")
+  Iceberg Filter: ref(name="label") < "beta"
+(3 rows)
+-- ---------------------------------------------------------------------
+-- Clauses that must not be pushed
+-- ---------------------------------------------------------------------
+-- Expressions over columns.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE upper(label) = 'ALPHA';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (upper(label) = 'ALPHA'::text)
+(2 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id + 1 = 2;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: ((id + 1) = 2)
+(2 rows)
+-- Column-to-column comparison.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE id = big;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (id = big)
+(2 rows)
+-- LIKE patterns that are not a plain prefix.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label LIKE '%pha';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label ~~ '%pha'::text)
+(2 rows)
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE label LIKE 'a_l%';
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (label ~~ 'a_l%'::text)
+(2 rows)
+-- IS NOT TRUE accepts NULLs; Iceberg equality does not.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE flag IS NOT TRUE;
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (flag IS NOT TRUE)
+(2 rows)
+-- Volatile comparison value.
+EXPLAIN (COSTS OFF) SELECT id FROM type_probe WHERE price > random();
+QUERY PLAN
+Foreign Scan on type_probe
+  Filter: (price > random())
+(2 rows)
+-- ---------------------------------------------------------------------
+-- Results stay correct with filters pushed down
+-- ---------------------------------------------------------------------
+-- Separate statements commit separate snapshots, producing one data file
+-- per row so metrics-based file pruning is observable.
+INSERT INTO pruning_probe VALUES (1, 'alpha', 10.0);
+INSERT INTO pruning_probe VALUES (2, 'beta', 20.0);
+INSERT INTO pruning_probe VALUES (3, NULL, 30.0);
+SELECT id, category, amount FROM pruning_probe ORDER BY id;
+id|category|amount
+1|alpha|10
+2|beta|20
+3||30
+(3 rows)
+SELECT id, category, amount FROM pruning_probe WHERE id = 2;
+id|category|amount
+2|beta|20
+(1 row)
+-- <> must not surface the NULL category row.
+SELECT id, category, amount FROM pruning_probe WHERE category <> 'alpha';
+id|category|amount
+2|beta|20
+(1 row)
+SELECT id, category, amount FROM pruning_probe WHERE category IS NULL;
+id|category|amount
+3||30
+(1 row)
+SELECT id, category, amount FROM pruning_probe WHERE id NOT IN (1, 3);
+id|category|amount
+2|beta|20
+(1 row)
+SELECT id, category, amount FROM pruning_probe WHERE category LIKE 'be%';
+id|category|amount
+2|beta|20
+(1 row)
+SELECT id, category, amount FROM pruning_probe
+WHERE id >= 2 AND category IS NOT NULL;
+id|category|amount
+2|beta|20
+(1 row)
+-- ---------------------------------------------------------------------
+-- File pruning is visible in EXPLAIN ANALYZE scan task counts
+-- ---------------------------------------------------------------------
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT id FROM pruning_probe;
+QUERY PLAN
+Foreign Scan on pruning_probe (actual rows=3.00 loops=1)
+  Iceberg Scan Tasks: 3
+(2 rows)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT id FROM pruning_probe WHERE id = 1;
+QUERY PLAN
+Foreign Scan on pruning_probe (actual rows=1.00 loops=1)
+  Filter: (id = 1)
+  Iceberg Filter: ref(name="id") == 1
+  Iceberg Scan Tasks: 1
+(4 rows)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT id FROM pruning_probe WHERE id > 2;
+QUERY PLAN
+Foreign Scan on pruning_probe (actual rows=1.00 loops=1)
+  Filter: (id > 2)
+  Iceberg Filter: ref(name="id") > 2
+  Iceberg Scan Tasks: 1
+(4 rows)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT id FROM pruning_probe WHERE category = 'beta';
+QUERY PLAN
+Foreign Scan on pruning_probe (actual rows=1.00 loops=1)
+  Filter: (category = 'beta'::text)
+  Iceberg Filter: ref(name="category") == "beta"
+  Iceberg Scan Tasks: 1
+(4 rows)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT id FROM pruning_probe WHERE category IS NULL;
+QUERY PLAN
+Foreign Scan on pruning_probe (actual rows=1.00 loops=1)
+  Filter: (category IS NULL)
+  Iceberg Filter: is_null(ref(name="category"))
+  Iceberg Scan Tasks: 1
+(4 rows)
+-- ---------------------------------------------------------------------
+-- Time-travel scans skip pushdown
+-- ---------------------------------------------------------------------
+CREATE FOREIGN TABLE pruning_probe_snapshot (
+  id bigint,
+  category text,
+  amount double precision
+)
+SERVER pushdown_iceberg
+OPTIONS (namespace 'default', table 'pruning_probe');
+DO $$
+DECLARE
+  snap bigint;
+BEGIN
+  SELECT (metadata -> 'snapshots' -> 0 ->> 'snapshot-id')::bigint
+  INTO snap
+  FROM (
+    SELECT pgiceberg.table_metadata_json(
+      'pushdown_regress',
+      'default',
+      'pruning_probe'
+    ) AS metadata
+  ) AS q;
+
+  EXECUTE format(
+    'ALTER FOREIGN TABLE pruning_probe_snapshot OPTIONS (ADD snapshot_id %L)',
+    snap::text
+  );
+END $$;
+EXPLAIN (COSTS OFF) SELECT id FROM pruning_probe_snapshot WHERE id = 1;
+QUERY PLAN
+Foreign Scan on pruning_probe_snapshot
+  Filter: (id = 1)
+(2 rows)
+SELECT id, category, amount FROM pruning_probe_snapshot WHERE id = 1;
+id|category|amount
+1|alpha|10
+(1 row)
+\set VERBOSITY default
+DROP FOREIGN TABLE pruning_probe_snapshot;
+DROP FOREIGN TABLE pruning_probe;
+DROP FOREIGN TABLE type_probe;
+DROP SERVER pushdown_iceberg;
+DROP EXTENSION pgiceberg;

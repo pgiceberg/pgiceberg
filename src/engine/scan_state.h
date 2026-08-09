@@ -12,7 +12,12 @@
 
 #pragma once
 
+#include <cstddef>
+#include <functional>
+#include <memory>
 #include <vector>
+
+#include <iceberg/type_fwd.h>
 
 #include "common/status.h"
 #include "engine/options.h"
@@ -25,10 +30,17 @@ namespace pgiceberg::engine {
 
 struct ScanState;
 
+// Best-effort builder for an Iceberg scan filter, invoked once the table (and
+// therefore its schema) is loaded.  Returning nullptr scans without a filter.
+using ScanFilterBuilder =
+    std::function<std::shared_ptr<iceberg::Expression>(const iceberg::Schema& schema)>;
+
 Result<ScanState*> BeginScan(Relation relation, const Options& options,
-                             const std::vector<int>& projected_attnums);
+                             const std::vector<int>& projected_attnums,
+                             const ScanFilterBuilder& filter_builder = {});
 Result<TupleTableSlot*> IterateScan(ScanState* state, TupleTableSlot* slot);
 void ReScan(ScanState* state);
 void EndScan(ScanState* state);
+std::size_t ScanTaskCount(const ScanState* state);
 
 }  // namespace pgiceberg::engine
