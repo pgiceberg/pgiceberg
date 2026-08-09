@@ -1,0 +1,139 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: SQL Fuzz
+
+on:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      max_queries:
+        description: SQLsmith query limit
+        required: false
+        default: "100000"
+      max_runtime:
+        description: Wall-clock limit in seconds
+        required: false
+        default: "3600"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PG_VERSION: "18.4"
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  PGICEBERG_FUZZ_MAX_QUERIES: ${{ github.event.inputs.max_queries || '100000' }}
+  PGICEBERG_FUZZ_MAX_RUNTIME: ${{ github.event.inputs.max_runtime || '3600' }}
+  PGICEBERG_FUZZ_SEED: "42"
+
+jobs:
+  sqlsmith:
+    name: SQLsmith fuzz (PostgreSQL ${{ env.PG_VERSION }})
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install CI dependencies
+        run: .github/scripts/install-ci-dependencies.sh
+
+      - name: Restore pgenv PostgreSQL cache
+        id: cache-pgenv
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-${{ github.run_id }}-v1
+          restore-keys: |
+            pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-
+
+      - name: Restore CMake build dependencies cache
+        id: cache-cmake-deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .ccache
+            build/sql-fuzz/_deps
+            build/sqlsmith
+          key: cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'scripts/build-sqlsmith.sh') }}-${{ github.run_id }}-v1
+          restore-keys: |
+            cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'scripts/build-sqlsmith.sh') }}-
+            cmake-deps-sql-fuzz-${{ runner.os }}-
+
+      - name: Install PostgreSQL with pgenv
+        run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
+
+      - name: Build SQLsmith
+        run: bash scripts/build-sqlsmith.sh
+
+      - name: Configure pgiceberg
+        run: |
+          export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
+          cmake -S . -B build/sql-fuzz -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPG_CONFIG="$(command -v pg_config)" \
+            -DPGICEBERG_ENABLE_SQL_FUZZ=ON
+
+      - name: Build pgiceberg
+        run: cmake --build build/sql-fuzz
+
+      - name: Install extension
+        run: cmake --install build/sql-fuzz --component pgiceberg
+
+      - name: Run SQLsmith fuzz campaign
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
+          export PG_CONFIG="$(command -v pg_config)"
+          export PGICEBERG_BUILD_DIR="${{ github.workspace }}/build/sql-fuzz"
+          export PGICEBERG_SQLSMITH="${{ github.workspace }}/build/sqlsmith/sqlsmith"
+          bash test/fuzz/run_sqlsmith.sh \
+            --max-queries="${PGICEBERG_FUZZ_MAX_QUERIES}" \
+            --seed="${PGICEBERG_FUZZ_SEED}" \
+            --max-runtime="${PGICEBERG_FUZZ_MAX_RUNTIME}" \
+            --build-dir="${PGICEBERG_BUILD_DIR}" \
+            --pg-config="${PG_CONFIG}" \
+            --sqlsmith="${PGICEBERG_SQLSMITH}"
+
+      - name: Upload fuzz artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlsmith-fuzz-${{ env.PG_VERSION }}
+          path: |
+            build/sql-fuzz/test/fuzz/tmp_check/log
+            build/sql-fuzz/test/fuzz/tmp_check/postmaster.crashed
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Save CMake build dependencies cache
+        if: always() && steps.cache-cmake-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ccache
+            build/sql-fuzz/_deps
+            build/sqlsmith
+          key: cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'scripts/build-sqlsmith.sh') }}-${{ github.run_id }}-v1
+
+      - name: Save pgenv PostgreSQL cache
+        if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-${{ github.run_id }}-v1
