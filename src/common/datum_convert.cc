@@ -27,6 +27,7 @@
 #include <arrow/type.h>
 #include <arrow/util/decimal.h>
 
+#include "common/constants.h"
 #include "common/status.h"
 
 extern "C" {

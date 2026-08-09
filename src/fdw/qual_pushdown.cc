@@ -33,6 +33,8 @@
 #include <utility>
 #include <vector>
 
+#include "common/constants.h"
+
 extern "C" {
 #include "access/htup_details.h"
 #include "catalog/pg_collation_d.h"
@@ -54,10 +56,6 @@ extern "C" {
 namespace pgiceberg::fdw {
 namespace {
 
-// Days between the Unix epoch (1970-01-01) and PostgreSQL's date epoch
-// (2000-01-01).
-constexpr std::int64_t kPostgresUnixEpochOffsetDays = 10957;
-constexpr std::int64_t kPostgresUnixEpochOffsetMicros = 946684800000000LL;
 constexpr int kMaxIcebergDecimalPrecision = 38;
 
 enum class PgComparison : std::uint8_t {
