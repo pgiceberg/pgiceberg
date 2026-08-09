@@ -21,6 +21,7 @@
 #include <avro/DataFile.hh>
 #include <avro/Generic.hh>
 
+#include "common/constants.h"
 #include "common/datum_convert.h"
 #include "common/fdw_path.h"
 #include "common/pg_error.h"
