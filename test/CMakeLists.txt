@@ -99,19 +99,16 @@ if(PGICEBERG_ENABLE_SQL_FUZZ)
   set(PGICEBERG_SQLSMITH "${PROJECT_BINARY_DIR}/sqlsmith/sqlsmith")
   set(PGICEBERG_FUZZ_RUNNER "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/run_sqlsmith.sh")
 
-  add_test(
-    NAME sqlsmith_smoke
-    COMMAND "${PGICEBERG_FUZZ_RUNNER}"
-            --max-queries=500
-            --seed=1
-            --max-runtime=300
-            --build-dir="${PROJECT_BINARY_DIR}"
-            --pg-config="${PostgreSQL_PG_CONFIG}"
-            --sqlsmith="${PGICEBERG_SQLSMITH}")
-  set_tests_properties(
-    sqlsmith_smoke
-    PROPERTIES LABELS "fuzz"
-               ENVIRONMENT
-               "PG_CONFIG=${PostgreSQL_PG_CONFIG};PGICEBERG_BUILD_DIR=${PROJECT_BINARY_DIR};PGICEBERG_SQLSMITH=${PGICEBERG_SQLSMITH}"
-               WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+  add_test(NAME sqlsmith_smoke
+           COMMAND "${PGICEBERG_FUZZ_RUNNER}" --max-queries=500 --seed=1
+                   --max-runtime=300 --build-dir="${PROJECT_BINARY_DIR}"
+                   --pg-config="${PostgreSQL_PG_CONFIG}"
+                   --sqlsmith="${PGICEBERG_SQLSMITH}")
+  set_tests_properties(sqlsmith_smoke
+                       PROPERTIES LABELS
+                                  "fuzz"
+                                  ENVIRONMENT
+                                  "PG_CONFIG=${PostgreSQL_PG_CONFIG};PGICEBERG_BUILD_DIR=${PROJECT_BINARY_DIR};PGICEBERG_SQLSMITH=${PGICEBERG_SQLSMITH}"
+                                  WORKING_DIRECTORY
+                                  "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
 endif()
