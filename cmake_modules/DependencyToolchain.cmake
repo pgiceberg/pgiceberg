@@ -78,8 +78,10 @@ function(resolve_iceberg_dependency out_target)
 
   # iceberg-cpp generates iceberg/version.h relative to the top-level build
   # directory. When it is embedded with FetchContent, expose that generated
-  # header to the data target that includes it for deletion-vector writers.
-  foreach(candidate iceberg_data_static iceberg_data_shared)
+  # header to the targets that include it (the data target for deletion-vector
+  # writers and the REST catalog target).
+  foreach(candidate iceberg_data_static iceberg_data_shared iceberg_rest_static
+                    iceberg_rest_shared)
     if(TARGET ${candidate})
       target_include_directories(${candidate} PRIVATE "${CMAKE_BINARY_DIR}/src")
     endif()
