@@ -44,6 +44,12 @@ jobs:
       - name: Install CI dependencies
         run: .github/scripts/install-ci-dependencies.sh
 
+      - name: Install REST catalog dependencies
+        # iceberg-cpp's REST toolchain builds cpr against the system libcurl and
+        # calls find_package(CURL REQUIRED), matching apache/iceberg-cpp's own
+        # REST CI. Install the libcurl development package so configure succeeds.
+        run: sudo apt-get install -y libcurl4-openssl-dev
+
       - name: Restore pgenv PostgreSQL cache
         id: cache-pgenv
         uses: actions/cache/restore@v4

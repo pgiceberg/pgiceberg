@@ -64,8 +64,11 @@ function(resolve_iceberg_dependency out_target)
   set(ICEBERG_BUILD_TESTS
       OFF
       CACHE BOOL "" FORCE)
+  # iceberg-cpp's REST toolchain builds cpr against the system libcurl and calls
+  # find_package(CURL REQUIRED), so the REST catalog build needs a system
+  # libcurl development package (for example libcurl4-openssl-dev).
   set(CPR_USE_SYSTEM_CURL
-      OFF
+      ON
       CACHE BOOL "" FORCE)
 
   fetchcontent_declare(Iceberg
