@@ -37,10 +37,10 @@
 #include <iceberg/update/update_properties.h>
 
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
-#include <unordered_map>
+#  include <unordered_map>
 
-#include <iceberg/catalog/rest/catalog_properties.h>
-#include <iceberg/catalog/rest/rest_catalog.h>
+#  include <iceberg/catalog/rest/catalog_properties.h>
+#  include <iceberg/catalog/rest/rest_catalog.h>
 #endif
 
 #include "common/status.h"
@@ -114,11 +114,12 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
 }
 
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
-Result<std::shared_ptr<iceberg::Catalog>> CreateRestCatalog(const CatalogOptions& options) {
+Result<std::shared_ptr<iceberg::Catalog>> CreateRestCatalog(
+    const CatalogOptions& options) {
   if (options.catalog_uri.empty()) {
-    return std::unexpected(
-        MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
-                  "pgiceberg option \"catalog_uri\" is required for REST catalog access"));
+    return std::unexpected(MakeError(
+        ERRCODE_FDW_INVALID_OPTION_NAME,
+        "pgiceberg option \"catalog_uri\" is required for REST catalog access"));
   }
   if (options.warehouse.empty()) {
     return std::unexpected(
@@ -130,7 +131,8 @@ Result<std::shared_ptr<iceberg::Catalog>> CreateRestCatalog(const CatalogOptions
   // explicit io-impl is configured, so a local warehouse path selects the Arrow
   // local FileIO that pgiceberg registers at extension load.
   std::unordered_map<std::string, std::string> properties{
-      {std::string(iceberg::rest::RestCatalogProperties::kUri.key()), options.catalog_uri},
+      {std::string(iceberg::rest::RestCatalogProperties::kUri.key()),
+       options.catalog_uri},
       {std::string(iceberg::rest::RestCatalogProperties::kName.key()),
        options.catalog_name},
       {std::string(iceberg::rest::RestCatalogProperties::kWarehouse.key()),

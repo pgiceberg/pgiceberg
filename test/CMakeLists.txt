@@ -100,11 +100,13 @@ if(POSTGRESQL_REGRESS)
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tmp_check_rest")
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/run_regress.cmake.in"
                    "${CMAKE_CURRENT_BINARY_DIR}/run_regress_rest.cmake" @ONLY)
-    add_test(NAME regress_rest COMMAND "${CMAKE_COMMAND}" -P
-                                       "${CMAKE_CURRENT_BINARY_DIR}/run_regress_rest.cmake")
+    add_test(NAME regress_rest
+             COMMAND "${CMAKE_COMMAND}" -P
+                     "${CMAKE_CURRENT_BINARY_DIR}/run_regress_rest.cmake")
     set_tests_properties(regress_rest
-                         PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/regress"
-                                    ENVIRONMENT "PG_REGRESS_SOCK_DIR=/tmp")
+                         PROPERTIES WORKING_DIRECTORY
+                                    "${CMAKE_CURRENT_BINARY_DIR}/regress" ENVIRONMENT
+                                    "PG_REGRESS_SOCK_DIR=/tmp")
   endif()
 else()
   message(STATUS "pg_regress not found; regression tests are not registered")
