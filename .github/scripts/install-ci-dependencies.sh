@@ -50,7 +50,10 @@ case "$(uname -s)" in
       libpam0g-dev \
       libperl-dev \
       libpq-dev \
+      libpqxx-dev \
+      libboost-regex-dev \
       libreadline-dev \
+      libsqlite3-dev \
       libssl-dev \
       libxml2-dev \
       libxslt1-dev \
