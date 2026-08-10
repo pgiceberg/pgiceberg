@@ -86,11 +86,13 @@ jobs:
         run: |
           mkdir -p "${PGICEBERG_REST_WAREHOUSE}"
           chmod 777 "${PGICEBERG_REST_WAREHOUSE}"
-          # Run the server as the runner's uid/gid so metadata and data files in
-          # the shared warehouse are owned by the same user whether the server or
-          # the pgiceberg client (the temporary PostgreSQL backend) writes them.
+          # The pgiceberg client (the temporary PostgreSQL backend) and the
+          # containerized REST server both read and write the bind-mounted
+          # warehouse. Run the server as root so it can write table metadata into
+          # the client-created table directories; the metadata files it writes are
+          # world-readable, so pgiceberg can still load them.
           docker run -d --name iceberg-rest \
-            --user "$(id -u):$(id -g)" \
+            --user 0:0 \
             -p 8181:8181 \
             -e CATALOG_CATALOG__IMPL=org.apache.iceberg.jdbc.JdbcCatalog \
             -e CATALOG_URI=jdbc:sqlite:/tmp/pgiceberg_rest_catalog.db \
