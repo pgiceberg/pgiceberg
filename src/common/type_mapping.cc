@@ -149,12 +149,12 @@ Result<std::string> IcebergTypeToSql(const iceberg::Type& type) {
     case iceberg::TypeId::kGeography:
       break;
   }
-  return std::unexpected(MakeError(
-      ERRCODE_FEATURE_NOT_SUPPORTED,
-      "Iceberg type " + type.ToString() +
-          " is not supported for PostgreSQL foreign table schema mapping",
-      "Exclude the column from the import, or map it manually with a supported "
-      "PostgreSQL type."));
+  return std::unexpected(
+      MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                "Iceberg type " + type.ToString() +
+                    " is not supported for PostgreSQL foreign table schema mapping",
+                "Exclude the column from the import, or map it manually with a supported "
+                "PostgreSQL type."));
 }
 
 std::string ArrowTypeToSql(const arrow::DataType& type) {
