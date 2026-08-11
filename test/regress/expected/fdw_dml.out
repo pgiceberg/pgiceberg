@@ -319,12 +319,26 @@ RETURNING id, event_ts;
 id|event_ts
 1|2026-07-07 08:09:10.123456
 (1 row)
+-- The default policy narrows nanosecond columns to microseconds and emits one
+-- NOTICE per scan naming each nanosecond column.
+SHOW pgiceberg.timestamp_ns_on_loss;
+pgiceberg.timestamp_ns_on_loss
+truncate
+(1 row)
 SELECT id, event_ts
 FROM pgiceberg_timestamp_ns_fixture
 ORDER BY id;
+NOTICE:  Iceberg column "event_ts" has nanosecond precision; values are truncated to microseconds for PostgreSQL
 id|event_ts
 1|2026-07-07 08:09:10.123456
 (1 row)
+-- The error policy rejects reads of nanosecond columns instead of narrowing.
+SET pgiceberg.timestamp_ns_on_loss = 'error';
+SELECT id, event_ts
+FROM pgiceberg_timestamp_ns_fixture
+ORDER BY id;
+ERROR:  Iceberg nanosecond timestamp cannot be read into PostgreSQL without losing precision
+RESET pgiceberg.timestamp_ns_on_loss;
 \set VERBOSITY default
 DROP FOREIGN TABLE pgiceberg_timestamp_ns_fixture;
 DROP FOREIGN TABLE pgiceberg_range_fixture_smallint;

@@ -10,6 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "common/datum_convert.h"
 #include "common/pg_logger.h"
 #include "engine/modify_state.h"
 #include "logical/logical.h"
@@ -139,6 +140,7 @@ void _PG_init(void) {
   EnsureIcebergRegistrations();
   pgiceberg::RegisterIcebergLoggingGucs();
   pgiceberg::InstallDefaultIcebergLogger();
+  pgiceberg::RegisterTimestampPrecisionGucs();
   RegisterArrowThreadPoolGucs();
   pgiceberg::engine::RegisterTransactionCallbacks();
   pgiceberg::tableam::RegisterTableAmHooks();

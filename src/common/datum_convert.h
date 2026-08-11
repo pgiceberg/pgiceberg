@@ -40,4 +40,12 @@ Status AppendDatum(arrow::ArrayBuilder& builder, Datum value, Oid pg_type, bool 
 
 Result<bool> DatumEquals(Datum left, Datum right, Oid pg_type);
 
+// Registers the pgiceberg.timestamp_ns_on_loss GUC.  Must be called once from
+// _PG_init.
+void RegisterTimestampPrecisionGucs();
+
+// Returns true when reading an Iceberg nanosecond timestamp should raise an
+// error instead of narrowing to PostgreSQL microsecond precision.
+bool TimestampNsOnLossIsError();
+
 }  // namespace pgiceberg

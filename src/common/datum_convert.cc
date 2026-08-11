@@ -36,6 +36,7 @@ extern "C" {
 #include "utils/fmgrprotos.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
+#include "utils/guc.h"
 #include "utils/numeric.h"
 #include "utils/timestamp.h"
 #include "utils/uuid.h"
@@ -44,6 +45,49 @@ extern "C" {
 
 namespace pgiceberg {
 namespace {
+
+// Policy applied when an Iceberg timestamp_ns / timestamptz_ns (or a
+// nanosecond time) value is read into a PostgreSQL column.  PostgreSQL's
+// temporal types only hold microsecond resolution, so nanosecond values cannot
+// round-trip losslessly.  Controlled by pgiceberg.timestamp_ns_on_loss.
+enum TimestampNsLossPolicy : int {
+  kTimestampNsTruncate = 0,
+  kTimestampNsError = 1,
+};
+
+int g_timestamp_ns_on_loss = kTimestampNsTruncate;
+
+const struct config_enum_entry kTimestampNsOnLossOptions[] = {
+    {"truncate", kTimestampNsTruncate, false},
+    {"error", kTimestampNsError, false},
+    {nullptr, 0, false},
+};
+
+// Floor division that rounds toward negative infinity, unlike C++ integer
+// division which truncates toward zero.  Nanosecond timestamps before the Unix
+// epoch are negative, and truncation toward zero would make narrowing
+// non-monotonic (e.g. -1500ns would map to -1us instead of -2us).
+std::int64_t FloorDiv(std::int64_t value, std::int64_t divisor) {
+  const std::int64_t quotient = value / divisor;
+  const std::int64_t remainder = value % divisor;
+  if (remainder != 0 && ((remainder < 0) != (divisor < 0))) {
+    return quotient - 1;
+  }
+  return quotient;
+}
+
+bool IsNanosecondTemporalArray(const arrow::Array& array) {
+  switch (array.type_id()) {
+    case arrow::Type::TIMESTAMP:
+      return static_cast<const arrow::TimestampType&>(*array.type()).unit() ==
+             arrow::TimeUnit::NANO;
+    case arrow::Type::TIME64:
+      return static_cast<const arrow::Time64Type&>(*array.type()).unit() ==
+             arrow::TimeUnit::NANO;
+    default:
+      return false;
+  }
+}
 
 Result<std::optional<std::int64_t>> IntegerValue(const arrow::Array& array,
                                                  std::int64_t offset) {
@@ -187,7 +231,7 @@ std::int64_t ScaleToMicros(std::int64_t value, arrow::TimeUnit::type unit) {
     case arrow::TimeUnit::MICRO:
       return value;
     case arrow::TimeUnit::NANO:
-      return value / 1000LL;
+      return FloorDiv(value, 1000LL);
   }
   return value;
 }
@@ -239,6 +283,17 @@ Result<Datum> ConvertValue(const arrow::Array& array, std::int64_t offset, Oid p
   }
 
   is_null = false;
+  // PostgreSQL timestamp/time hold microsecond resolution, so an Iceberg
+  // nanosecond value is narrowed on read.  Under the "error" policy we refuse
+  // the read outright rather than silently dropping the sub-microsecond digits.
+  if (g_timestamp_ns_on_loss == kTimestampNsError && IsNanosecondTemporalArray(array)) {
+    return std::unexpected(MakeError(
+        ERRCODE_FEATURE_NOT_SUPPORTED,
+        "Iceberg nanosecond timestamp cannot be read into PostgreSQL without "
+        "losing precision",
+        "Set pgiceberg.timestamp_ns_on_loss = 'truncate' to narrow values to "
+        "microsecond precision."));
+  }
   switch (pg_type) {
     case INT2OID: {
       PGICEBERG_ASSIGN_OR_RETURN(auto value, IntegerValue(array, offset));
@@ -519,5 +574,19 @@ Result<bool> DatumEquals(Datum left, Datum right, Oid pg_type) {
                                        "unsupported pgiceberg row identity type"));
   }
 }
+
+void RegisterTimestampPrecisionGucs() {
+  DefineCustomEnumVariable(
+      "pgiceberg.timestamp_ns_on_loss",
+      "Policy when reading Iceberg nanosecond timestamps into PostgreSQL.",
+      "PostgreSQL timestamps hold microsecond precision; nanosecond Iceberg "
+      "values cannot be represented exactly. 'truncate' narrows values toward "
+      "negative infinity (a NOTICE is emitted per scan); 'error' rejects the "
+      "read.",
+      &g_timestamp_ns_on_loss, kTimestampNsTruncate, kTimestampNsOnLossOptions,
+      PGC_USERSET, 0, nullptr, nullptr, nullptr);
+}
+
+bool TimestampNsOnLossIsError() { return g_timestamp_ns_on_loss == kTimestampNsError; }
 
 }  // namespace pgiceberg
