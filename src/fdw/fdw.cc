@@ -402,7 +402,8 @@ pgiceberg::Result<List*> PgIcebergImportForeignSchemaImpl(ImportForeignSchemaStm
     }
     const auto& field = fields[i];
     const std::string field_name(field.name());
-    const auto sql_type = pgiceberg::IcebergTypeToSql(*field.type());
+    PGICEBERG_ASSIGN_OR_RETURN(const auto sql_type,
+                               pgiceberg::IcebergTypeToSql(*field.type()));
     appendStringInfo(sql, "%s %s", quote_identifier(field_name.c_str()),
                      sql_type.c_str());
   }

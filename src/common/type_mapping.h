@@ -29,7 +29,7 @@ namespace pgiceberg {
 Result<std::shared_ptr<iceberg::Type>> PostgresTypeToIcebergType(Oid pg_type,
                                                                  int32 typmod = -1);
 
-std::string IcebergTypeToSql(const iceberg::Type& type);
+Result<std::string> IcebergTypeToSql(const iceberg::Type& type);
 std::string ArrowTypeToSql(const arrow::DataType& type);
 
 }  // namespace pgiceberg
