@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <iceberg/arrow/arrow_io_internal.h>
+#include <iceberg/catalog.h>
 #include <iceberg/catalog/sql/sql_catalog.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/manifest/manifest_list.h>
@@ -34,6 +35,13 @@
 #include <iceberg/table_properties.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/update_properties.h>
+
+#ifdef PGICEBERG_ENABLE_REST_CATALOG
+#  include <unordered_map>
+
+#  include <iceberg/catalog/rest/catalog_properties.h>
+#  include <iceberg/catalog/rest/rest_catalog.h>
+#endif
 
 #include "common/status.h"
 
@@ -101,11 +109,62 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
 
   return std::unexpected(
       MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
-                "pgiceberg currently supports only catalog_type 'sql' or 'sqlite' for "
-                "Iceberg table access"));
+                "pgiceberg currently supports only catalog_type 'sql', 'sqlite', or "
+                "'rest' for Iceberg table access"));
 }
 
-Status EnsureNamespaceExists(std::shared_ptr<iceberg::sql::SqlCatalog>& catalog,
+#ifdef PGICEBERG_ENABLE_REST_CATALOG
+Result<std::shared_ptr<iceberg::Catalog>> CreateRestCatalog(
+    const CatalogOptions& options) {
+  if (options.catalog_uri.empty()) {
+    return std::unexpected(MakeError(
+        ERRCODE_FDW_INVALID_OPTION_NAME,
+        "pgiceberg option \"catalog_uri\" is required for REST catalog access"));
+  }
+  if (options.warehouse.empty()) {
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
+                  "pgiceberg option \"warehouse\" is required for REST catalog access"));
+  }
+
+  // iceberg-cpp resolves the catalog FileIO from the warehouse location when no
+  // explicit io-impl is configured, so a local warehouse path selects the Arrow
+  // local FileIO that pgiceberg registers at extension load.
+  std::unordered_map<std::string, std::string> properties{
+      {std::string(iceberg::rest::RestCatalogProperties::kUri.key()),
+       options.catalog_uri},
+      {std::string(iceberg::rest::RestCatalogProperties::kName.key()),
+       options.catalog_name},
+      {std::string(iceberg::rest::RestCatalogProperties::kWarehouse.key()),
+       options.warehouse},
+  };
+  auto config = iceberg::rest::RestCatalogProperties::FromMap(std::move(properties));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto session_catalog,
+      FromIcebergResult(iceberg::rest::RestCatalog::Make(config), "create REST catalog"));
+  return FromIcebergResult(session_catalog->AsCatalog(),
+                           "open default REST catalog session");
+}
+#endif
+
+Result<std::shared_ptr<iceberg::Catalog>> CreateCatalog(const CatalogOptions& options,
+                                                        bool require_warehouse) {
+  if (options.catalog_type == "rest") {
+#ifdef PGICEBERG_ENABLE_REST_CATALOG
+    return CreateRestCatalog(options);
+#else
+    return std::unexpected(MakeError(
+        ERRCODE_FEATURE_NOT_SUPPORTED, "pgiceberg REST catalog support is not enabled",
+        "Rebuild pgiceberg with -DPGICEBERG_ENABLE_REST_CATALOG=ON to use "
+        "catalog_type 'rest'."));
+#endif
+  }
+  PGICEBERG_ASSIGN_OR_RETURN(auto sql_catalog,
+                             CreateSqlCatalog(options, require_warehouse));
+  return std::shared_ptr<iceberg::Catalog>(std::move(sql_catalog));
+}
+
+Status EnsureNamespaceExists(std::shared_ptr<iceberg::Catalog>& catalog,
                              const iceberg::Namespace& ns) {
   PGICEBERG_ASSIGN_OR_RETURN(
       auto exists, FromIcebergResult(catalog->NamespaceExists(ns), "check namespace"));
@@ -232,7 +291,7 @@ Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
 
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name) {
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options, true));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateCatalog(options, true));
   return FromIcebergResult(catalog->LoadTable(TableIdentifierFor(options, relation_name)),
                            "load Iceberg table");
 }
@@ -333,7 +392,7 @@ Result<TableFilesSummary> LoadIcebergTableFilesSummary(
 Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
     const CatalogOptions& options, const char* relation_name,
     const std::string& metadata_file_location, bool drop_if_exists) {
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options, false));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateCatalog(options, false));
   const auto ident = TableIdentifierFor(options, relation_name);
   PGICEBERG_RETURN_NOT_OK(EnsureNamespaceExists(catalog, ident.ns));
 
@@ -358,7 +417,7 @@ Result<std::shared_ptr<iceberg::Table>> CreateUnpartitionedIcebergTable(
     int format_version, bool drop_if_exists) {
   PGICEBERG_RETURN_NOT_OK(ValidateFormatVersion(format_version));
   PGICEBERG_RETURN_NOT_OK(EnsureTableName(options));
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options, true));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateCatalog(options, true));
   const auto ident = TableIdentifierFor(options, options.table.c_str());
   PGICEBERG_RETURN_NOT_OK(EnsureNamespaceExists(catalog, ident.ns));
 
@@ -398,7 +457,7 @@ Result<std::shared_ptr<iceberg::Table>> CreateUnpartitionedIcebergTable(
 
 Status DropIcebergTable(const CatalogOptions& options) {
   PGICEBERG_RETURN_NOT_OK(EnsureTableName(options));
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateSqlCatalog(options, true));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateCatalog(options, true));
   const auto ident = TableIdentifierFor(options, options.table.c_str());
   PGICEBERG_ASSIGN_OR_RETURN(
       auto exists, FromIcebergResult(catalog->TableExists(ident), "check table"));

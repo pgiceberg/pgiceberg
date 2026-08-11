@@ -1,0 +1,199 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: REST Catalog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PG_VERSION: "18.4"
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  # Shared warehouse for the pgiceberg client (local Arrow FileIO) and the
+  # containerized REST catalog server. It is bind-mounted at the same absolute
+  # path inside the container so metadata and data file locations resolve on
+  # both sides.
+  PGICEBERG_REST_WAREHOUSE: /tmp/pgiceberg_rest_warehouse
+
+jobs:
+  rest-catalog:
+    name: REST catalog integration
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install CI dependencies
+        run: .github/scripts/install-ci-dependencies.sh
+
+      - name: Install REST catalog dependencies
+        # iceberg-cpp's REST toolchain builds cpr against the system libcurl and
+        # calls find_package(CURL REQUIRED), matching apache/iceberg-cpp's own
+        # REST CI. Install the libcurl development package so configure succeeds.
+        run: sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Restore pgenv PostgreSQL cache
+        id: cache-pgenv
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-${{ github.run_id }}-v1
+          restore-keys: |
+            pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-
+
+      - name: Restore CMake build dependencies cache
+        id: cache-cmake-deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .ccache
+            build/rest/_deps
+          key: cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          restore-keys: |
+            cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-
+            cmake-deps-rest-${{ runner.os }}-
+
+      - name: Write dependency cache summary
+        if: always()
+        env:
+          CACHE_CONTEXT: ${{ runner.os }} / PostgreSQL ${{ env.PG_VERSION }}
+          PGENV_CACHE_HIT: ${{ steps.cache-pgenv.outputs.cache-hit }}
+          CMAKE_DEPS_CACHE_HIT: ${{ steps.cache-cmake-deps.outputs.cache-hit }}
+        run: bash .github/scripts/write-cache-summary.sh
+
+      - name: Install PostgreSQL with pgenv
+        run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
+
+      - name: Start Iceberg REST catalog server
+        run: |
+          mkdir -p "${PGICEBERG_REST_WAREHOUSE}"
+          chmod 777 "${PGICEBERG_REST_WAREHOUSE}"
+          # The pgiceberg client (the temporary PostgreSQL backend) and the
+          # containerized REST server both read and write the bind-mounted
+          # warehouse. Run the server as root so it can write table metadata into
+          # the client-created table directories; the metadata files it writes are
+          # world-readable, so pgiceberg can still load them.
+          docker run -d --name iceberg-rest \
+            --user 0:0 \
+            -p 8181:8181 \
+            -e CATALOG_CATALOG__IMPL=org.apache.iceberg.jdbc.JdbcCatalog \
+            -e CATALOG_URI=jdbc:sqlite:/tmp/pgiceberg_rest_catalog.db \
+            -e CATALOG_WAREHOUSE="file://${PGICEBERG_REST_WAREHOUSE}" \
+            -v "${PGICEBERG_REST_WAREHOUSE}:${PGICEBERG_REST_WAREHOUSE}" \
+            apache/iceberg-rest-fixture:latest
+
+      - name: Wait for REST catalog server
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --silent --fail http://127.0.0.1:8181/v1/config >/dev/null; then
+              echo "REST catalog is ready"
+              exit 0
+            fi
+            echo "Waiting for REST catalog... (attempt ${attempt}/60)"
+            sleep 2
+          done
+          echo "REST catalog failed to start within timeout" >&2
+          docker logs iceberg-rest || true
+          exit 1
+
+      - name: Configure
+        run: |
+          export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
+          cmake -S . -B build/rest -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DPG_CONFIG="$(command -v pg_config)" \
+            -DPGICEBERG_ENABLE_REST_CATALOG=ON
+
+      - name: Build
+        run: cmake --build build/rest
+
+      - name: Write ccache summary
+        if: always()
+        run: |
+          {
+            echo "### ccache statistics"
+            echo
+            echo '```'
+            ccache -s || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Install extension
+        run: cmake --install build/rest --component pgiceberg
+
+      - name: Run REST catalog regression test
+        run: ctest --test-dir build/rest --output-on-failure -R regress_rest
+
+      - name: Show REST catalog server logs
+        if: failure()
+        run: docker logs iceberg-rest || true
+
+      - name: Show regression artifacts
+        if: failure()
+        run: |
+          for file in \
+            build/rest/test/regress/regression.diffs \
+            build/rest/test/regress/regression.out \
+            build/rest/test/regress/log/initdb.log \
+            build/rest/test/regress/log/postmaster.log \
+            build/rest/Testing/Temporary/LastTest.log; do
+            if [[ -f "${file}" ]]; then
+              echo "::group::${file}"
+              cat "${file}"
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: Upload regression artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-rest-pg${{ env.PG_VERSION }}
+          path: |
+            build/rest/test/regress/regression.diffs
+            build/rest/test/regress/regression.out
+            build/rest/test/regress/log
+            build/rest/test/regress/results
+            build/rest/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop REST catalog server
+        if: always()
+        run: docker rm -f iceberg-rest || true
+
+      - name: Save CMake build dependencies cache
+        if: always() && steps.cache-cmake-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ccache
+            build/rest/_deps
+          key: cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+
+      - name: Save pgenv PostgreSQL cache
+        if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.pgenv
+          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-${{ github.run_id }}-v1

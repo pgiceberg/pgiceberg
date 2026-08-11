@@ -73,6 +73,7 @@ if(POSTGRESQL_REGRESS)
     file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
          "extension_control_path = '${CMAKE_CURRENT_BINARY_DIR}:$system'\n")
   endif()
+  set(PGICEBERG_REGRESS_TMP_INSTANCE "${CMAKE_CURRENT_BINARY_DIR}/tmp_check")
   configure_file("${CMAKE_CURRENT_SOURCE_DIR}/run_regress.cmake.in"
                  "${CMAKE_CURRENT_BINARY_DIR}/run_regress.cmake" @ONLY)
   set_property(DIRECTORY
@@ -87,6 +88,26 @@ if(POSTGRESQL_REGRESS)
   set_tests_properties(regress_fdw
                        PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/regress"
                                   ENVIRONMENT "PG_REGRESS_SOCK_DIR=/tmp")
+
+  # The REST catalog regression test needs both a pgiceberg build that links
+  # iceberg-cpp's REST catalog and a live REST catalog server (deployed in CI).
+  # It runs in its own temporary PostgreSQL instance so it does not collide with
+  # the default schedule, whose fdw_options expectations assume REST is disabled.
+  if(PGICEBERG_ENABLE_REST_CATALOG)
+    set(PGICEBERG_REGRESS_TESTS fdw_rest_catalog)
+    set(PGICEBERG_REGRESS_DATASETS "")
+    set(PGICEBERG_REGRESS_TMP_INSTANCE "${CMAKE_CURRENT_BINARY_DIR}/tmp_check_rest")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tmp_check_rest")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/run_regress.cmake.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/run_regress_rest.cmake" @ONLY)
+    add_test(NAME regress_rest
+             COMMAND "${CMAKE_COMMAND}" -P
+                     "${CMAKE_CURRENT_BINARY_DIR}/run_regress_rest.cmake")
+    set_tests_properties(regress_rest
+                         PROPERTIES WORKING_DIRECTORY
+                                    "${CMAKE_CURRENT_BINARY_DIR}/regress" ENVIRONMENT
+                                    "PG_REGRESS_SOCK_DIR=/tmp")
+  endif()
 else()
   message(STATUS "pg_regress not found; regression tests are not registered")
 endif()

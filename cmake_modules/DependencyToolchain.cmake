@@ -64,8 +64,11 @@ function(resolve_iceberg_dependency out_target)
   set(ICEBERG_BUILD_TESTS
       OFF
       CACHE BOOL "" FORCE)
+  # iceberg-cpp's REST toolchain builds cpr against the system libcurl and calls
+  # find_package(CURL REQUIRED), so the REST catalog build needs a system
+  # libcurl development package (for example libcurl4-openssl-dev).
   set(CPR_USE_SYSTEM_CURL
-      OFF
+      ON
       CACHE BOOL "" FORCE)
 
   fetchcontent_declare(Iceberg
@@ -75,8 +78,10 @@ function(resolve_iceberg_dependency out_target)
 
   # iceberg-cpp generates iceberg/version.h relative to the top-level build
   # directory. When it is embedded with FetchContent, expose that generated
-  # header to the data target that includes it for deletion-vector writers.
-  foreach(candidate iceberg_data_static iceberg_data_shared)
+  # header to the targets that include it (the data target for deletion-vector
+  # writers and the REST catalog target).
+  foreach(candidate iceberg_data_static iceberg_data_shared iceberg_rest_static
+                    iceberg_rest_shared)
     if(TARGET ${candidate})
       target_include_directories(${candidate} PRIVATE "${CMAKE_BINARY_DIR}/src")
     endif()

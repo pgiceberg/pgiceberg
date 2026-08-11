@@ -269,18 +269,44 @@ metadata utility functions for Iceberg metadata file contents.
 
 ## REST Catalogs
 
-REST catalog support is optional and disabled by default. Build with
-`-DPGICEBERG_ENABLE_REST_CATALOG=ON` before using a REST catalog server:
+REST catalog support is optional and disabled by default because it links the
+iceberg-cpp REST catalog (and its HTTP/TLS dependencies). Build with
+`-DPGICEBERG_ENABLE_REST_CATALOG=ON` to enable it:
+
+```sh
+cmake -S . -B "$BUILD_DIR" -GNinja -DPG_CONFIG="$(command -v pg_config)" \
+  -DPGICEBERG_ENABLE_REST_CATALOG=ON
+cmake --build "$BUILD_DIR"
+```
+
+With that build, `catalog_type 'rest'` loads, creates, and writes Iceberg tables
+through an Iceberg REST catalog server. Register a REST-backed catalog and use it
+exactly like a SQL catalog:
 
 ```sql
+SELECT pgiceberg.add_catalog(
+  'rest',
+  'rest',
+  'http://127.0.0.1:8181',
+  '/tmp/pgiceberg_warehouse'
+);
+
 CREATE SERVER pgiceberg_rest_server
 FOREIGN DATA WRAPPER pgiceberg
-OPTIONS (
-  catalog_type 'rest',
-  catalog_uri 'http://127.0.0.1:8181',
-  warehouse 'dev'
-);
+OPTIONS (catalog 'rest');
 ```
+
+`catalog_uri` must point at the REST catalog endpoint. `warehouse` is required:
+iceberg-cpp resolves the catalog `FileIO` from the warehouse location, so a local
+warehouse path selects pgiceberg's local Arrow `FileIO`. The REST catalog server
+and pgiceberg must be able to reach the table data and metadata files at the same
+locations.
+
+A dedicated CI job (`.github/workflows/rest-catalog.yml`) builds pgiceberg with
+`-DPGICEBERG_ENABLE_REST_CATALOG=ON`, deploys the upstream
+`apache/iceberg-rest-fixture` REST catalog server (the same fixture apache/iceberg-cpp
+uses for its REST integration tests), and runs the `fdw_rest_catalog` regression
+test end to end.
 
 ## Cleanup
 
