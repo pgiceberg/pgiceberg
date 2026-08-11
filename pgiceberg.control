@@ -10,7 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-comment = 'PostgreSQL access methods for Apache Iceberg tables'
+comment = 'PostgreSQL extension for working with Apache Iceberg tables'
 default_version = '0.1.0'
 module_pathname = '$libdir/pgiceberg'
 relocatable = false
