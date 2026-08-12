@@ -20,6 +20,7 @@
 
 #include <arrow/array.h>
 #include <arrow/record_batch.h>
+#include <arrow/type.h>
 #include <iceberg/logging/logger.h>
 #include <iceberg/table.h>
 
@@ -100,6 +101,31 @@ std::unordered_set<int> ProjectedAttributeSet(const std::vector<int>& attnums) {
   return std::unordered_set<int>(attnums.begin(), attnums.end());
 }
 
+// Emit a single NOTICE per scan when a projected column carries nanosecond
+// resolution that will be narrowed to PostgreSQL's microsecond precision.  The
+// "error" policy is enforced per value in ConvertValue, so it stays silent
+// here (an empty scan then loses nothing and never errors).
+void WarnIfNanosecondNarrowing(const arrow::Schema& arrow_schema, int column_index,
+                               const char* column_name) {
+  if (TimestampNsOnLossIsError()) {
+    return;
+  }
+  const auto& field_type = arrow_schema.field(column_index)->type();
+  bool is_nanos = false;
+  if (field_type->id() == arrow::Type::TIMESTAMP) {
+    is_nanos = static_cast<const arrow::TimestampType&>(*field_type).unit() ==
+               arrow::TimeUnit::NANO;
+  } else if (field_type->id() == arrow::Type::TIME64) {
+    is_nanos = static_cast<const arrow::Time64Type&>(*field_type).unit() ==
+               arrow::TimeUnit::NANO;
+  }
+  if (is_nanos) {
+    ereport(NOTICE, (errmsg("Iceberg column \"%s\" has nanosecond precision; values are "
+                            "truncated to microseconds for PostgreSQL",
+                            column_name)));
+  }
+}
+
 void DeleteScanState(void* arg) { delete static_cast<ScanState*>(arg); }
 
 void RegisterMemoryContextCleanup(ScanState* state) {
@@ -167,6 +193,8 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options,
                                            "\" does not exist in Iceberg table"));
     }
     state->columns[i] = ColumnState{.batch_column_index = column_index};
+    WarnIfNanosecondNarrowing(*state->cursor->arrow_schema(), column_index,
+                              NameStr(attr->attname));
   }
 
   RegisterMemoryContextCleanup(state.get());

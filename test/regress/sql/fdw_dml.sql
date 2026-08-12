@@ -277,9 +277,22 @@ INSERT INTO pgiceberg_timestamp_ns_fixture
 VALUES (1, TIMESTAMP '2026-07-07 08:09:10.123456')
 RETURNING id, event_ts;
 
+-- The default policy narrows nanosecond columns to microseconds and emits one
+-- NOTICE per scan naming each nanosecond column.
+SHOW pgiceberg.timestamp_ns_on_loss;
+
 SELECT id, event_ts
 FROM pgiceberg_timestamp_ns_fixture
 ORDER BY id;
+
+-- The error policy rejects reads of nanosecond columns instead of narrowing.
+SET pgiceberg.timestamp_ns_on_loss = 'error';
+
+SELECT id, event_ts
+FROM pgiceberg_timestamp_ns_fixture
+ORDER BY id;
+
+RESET pgiceberg.timestamp_ns_on_loss;
 
 \set VERBOSITY default
 

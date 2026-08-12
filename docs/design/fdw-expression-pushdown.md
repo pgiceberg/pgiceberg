@@ -56,6 +56,12 @@ Consequences of this rule:
   keeps the pushed predicate weaker), `NaN` constants are skipped.
 - Numeric constants push to `decimal(P,S)` columns only when they rescale to
   `S` exactly; rounding would change the predicate.
+- `timestamp`/`timestamptz` literals push to nanosecond Iceberg columns
+  (`timestamp_ns` / `timestamptz_ns`), but PostgreSQL only holds microsecond
+  resolution on both the literal and the value it reads back, so the narrowing
+  policy in [`timestamp-precision.md`](timestamp-precision.md) applies. The
+  read path floors nanoseconds toward negative infinity, which keeps the
+  pushed range filter equal-or-weaker than the local recheck.
 - Time-travel scans (`snapshot_id` option) skip pushdown: filters bind against
   the snapshot schema, which may differ from the current table schema used
   for translation.
@@ -90,8 +96,8 @@ unsupported operators are simply skipped.
 | `text`, `varchar` | `string` |
 | `date` | `date` (epoch shift 2000 → 1970) |
 | `time` | `time` |
-| `timestamp` | `timestamp`, `timestamp_ns` |
-| `timestamptz` | `timestamptz`, `timestamptz_ns` |
+| `timestamp` | `timestamp`, `timestamp_ns` (see note) |
+| `timestamptz` | `timestamptz`, `timestamptz_ns` (see note) |
 | `uuid` | `uuid` |
 | `bytea` | `binary` |
 
