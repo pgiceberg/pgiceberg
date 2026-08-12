@@ -12,6 +12,7 @@
 
 #include "common/datum_convert.h"
 
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -50,16 +51,16 @@ namespace {
 // nanosecond time) value is read into a PostgreSQL column.  PostgreSQL's
 // temporal types only hold microsecond resolution, so nanosecond values cannot
 // round-trip losslessly.  Controlled by pgiceberg.timestamp_ns_on_loss.
-enum TimestampNsLossPolicy : int {
-  kTimestampNsTruncate = 0,
-  kTimestampNsError = 1,
+enum class TimestampNsLossPolicy : std::uint8_t {
+  kTruncate = 0,
+  kError = 1,
 };
 
-int g_timestamp_ns_on_loss = kTimestampNsTruncate;
+int g_timestamp_ns_on_loss = static_cast<int>(TimestampNsLossPolicy::kTruncate);
 
 const struct config_enum_entry kTimestampNsOnLossOptions[] = {
-    {"truncate", kTimestampNsTruncate, false},
-    {"error", kTimestampNsError, false},
+    {"truncate", static_cast<int>(TimestampNsLossPolicy::kTruncate), false},
+    {"error", static_cast<int>(TimestampNsLossPolicy::kError), false},
     {nullptr, 0, false},
 };
 
@@ -286,13 +287,14 @@ Result<Datum> ConvertValue(const arrow::Array& array, std::int64_t offset, Oid p
   // PostgreSQL timestamp/time hold microsecond resolution, so an Iceberg
   // nanosecond value is narrowed on read.  Under the "error" policy we refuse
   // the read outright rather than silently dropping the sub-microsecond digits.
-  if (g_timestamp_ns_on_loss == kTimestampNsError && IsNanosecondTemporalArray(array)) {
-    return std::unexpected(MakeError(
-        ERRCODE_FEATURE_NOT_SUPPORTED,
-        "Iceberg nanosecond timestamp cannot be read into PostgreSQL without "
-        "losing precision",
-        "Set pgiceberg.timestamp_ns_on_loss = 'truncate' to narrow values to "
-        "microsecond precision."));
+  if (g_timestamp_ns_on_loss == static_cast<int>(TimestampNsLossPolicy::kError) &&
+      IsNanosecondTemporalArray(array)) {
+    return std::unexpected(
+        MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                  "Iceberg nanosecond timestamp cannot be read into PostgreSQL without "
+                  "losing precision",
+                  "Set pgiceberg.timestamp_ns_on_loss = 'truncate' to narrow values to "
+                  "microsecond precision."));
   }
   switch (pg_type) {
     case INT2OID: {
@@ -583,10 +585,12 @@ void RegisterTimestampPrecisionGucs() {
       "values cannot be represented exactly. 'truncate' narrows values toward "
       "negative infinity (a NOTICE is emitted per scan); 'error' rejects the "
       "read.",
-      &g_timestamp_ns_on_loss, kTimestampNsTruncate, kTimestampNsOnLossOptions,
-      PGC_USERSET, 0, nullptr, nullptr, nullptr);
+      &g_timestamp_ns_on_loss, static_cast<int>(TimestampNsLossPolicy::kTruncate),
+      kTimestampNsOnLossOptions, PGC_USERSET, 0, nullptr, nullptr, nullptr);
 }
 
-bool TimestampNsOnLossIsError() { return g_timestamp_ns_on_loss == kTimestampNsError; }
+bool TimestampNsOnLossIsError() {
+  return g_timestamp_ns_on_loss == static_cast<int>(TimestampNsLossPolicy::kError);
+}
 
 }  // namespace pgiceberg

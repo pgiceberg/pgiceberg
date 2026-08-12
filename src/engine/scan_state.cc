@@ -120,10 +120,9 @@ void WarnIfNanosecondNarrowing(const arrow::Schema& arrow_schema, int column_ind
                arrow::TimeUnit::NANO;
   }
   if (is_nanos) {
-    ereport(NOTICE,
-            (errmsg("Iceberg column \"%s\" has nanosecond precision; values are "
-                    "truncated to microseconds for PostgreSQL",
-                    column_name)));
+    ereport(NOTICE, (errmsg("Iceberg column \"%s\" has nanosecond precision; values are "
+                            "truncated to microseconds for PostgreSQL",
+                            column_name)));
   }
 }
 
