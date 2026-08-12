@@ -109,7 +109,7 @@ Result<std::shared_ptr<iceberg::Type>> PostgresTypeToIcebergType(Oid pg_type,
   }
 }
 
-std::string IcebergTypeToSql(const iceberg::Type& type) {
+Result<std::string> IcebergTypeToSql(const iceberg::Type& type) {
   switch (type.type_id()) {
     case iceberg::TypeId::kBoolean:
       return "boolean";
@@ -140,9 +140,21 @@ std::string IcebergTypeToSql(const iceberg::Type& type) {
     case iceberg::TypeId::kBinary:
     case iceberg::TypeId::kFixed:
       return "bytea";
-    default:
-      return "text";
+    case iceberg::TypeId::kStruct:
+    case iceberg::TypeId::kList:
+    case iceberg::TypeId::kMap:
+    case iceberg::TypeId::kUnknown:
+    case iceberg::TypeId::kVariant:
+    case iceberg::TypeId::kGeometry:
+    case iceberg::TypeId::kGeography:
+      break;
   }
+  return std::unexpected(
+      MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                "Iceberg type " + type.ToString() +
+                    " is not supported for PostgreSQL foreign table schema mapping",
+                "Exclude the column from the import, or map it manually with a supported "
+                "PostgreSQL type."));
 }
 
 std::string ArrowTypeToSql(const arrow::DataType& type) {
