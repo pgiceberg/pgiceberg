@@ -28,6 +28,7 @@
 
 #include "common/catalog.h"
 #include "common/fdw_path.h"
+#include "common/schema_binding.h"
 #include "common/type_mapping.h"
 #include "engine/modify_state.h"
 #include "engine/options.h"
@@ -38,6 +39,7 @@
 extern "C" {
 #include "postgres.h"
 #include "access/reloptions.h"
+#include "catalog/pg_attribute_d.h"
 #include "catalog/pg_foreign_server_d.h"
 #include "catalog/pg_foreign_table_d.h"
 #include "commands/defrem.h"
@@ -404,8 +406,8 @@ pgiceberg::Result<List*> PgIcebergImportForeignSchemaImpl(ImportForeignSchemaStm
     const std::string field_name(field.name());
     PGICEBERG_ASSIGN_OR_RETURN(const auto sql_type,
                                pgiceberg::IcebergTypeToSql(*field.type()));
-    appendStringInfo(sql, "%s %s", quote_identifier(field_name.c_str()),
-                     sql_type.c_str());
+    appendStringInfo(sql, "%s %s OPTIONS (%s '%d')", quote_identifier(field_name.c_str()),
+                     sql_type.c_str(), pgiceberg::kFieldIdOption, field.field_id());
   }
   appendStringInfo(sql, ") SERVER %s OPTIONS (namespace %s, table %s)",
                    quote_identifier(stmt->server_name),
@@ -443,13 +445,26 @@ pgiceberg::Result<Datum> PgIcebergFdwHandlerImpl() {
   return PointerGetDatum(routine);
 }
 
-pgiceberg::Status PgIcebergFdwValidatorImpl(Datum raw_options) {
+pgiceberg::Status PgIcebergFdwValidatorImpl(Datum raw_options, Oid catalog) {
   List* options = untransformRelOptions(raw_options);
   ListCell* cell = nullptr;
   pgiceberg::engine::Options parsed_options;
 
   foreach (cell, options) {
     DefElem* def = static_cast<DefElem*>(lfirst(cell));
+    if (catalog == AttributeRelationId) {
+      if (!pgiceberg::IsValidColumnOption(def->defname)) {
+        return std::unexpected(pgiceberg::MakeError(
+            ERRCODE_FDW_INVALID_OPTION_NAME,
+            std::string("invalid pgiceberg column option \"") + def->defname + "\"",
+            "Valid column options are: field_id."));
+      }
+      if (std::strcmp(def->defname, pgiceberg::kFieldIdOption) == 0) {
+        PGICEBERG_RETURN_NOT_OK(pgiceberg::ValidateFieldIdOption(defGetString(def)));
+      }
+      continue;
+    }
+
     if (!pgiceberg::engine::IsValidOption(def->defname)) {
       const std::string valid_options = pgiceberg::engine::ValidOptionsText();
       return std::unexpected(pgiceberg::MakeError(
@@ -483,7 +498,9 @@ Datum pgiceberg_fdw_handler(PG_FUNCTION_ARGS) {
 
 Datum pgiceberg_fdw_validator(PG_FUNCTION_ARGS) {
   Datum raw_options = PG_GETARG_DATUM(0);
-  pgiceberg::PgStatusGuard([=]() { return PgIcebergFdwValidatorImpl(raw_options); });
+  Oid catalog = PG_GETARG_OID(1);
+  pgiceberg::PgStatusGuard(
+      [=]() { return PgIcebergFdwValidatorImpl(raw_options, catalog); });
   PG_RETURN_VOID();
 }
 

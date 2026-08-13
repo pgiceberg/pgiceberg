@@ -72,6 +72,14 @@ SELECT catalog,
 FROM pgiceberg.table_bindings
 WHERE relid = 'native_trip'::regclass;
 
+SELECT att.attname, bind.field_id
+FROM pgiceberg.column_bindings AS bind
+JOIN pg_attribute AS att
+  ON att.attrelid = bind.relid
+ AND att.attnum = bind.attnum
+WHERE bind.relid = 'native_trip'::regclass
+ORDER BY bind.attnum;
+
 SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
 FROM native_trip
 ORDER BY vendorid;
