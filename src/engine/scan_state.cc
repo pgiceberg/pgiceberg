@@ -28,6 +28,7 @@
 #include "common/datum_convert.h"
 #include "common/pg_interrupt.h"
 #include "common/pg_logger.h"
+#include "common/schema_binding.h"
 #include "common/status.h"
 #include "engine/iceberg_scan.h"
 #include "engine/modify_state.h"
@@ -50,6 +51,21 @@ Result<bool> LoadNextBatch(ScanState* state);
 struct ColumnState {
   int batch_column_index = -1;
 };
+
+LocalColumn LocalColumnFromAttribute(Form_pg_attribute attr,
+                                     const std::vector<LocalColumn>& local) {
+  for (const auto& column : local) {
+    if (column.attnum == attr->attnum) {
+      return column;
+    }
+  }
+  LocalColumn column;
+  column.attnum = attr->attnum;
+  column.name = NameStr(attr->attname);
+  column.pg_type = attr->atttypid;
+  column.typmod = attr->atttypmod;
+  return column;
+}
 
 }  // namespace
 
@@ -80,22 +96,6 @@ Result<bool> LoadNextBatch(ScanState* state) {
 }
 
 }  // namespace
-
-std::vector<std::string> ProjectedColumnNames(TupleDesc desc,
-                                              const std::vector<int>& attnums) {
-  std::vector<std::string> names;
-  names.reserve(attnums.size());
-  for (const auto attnum : attnums) {
-    if (attnum <= 0 || attnum > desc->natts) {
-      continue;
-    }
-    Form_pg_attribute attr = TupleDescAttr(desc, attnum - 1);
-    if (!attr->attisdropped) {
-      names.emplace_back(NameStr(attr->attname));
-    }
-  }
-  return names;
-}
 
 std::unordered_set<int> ProjectedAttributeSet(const std::vector<int>& attnums) {
   return std::unordered_set<int>(attnums.begin(), attnums.end());
@@ -160,20 +160,25 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options,
     PGICEBERG_ASSIGN_OR_RETURN(state->table,
                                ReadTableForCurrentTransaction(options, state->table));
   }
+  TupleDesc desc = RelationGetDescr(relation);
+  PGICEBERG_ASSIGN_OR_RETURN(auto local_columns, LoadLocalColumns(relation));
+  PGICEBERG_ASSIGN_OR_RETURN(auto schema,
+                             pgiceberg::FromIcebergResult(state->table->schema(),
+                                                          "load schema for scan filter"));
+  PGICEBERG_ASSIGN_OR_RETURN(auto binding, BindSchema(local_columns, *schema));
+  PGICEBERG_RETURN_NOT_OK(CheckScanCompatible(binding, projected_attnums));
   // Filters translate against the schema the scan binds to.  Time-travel scans
   // may use an older snapshot schema, so restrict pushdown to current-snapshot
   // reads where the table schema is authoritative.
   std::shared_ptr<iceberg::Expression> filter;
   if (filter_builder && !options.snapshot_id.has_value()) {
-    PGICEBERG_ASSIGN_OR_RETURN(
-        auto schema, pgiceberg::FromIcebergResult(state->table->schema(),
-                                                  "load schema for scan filter"));
     filter = filter_builder(*schema);
   }
-  TupleDesc desc = RelationGetDescr(relation);
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto projected_names,
+      ProjectedIcebergNames(local_columns, projected_attnums, *schema));
   state->cursor = std::make_unique<IcebergScanCursor>(
-      state->table, ProjectedColumnNames(desc, projected_attnums), options.snapshot_id,
-      std::move(filter));
+      state->table, std::move(projected_names), options.snapshot_id, std::move(filter));
   PGICEBERG_RETURN_NOT_OK(state->cursor->Init());
   iceberg::Log(iceberg::LogLevel::kInfo, "scan ready for {} projected columns",
                projected_attnums.size());
@@ -185,12 +190,11 @@ Result<ScanState*> BeginScan(Relation relation, const Options& options,
     if (attr->attisdropped || !projected.contains(i + 1)) {
       continue;
     }
-    const int column_index =
-        state->cursor->arrow_schema()->GetFieldIndex(NameStr(attr->attname));
+    auto column = LocalColumnFromAttribute(attr, local_columns);
+    PGICEBERG_ASSIGN_OR_RETURN(const int column_index,
+                               BatchColumnIndex(*state->cursor->arrow_schema(), column));
     if (column_index < 0) {
-      return std::unexpected(
-          MakeError(ERRCODE_FDW_ERROR, std::string("column \"") + NameStr(attr->attname) +
-                                           "\" does not exist in Iceberg table"));
+      continue;
     }
     state->columns[i] = ColumnState{.batch_column_index = column_index};
     WarnIfNanosecondNarrowing(*state->cursor->arrow_schema(), column_index,

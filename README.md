@@ -28,7 +28,10 @@ for when to use each path.
 
 - Create Iceberg tables from PostgreSQL SQL helper functions.
 - Map Iceberg tables into PostgreSQL as foreign tables (FDW).
-- Infer foreign table definitions with `IMPORT FOREIGN SCHEMA`.
+- Infer foreign table definitions with `IMPORT FOREIGN SCHEMA`, storing Iceberg
+  field ids on each column so later renames keep working.
+- Compare and refresh a foreign table after Iceberg schema evolution with
+  `pgiceberg.schema_diff` and `pgiceberg.refresh_schema`.
 - Create native Iceberg-backed tables with `CREATE TABLE ... USING iceberg`.
 - Mirror PostgreSQL heap inserts into Iceberg with logical decoding.
 - Register existing Iceberg table metadata into a SQL catalog.
@@ -171,6 +174,17 @@ LIMIT TO (trip_fixture)
 FROM SERVER iceberg
 INTO imported;
 ```
+
+Imported columns store the Iceberg field id as a column option, so scans and
+writes keep working after an Iceberg rename. Inspect and repair drift with:
+
+```sql
+SELECT * FROM pgiceberg.schema_diff('imported.trip_fixture');
+SELECT pgiceberg.refresh_schema('imported.trip_fixture');
+```
+
+`refresh_schema` applies `ALTER FOREIGN TABLE` so local names, types, and
+dropped/added columns match the current Iceberg schema.
 
 ## Register Existing Tables
 

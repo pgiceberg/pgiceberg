@@ -222,19 +222,23 @@ foreign table definition remains a PostgreSQL catalog object.
 
 For pgiceberg's current FDW:
 
-- Added Iceberg columns are invisible until the foreign table is refreshed or
-  altered locally.
-- Dropped or renamed Iceberg columns break queries that still project the old
-  local column.
-- Type changes do not automatically update PostgreSQL column types.
-- Reads map projected columns by name, so physical field order changes are not
-  the primary concern.
-- Writes are stricter because the DML path expects every current Iceberg
-  field to exist in the PostgreSQL foreign table.
+- Iceberg field ids are stored on foreign columns (`OPTIONS (field_id 'N')`)
+  and on native table AM bindings (`pgiceberg.column_bindings`).
+- Scans and writes match by field id first, then fall back to column name.
+- Added Iceberg columns are invisible until `pgiceberg.refresh_schema` (or a
+  local `ALTER`) adds them. Writes fill `write-default` or NULL for optional
+  fields that are missing locally.
+- Dropped Iceberg columns remain as local NULLs until refresh drops them.
+- Renamed Iceberg columns keep working through the stored field id.
+- Type changes that PostgreSQL cannot hold raise an error; call
+  `pgiceberg.refresh_schema` or `pgiceberg.schema_diff` to inspect and repair.
+- `pgiceberg.update_schema` applies Iceberg add/drop/rename for operators and
+  tests.
 
 A practical FDW design is to add a schema refresh helper that compares the
 current Iceberg schema with the PostgreSQL foreign table definition and either
-emits or applies `ALTER FOREIGN TABLE` statements.
+emits or applies `ALTER FOREIGN TABLE` statements. `pgiceberg.schema_diff` and
+`pgiceberg.refresh_schema` implement that helper.
 
 Table AM is more natural for PostgreSQL-initiated schema evolution. The user
 can run `ALTER TABLE`, PostgreSQL can update `pg_attribute`, and pgiceberg can

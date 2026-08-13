@@ -20,6 +20,7 @@
 #include <iceberg/util/int128.h>
 #include <iceberg/util/uuid.h>
 
+#include "common/schema_binding.h"
 #include "fdw/qual_pushdown.h"
 
 #include <cmath>
@@ -41,6 +42,7 @@ extern "C" {
 #include "catalog/pg_namespace_d.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type_d.h"
+#include "foreign/foreign.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/primnodes.h"
@@ -162,6 +164,22 @@ std::optional<ColumnTarget> ResolveColumn(const Var& var, Oid relation_oid,
   if (attribute_name == nullptr) {
     return std::nullopt;
   }
+
+  const auto field_id =
+      FieldIdFromOptionList(GetForeignColumnOptions(relation_oid, var.varattno));
+  if (field_id.has_value()) {
+    auto field_result = schema.FindFieldById(*field_id);
+    if (!field_result.has_value() || !field_result.value().has_value()) {
+      return std::nullopt;
+    }
+    const iceberg::SchemaField& field = field_result.value()->get();
+    if (field.type() == nullptr || !field.type()->is_primitive()) {
+      return std::nullopt;
+    }
+    return ColumnTarget{.field_name = std::string(field.name()),
+                        .field_type = field.type()};
+  }
+
   auto field_result = schema.FindFieldByName(attribute_name, /*case_sensitive=*/true);
   if (!field_result.has_value() || !field_result.value().has_value()) {
     return std::nullopt;

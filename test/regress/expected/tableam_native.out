@@ -74,6 +74,19 @@ WHERE relid = 'native_trip'::regclass;
 catalog|namespace|table_name
 tableam_regress|native|native_trip
 (1 row)
+SELECT att.attname, bind.field_id
+FROM pgiceberg.column_bindings AS bind
+JOIN pg_attribute AS att
+  ON att.attrelid = bind.relid
+ AND att.attnum = bind.attnum
+WHERE bind.relid = 'native_trip'::regclass
+ORDER BY bind.attnum;
+attname|field_id
+vendorid|1
+passenger_count|2
+trip_distance|3
+store_and_fwd_flag|4
+(4 rows)
 SELECT vendorid, passenger_count, trip_distance, store_and_fwd_flag
 FROM native_trip
 ORDER BY vendorid;

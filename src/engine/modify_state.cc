@@ -60,6 +60,7 @@
 #include "common/pg_interrupt.h"
 #include "common/pg_logger.h"
 #include "common/pg_memory_context.h"
+#include "common/schema_binding.h"
 #include "common/status.h"
 #include "engine/iceberg_scan.h"
 
@@ -686,13 +687,24 @@ Result<bool> RowEquals(const Row& left, const Row& right, TupleDesc desc) {
 }
 
 Status AppendRow(std::vector<std::unique_ptr<arrow::ArrayBuilder>>& builders,
-                 const arrow::Schema& schema, const std::vector<int>& attr_numbers,
+                 const arrow::Schema& schema, const std::vector<BoundField>& fields,
                  TupleDesc desc, const Row& row) {
   for (int i = 0; i < schema.num_fields(); i++) {
-    Form_pg_attribute attr = TupleDescAttr(desc, attr_numbers[i] - 1);
+    const auto& field = fields[static_cast<std::size_t>(i)];
     auto value_type = StorageTypeForValues(schema.field(i)->type());
+    if (field.attnum == InvalidAttrNumber) {
+      if (field.write_default != nullptr) {
+        PGICEBERG_RETURN_NOT_OK(AppendLiteral(*builders[i], *field.write_default,
+                                              field.pg_type, *value_type));
+      } else {
+        PGICEBERG_RETURN_NOT_OK(
+            FromArrowStatus(builders[i]->AppendNull(), "append Iceberg default NULL"));
+      }
+      continue;
+    }
+    Form_pg_attribute attr = TupleDescAttr(desc, field.attnum - 1);
     PGICEBERG_RETURN_NOT_OK(
-        AppendValue(*builders[i], row[attr_numbers[i] - 1], attr->atttypid, *value_type));
+        AppendValue(*builders[i], row[field.attnum - 1], attr->atttypid, *value_type));
   }
   return Ok();
 }
@@ -751,10 +763,11 @@ class RowBatchWriter {
         std::move(path), std::move(builders)));
   }
 
-  Status Append(const std::vector<int>& attr_numbers, TupleDesc desc, const Row& row) {
+  Status Append(const std::vector<BoundField>& write_fields, TupleDesc desc,
+                const Row& row) {
     PGICEBERG_RETURN_NOT_OK(EnsureWriter());
     PGICEBERG_RETURN_NOT_OK(
-        AppendRow(builders_, *arrow_schema_, attr_numbers, desc, row));
+        AppendRow(builders_, *arrow_schema_, write_fields, desc, row));
     rows_in_batch_++;
     if (rows_in_batch_ >= kDmlRewriteBatchRows) {
       PGICEBERG_RETURN_NOT_OK(Flush());
@@ -843,24 +856,39 @@ class RowBatchWriter {
 };
 
 Result<Row> RowFromRecordBatch(const arrow::RecordBatch& batch, std::int64_t row_index,
-                               TupleDesc desc) {
+                               TupleDesc desc, const std::vector<LocalColumn>& local) {
+  std::unordered_map<AttrNumber, const LocalColumn*> by_attnum;
+  for (const auto& column : local) {
+    by_attnum[column.attnum] = &column;
+  }
+
   Row row(desc->natts);
   for (int i = 0; i < desc->natts; i++) {
     Form_pg_attribute attr = TupleDescAttr(desc, i);
     if (attr->attisdropped) {
       continue;
     }
-    const int column_index = batch.schema()->GetFieldIndex(NameStr(attr->attname));
+    LocalColumn column;
+    auto it = by_attnum.find(attr->attnum);
+    if (it != by_attnum.end()) {
+      column = *it->second;
+    } else {
+      column.attnum = attr->attnum;
+      column.name = NameStr(attr->attname);
+      column.pg_type = attr->atttypid;
+      column.typmod = attr->atttypmod;
+    }
+    PGICEBERG_ASSIGN_OR_RETURN(const int column_index,
+                               BatchColumnIndex(*batch.schema(), column));
     if (column_index < 0) {
-      return std::unexpected(
-          MakeError(ERRCODE_FDW_ERROR, "column does not exist in Iceberg table"));
+      continue;
     }
 
-    auto column = batch.column(column_index);
+    auto column_array = batch.column(column_index);
     bool is_null = true;
     PGICEBERG_ASSIGN_OR_RETURN(
         Datum datum,
-        pgiceberg::ConvertValue(*column, row_index, attr->atttypid, is_null));
+        pgiceberg::ConvertValue(*column_array, row_index, attr->atttypid, is_null));
     if (is_null) {
       continue;
     }
@@ -906,6 +934,14 @@ std::vector<std::string> DmlScanColumns(const arrow::Schema& schema) {
   columns.emplace_back(iceberg::MetadataColumns::kFilePath.name());
   columns.emplace_back(iceberg::MetadataColumns::kRowPosition.name());
   return columns;
+}
+
+Result<std::vector<BoundField>> BindWriteFields(Relation relation,
+                                                const iceberg::Schema& schema) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto local, LoadLocalColumns(relation));
+  PGICEBERG_ASSIGN_OR_RETURN(auto binding, BindSchema(local, schema));
+  PGICEBERG_RETURN_NOT_OK(CheckWriteCompatible(binding));
+  return binding.fields;
 }
 
 }  // namespace
@@ -972,31 +1008,14 @@ Status AppendSlots(Relation relation, const Options& options, TupleTableSlot** s
   }
 
   TupleDesc tuple_desc = RelationGetDescr(relation);
-  std::vector<int> attr_numbers;
-  attr_numbers.reserve(arrow_schema->num_fields());
-  for (int i = 0; i < arrow_schema->num_fields(); i++) {
-    const auto& field = arrow_schema->field(i);
-    auto attr_number = InvalidAttrNumber;
-    for (int j = 0; j < tuple_desc->natts; j++) {
-      Form_pg_attribute attr = TupleDescAttr(tuple_desc, j);
-      if (!attr->attisdropped && field->name() == NameStr(attr->attname)) {
-        attr_number = attr->attnum;
-        break;
-      }
-    }
-    if (attr_number == InvalidAttrNumber) {
-      return std::unexpected(
-          MakeError(ERRCODE_FDW_ERROR,
-                    "Iceberg field \"" + field->name() + "\" does not exist in table"));
-    }
-    attr_numbers.push_back(attr_number);
-  }
+  PGICEBERG_ASSIGN_OR_RETURN(auto write_fields,
+                             BindWriteFields(relation, *iceberg_schema));
 
   PGICEBERG_ASSIGN_OR_RETURN(auto builders, MakeBuilders(*arrow_schema));
   for (int i = 0; i < nslots; i++) {
     auto row = CopyRowFromSlot(slots[i], tuple_desc, CurrentMemoryContext);
     PGICEBERG_RETURN_NOT_OK(
-        AppendRow(builders, *arrow_schema, attr_numbers, tuple_desc, row));
+        AppendRow(builders, *arrow_schema, write_fields, tuple_desc, row));
   }
 
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -1026,7 +1045,8 @@ struct ModifyState {
   std::shared_ptr<iceberg::PartitionSpec> spec;
   std::shared_ptr<arrow::Schema> arrow_schema;
   std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
-  std::vector<int> attr_numbers;
+  std::vector<BoundField> write_fields;
+  std::vector<LocalColumn> local_columns;
   TupleDesc tuple_desc = nullptr;
   AttrNumber wholerow_attno = InvalidAttrNumber;
   std::vector<Row> old_rows;
@@ -1099,23 +1119,9 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
                   "pgiceberg DML currently supports only unpartitioned Iceberg tables"));
   }
 
-  for (int i = 0; i < state->arrow_schema->num_fields(); i++) {
-    const auto& field = state->arrow_schema->field(i);
-    auto attr_number = InvalidAttrNumber;
-    for (int j = 0; j < state->tuple_desc->natts; j++) {
-      Form_pg_attribute attr = TupleDescAttr(state->tuple_desc, j);
-      if (!attr->attisdropped && field->name() == NameStr(attr->attname)) {
-        attr_number = attr->attnum;
-        break;
-      }
-    }
-    if (attr_number == InvalidAttrNumber) {
-      return std::unexpected(MakeError(
-          ERRCODE_FDW_ERROR,
-          "Iceberg field \"" + field->name() + "\" does not exist in foreign table"));
-    }
-    state->attr_numbers.push_back(attr_number);
-  }
+  PGICEBERG_ASSIGN_OR_RETURN(state->local_columns, LoadLocalColumns(relation));
+  PGICEBERG_ASSIGN_OR_RETURN(state->write_fields,
+                             BindWriteFields(relation, *state->iceberg_schema));
   PGICEBERG_ASSIGN_OR_RETURN(state->builders, MakeBuilders(*state->arrow_schema));
 
   if (state->operation == CMD_UPDATE || state->operation == CMD_DELETE) {
@@ -1135,7 +1141,7 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
 
 Result<TupleTableSlot*> ExecInsert(ModifyState* state, TupleTableSlot* slot) {
   PGICEBERG_RETURN_NOT_OK(AppendRow(
-      state->builders, *state->arrow_schema, state->attr_numbers, state->tuple_desc,
+      state->builders, *state->arrow_schema, state->write_fields, state->tuple_desc,
       CopyRowFromSlot(slot, state->tuple_desc, CurrentMemoryContext)));
   state->rows++;
   return slot;
@@ -1245,7 +1251,8 @@ Status EndModify(ModifyState* state) {
       }
       for (std::int64_t row_index = 0; row_index < batch->num_rows(); row_index++) {
         PGICEBERG_ASSIGN_OR_RETURN(
-            Row current_row, RowFromRecordBatch(*batch, row_index, state->tuple_desc));
+            Row current_row, RowFromRecordBatch(*batch, row_index, state->tuple_desc,
+                                                state->local_columns));
 
         std::optional<std::size_t> matched_change;
         for (std::size_t i = 0; i < state->old_rows.size(); i++) {
@@ -1275,7 +1282,7 @@ Status EndModify(ModifyState* state) {
             "write deletion vector"));
         if (state->operation == CMD_UPDATE) {
           PGICEBERG_RETURN_NOT_OK(update_writer->Append(
-              state->attr_numbers, state->tuple_desc, state->new_rows[*matched_change]));
+              state->write_fields, state->tuple_desc, state->new_rows[*matched_change]));
         }
       }
     }
@@ -1339,7 +1346,8 @@ Status EndModify(ModifyState* state) {
     }
     for (std::int64_t row_index = 0; row_index < batch->num_rows(); row_index++) {
       PGICEBERG_ASSIGN_OR_RETURN(
-          Row current_row, RowFromRecordBatch(*batch, row_index, state->tuple_desc));
+          Row current_row,
+          RowFromRecordBatch(*batch, row_index, state->tuple_desc, state->local_columns));
 
       std::optional<std::size_t> matched_change;
       for (std::size_t i = 0; i < state->old_rows.size(); i++) {
@@ -1355,10 +1363,10 @@ Status EndModify(ModifyState* state) {
 
       if (!matched_change.has_value()) {
         PGICEBERG_RETURN_NOT_OK(
-            rewrite_writer->Append(state->attr_numbers, state->tuple_desc, current_row));
+            rewrite_writer->Append(state->write_fields, state->tuple_desc, current_row));
       } else if (state->operation == CMD_UPDATE) {
         PGICEBERG_RETURN_NOT_OK(rewrite_writer->Append(
-            state->attr_numbers, state->tuple_desc, state->new_rows[*matched_change]));
+            state->write_fields, state->tuple_desc, state->new_rows[*matched_change]));
       }
     }
   }

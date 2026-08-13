@@ -27,6 +27,7 @@
 #include "common/catalog.h"
 #include "common/pg_error.h"
 #include "common/pg_relation.h"
+#include "common/schema_binding.h"
 #include "common/status.h"
 #include "common/type_mapping.h"
 #include "engine/modify_state.h"
@@ -463,7 +464,8 @@ Status CommitCreateTable(const Binding& binding, int format_version) {
   RelationLockGuard relation_guard(relation, AccessShareLock);
 
   PGICEBERG_RETURN_NOT_OK(CreateIcebergCatalogTable(binding, relation, format_version));
-  return InsertBinding(binding);
+  PGICEBERG_RETURN_NOT_OK(InsertBinding(binding));
+  return InsertColumnBindings(relation);
 }
 
 std::vector<Oid> DropRelationOids(DropStmt* stmt) {

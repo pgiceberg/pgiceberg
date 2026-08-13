@@ -16,6 +16,7 @@ add_library(pgiceberg MODULE
             common/catalog.cc
             common/datum_convert.cc
             common/pg_logger.cc
+            common/schema_binding.cc
             common/type_mapping.cc
             engine/iceberg_scan.cc
             engine/modify_state.cc
@@ -27,6 +28,7 @@ add_library(pgiceberg MODULE
             functions/create_table.cc
             functions/metadata.cc
             functions/register_table.cc
+            functions/schema.cc
             logical/logical.cc
             tableam/tableam.cc
             utilities/avro_fdw.cc
