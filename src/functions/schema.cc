@@ -289,7 +289,7 @@ pgiceberg::Status EnsureRelationSelect(Oid relid) {
 }
 
 pgiceberg::Status EnsureRelationOwner(Oid relid) {
-  if (!pg_class_ownercheck(relid, GetSessionUserId())) {
+  if (!object_ownercheck(RelationRelationId, relid, GetSessionUserId())) {
     return std::unexpected(
         pgiceberg::MakeError(ERRCODE_INSUFFICIENT_PRIVILEGE,
                              "must be owner of relation " + std::to_string(relid)));

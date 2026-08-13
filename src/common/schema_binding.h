@@ -26,6 +26,7 @@
 
 extern "C" {
 #include "postgres.h"
+#include "access/attnum.h"
 }
 
 struct List;
