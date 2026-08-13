@@ -24,6 +24,7 @@
 
 #include <arrow/array/builder_base.h>
 #include <arrow/type.h>
+#include <arrow/util/key_value_metadata.h>
 #include <iceberg/constants.h>
 #include <iceberg/expression/literal.h>
 #include <iceberg/schema.h>
@@ -388,11 +389,11 @@ std::optional<int32_t> ArrowFieldId(const arrow::Field& field) {
   if (metadata == nullptr) {
     return std::nullopt;
   }
-  std::string value;
-  if (!metadata->Get(std::string(iceberg::kParquetFieldIdKey), &value).ok()) {
+  auto result = metadata->Get(iceberg::kParquetFieldIdKey);
+  if (!result.ok()) {
     return std::nullopt;
   }
-  return ParseFieldIdValue(value.c_str());
+  return ParseFieldIdValue(result->c_str());
 }
 
 int ArrowFieldIndexById(const arrow::Schema& schema, int32_t field_id) {
@@ -630,7 +631,7 @@ Status CheckScanCompatible(const SchemaBinding& binding,
       continue;
     }
     if (!field.readable) {
-      return std::unexpected(MakeError(ERRCODE_FDW_INCONSISTENT_DESCRIPTOR,
+      return std::unexpected(MakeError(ERRCODE_FDW_INCONSISTENT_DESCRIPTOR_INFORMATION,
                                        field.incompatibility,
                                        "Call pgiceberg.refresh_schema() to update the "
                                        "local column type, or ALTER the column."));
@@ -644,7 +645,7 @@ Status CheckWriteCompatible(const SchemaBinding& binding) {
     if (field.attnum != InvalidAttrNumber) {
       if (!field.writable) {
         return std::unexpected(MakeError(
-            ERRCODE_FDW_INCONSISTENT_DESCRIPTOR, field.incompatibility,
+            ERRCODE_FDW_INCONSISTENT_DESCRIPTOR_INFORMATION, field.incompatibility,
             "Call pgiceberg.refresh_schema() to update the local column type."));
       }
       continue;
@@ -779,7 +780,7 @@ std::string JsonEscape(std::string_view value) {
       default:
         if (ch < 0x20) {
           char buf[8];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", ch);
+          snprintf(buf, sizeof(buf), "\\u%04x", ch);
           escaped += buf;
         } else {
           escaped.push_back(static_cast<char>(ch));
