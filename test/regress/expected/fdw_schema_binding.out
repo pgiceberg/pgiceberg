@@ -9,6 +9,8 @@
 -- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
+\! rm -f /tmp/pgiceberg_catalog_schema_binding_regress.db
+\! rm -rf /tmp/pgiceberg_warehouse_schema_binding_regress
 CREATE EXTENSION pgiceberg;
 \pset format unaligned
 \set VERBOSITY terse
