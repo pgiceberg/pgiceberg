@@ -25,7 +25,8 @@ engine. See
 for roles, overlap, and the dependency rules.
 
 - `src/engine/`: shared Iceberg read/write engine (options, scans, DML, pending
-  transaction state) used by the FDW, table AM, and logical mirroring.
+  transaction state, commit recovery) used by the FDW, table AM, and logical
+  mirroring.
 - `src/fdw/`: Iceberg Foreign Data Wrapper callbacks and shared FDW planner
   helpers (also used by the Parquet/Avro utilities).
 - `src/tableam/`: native `CREATE TABLE ... USING iceberg` table access method.

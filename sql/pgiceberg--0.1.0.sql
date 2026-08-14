@@ -697,3 +697,74 @@ $$;
 
 COMMENT ON FUNCTION pgiceberg.table_format_version(text, text, text) IS
   'Return the Iceberg table format version from the current table metadata.';
+
+-- PostgreSQL and Iceberg commits are not a single atomic unit. Iceberg is
+-- published at PRE_COMMIT with a durable recovery log and commit identifier.
+-- pgiceberg.repair_commit can roll back or acknowledge in-doubt Iceberg
+-- snapshots after a PostgreSQL abort or crash. Cross-table Iceberg commits
+-- are sequential, not atomic; see docs/design/postgres-iceberg-commit.md.
+CREATE FUNCTION pgiceberg.commit_recovery_log()
+RETURNS TABLE (
+  commit_id text,
+  state text,
+  postgres_xid text,
+  created_at timestamptz,
+  table_count integer,
+  detail jsonb
+)
+AS 'MODULE_PATHNAME', 'pgiceberg_commit_recovery_log'
+LANGUAGE C
+SET search_path = pg_catalog, pgiceberg;
+
+COMMENT ON FUNCTION pgiceberg.commit_recovery_log() IS
+  'List durable pgiceberg recovery logs for Iceberg commits that have not yet been reconciled with PostgreSQL transaction outcome.';
+
+CREATE FUNCTION pgiceberg.reconcile_commits()
+RETURNS TABLE (
+  commit_id text,
+  state text,
+  verdict text,
+  detail jsonb
+)
+AS 'MODULE_PATHNAME', 'pgiceberg_reconcile_commits'
+LANGUAGE C
+SET search_path = pg_catalog, pgiceberg;
+
+COMMENT ON FUNCTION pgiceberg.reconcile_commits() IS
+  'Compare durable pgiceberg recovery logs with current Iceberg snapshots. Verdicts include stale_intent, iceberg_partial, iceberg_orphan, and needs_operator.';
+
+CREATE FUNCTION pgiceberg.repair_commit(commit_id text, action text)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgiceberg_repair_commit'
+LANGUAGE C STRICT SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg;
+
+COMMENT ON FUNCTION pgiceberg.repair_commit(text, text) IS
+  'Repair an in-doubt PostgreSQL/Iceberg commit. action rollback restores each table to its pre-commit snapshot when that snapshot is still current; acknowledge keeps the Iceberg data and removes the recovery log.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.repair_commit(text, text) FROM PUBLIC;
+
+CREATE FUNCTION pgiceberg.rollback_iceberg_snapshot(
+  name text,
+  namespace text,
+  table_name text,
+  snapshot_id bigint
+)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_rollback_iceberg_snapshot'
+LANGUAGE C STRICT SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg;
+
+COMMENT ON FUNCTION pgiceberg.rollback_iceberg_snapshot(text, text, text, bigint) IS
+  'Roll an Iceberg table current snapshot back to an ancestor snapshot_id. Fails if a later writer has already moved the current snapshot off the in-doubt commit.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.rollback_iceberg_snapshot(text, text, text, bigint) FROM PUBLIC;
+
+CREATE FUNCTION pgiceberg.current_xact_commit_id()
+RETURNS text
+AS 'MODULE_PATHNAME', 'pgiceberg_current_xact_commit_id'
+LANGUAGE C
+SET search_path = pg_catalog, pgiceberg;
+
+COMMENT ON FUNCTION pgiceberg.current_xact_commit_id() IS
+  'Return the pgiceberg commit identifier for pending Iceberg DML in the current PostgreSQL transaction, or NULL when this backend has no pending writes.';

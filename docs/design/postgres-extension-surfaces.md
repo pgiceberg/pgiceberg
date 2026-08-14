@@ -32,7 +32,7 @@ another surface's module:
 | Logical | `src/logical/` | output plugin + background worker | `pgiceberg.logical_mirrors` | Heap → Iceberg CDC mirrors |
 
 They share lower-level Iceberg work through `src/engine/` (options, scans,
-appends, pending transaction commits) and `src/common/` (catalog loading,
+appends, pending transaction commits, commit recovery) and `src/common/` (catalog loading,
 type mapping, Status helpers). That sharing is intentional: one iceberg-cpp
 integration, three PostgreSQL contracts.
 
@@ -175,6 +175,13 @@ recognized and consumed without appending the same rows twice. Current logical
 mirrors support only `INSERT`; update, delete, and truncate records are parsed
 but disable the mirror. The complete rationale and follow-up architecture are
 in [Real-time PostgreSQL-to-Iceberg Mirrors](realtime-iceberg-mirrors.md).
+
+FDW and table-AM DML use the same engine `PRE_COMMIT` publish. That path is
+not a two-phase commit with PostgreSQL: Iceberg may become visible before
+PostgreSQL `COMMIT`, a PostgreSQL abort after publish is in-doubt, and
+multi-table Iceberg commits are sequential. Recovery logs, reconcile, and
+repair are documented in
+[PostgreSQL and Iceberg commit protocol](postgres-iceberg-commit.md).
 
 Use this path when PostgreSQL heap is the source of truth and Iceberg is an
 asynchronous downstream copy. Do not use it to expose existing Iceberg data to

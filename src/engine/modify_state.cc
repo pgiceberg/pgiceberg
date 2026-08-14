@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <iomanip>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -48,6 +49,7 @@
 #include <iceberg/table.h>
 #include <iceberg/table_metadata.h>
 #include <iceberg/transaction.h>
+#include <iceberg/snapshot.h>
 #include <iceberg/update/fast_append.h>
 #include <iceberg/update/overwrite_files.h>
 #include <iceberg/update/row_delta.h>
@@ -61,18 +63,22 @@
 #include "common/pg_logger.h"
 #include "common/pg_memory_context.h"
 #include "common/status.h"
+#include "engine/commit_recovery.h"
 #include "engine/iceberg_scan.h"
 
 extern "C" {
 #include "postgres.h"
 #include "access/htup_details.h"
+#include "access/transam.h"
 #include "access/xact.h"
 #include "executor/executor.h"
+#include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/timestamp.h"
 }
 
 namespace pgiceberg::engine {
@@ -91,10 +97,31 @@ constexpr std::int64_t kDmlRewriteBatchRows = 8192;
 //
 // Data files are tracked separately because they are written outside
 // PostgreSQL storage and therefore need best-effort cleanup on abort.
+void SetSnapshotCommitProperties(auto& update, const CommitProperties& properties) {
+  for (const auto& [key, value] : properties) {
+    update.Set(key, value);
+  }
+}
+
+Status ApplyTableCommitProperties(iceberg::Transaction& transaction,
+                                  const CommitProperties& properties) {
+  if (properties.empty()) {
+    return Ok();
+  }
+  PGICEBERG_ASSIGN_OR_RETURN(auto update,
+                             FromIcebergResult(transaction.NewUpdateProperties(),
+                                               "create commit property update"));
+  for (const auto& [key, value] : properties) {
+    update->Set(key, value);
+  }
+  return FromIcebergStatus(update->Commit(), "apply commit property update");
+}
+
 class PendingIcebergChange {
  public:
   virtual ~PendingIcebergChange() = default;
-  virtual Status Apply(iceberg::Transaction& transaction) = 0;
+  virtual Status Apply(iceberg::Transaction& transaction,
+                       const CommitProperties& xact_properties) = 0;
   virtual std::vector<std::string> NewDataFilePaths() const = 0;
 };
 
@@ -106,30 +133,24 @@ class PendingAppendChange final : public PendingIcebergChange {
       : data_file_(std::move(data_file)),
         commit_properties_(std::move(commit_properties)) {}
 
-  Status Apply(iceberg::Transaction& transaction) override {
+  Status Apply(iceberg::Transaction& transaction,
+               const CommitProperties& xact_properties) override {
+    CommitProperties properties = xact_properties;
+    if (commit_properties_.has_value()) {
+      properties.insert(commit_properties_->begin(), commit_properties_->end());
+    }
     if (data_file_ != nullptr) {
       PGICEBERG_ASSIGN_OR_RETURN(
           auto append,
           FromIcebergResult(transaction.NewFastAppend(), "create append update"));
       append->AppendFile(data_file_);
-      if (commit_properties_.has_value()) {
-        for (const auto& [key, value] : *commit_properties_) {
-          append->Set(key, value);
-        }
-      }
+      SetSnapshotCommitProperties(*append, properties);
       PGICEBERG_RETURN_NOT_OK(
           FromIcebergStatus(append->Commit(), "apply pending Iceberg append"));
     }
 
-    if (commit_properties_.has_value()) {
-      PGICEBERG_ASSIGN_OR_RETURN(auto properties,
-                                 FromIcebergResult(transaction.NewUpdateProperties(),
-                                                   "create commit property update"));
-      for (const auto& [key, value] : *commit_properties_) {
-        properties->Set(key, value);
-      }
-      PGICEBERG_RETURN_NOT_OK(
-          FromIcebergStatus(properties->Commit(), "apply commit property update"));
+    if (!properties.empty()) {
+      PGICEBERG_RETURN_NOT_OK(ApplyTableCommitProperties(transaction, properties));
     }
     return Ok();
   }
@@ -153,7 +174,8 @@ class PendingOverwriteChange final : public PendingIcebergChange {
       : deleted_files_(std::move(deleted_files)),
         replacement_file_(std::move(replacement_file)) {}
 
-  Status Apply(iceberg::Transaction& transaction) override {
+  Status Apply(iceberg::Transaction& transaction,
+               const CommitProperties& xact_properties) override {
     PGICEBERG_ASSIGN_OR_RETURN(
         auto overwrite,
         FromIcebergResult(transaction.NewOverwrite(), "create overwrite update"));
@@ -163,7 +185,10 @@ class PendingOverwriteChange final : public PendingIcebergChange {
     if (replacement_file_ != nullptr) {
       overwrite->AddFile(replacement_file_);
     }
-    return FromIcebergStatus(overwrite->Commit(), "apply pending Iceberg overwrite");
+    SetSnapshotCommitProperties(*overwrite, xact_properties);
+    PGICEBERG_RETURN_NOT_OK(
+        FromIcebergStatus(overwrite->Commit(), "apply pending Iceberg overwrite"));
+    return ApplyTableCommitProperties(transaction, xact_properties);
   }
 
   std::vector<std::string> NewDataFilePaths() const override {
@@ -188,7 +213,8 @@ class PendingRowDeltaChange final : public PendingIcebergChange {
         added_delete_files_(std::move(added_delete_files)),
         removed_delete_files_(std::move(removed_delete_files)) {}
 
-  Status Apply(iceberg::Transaction& transaction) override {
+  Status Apply(iceberg::Transaction& transaction,
+               const CommitProperties& xact_properties) override {
     const int64_t starting_snapshot_id = transaction.current().current_snapshot_id;
     PGICEBERG_ASSIGN_OR_RETURN(
         auto row_delta,
@@ -217,7 +243,10 @@ class PendingRowDeltaChange final : public PendingIcebergChange {
       row_delta->ValidateDeletedFiles();
       row_delta->ValidateNoConflictingDeleteFiles();
     }
-    return FromIcebergStatus(row_delta->Commit(), "apply pending Iceberg row delta");
+    SetSnapshotCommitProperties(*row_delta, xact_properties);
+    PGICEBERG_RETURN_NOT_OK(
+        FromIcebergStatus(row_delta->Commit(), "apply pending Iceberg row delta"));
+    return ApplyTableCommitProperties(transaction, xact_properties);
   }
 
   std::vector<std::string> NewDataFilePaths() const override {
@@ -255,12 +284,178 @@ struct PendingModifyChange {
 struct PendingTableChange {
   std::string key;
   std::shared_ptr<iceberg::Logger> logger;
+  Options options;
   std::shared_ptr<iceberg::Table> base_table;
   std::shared_ptr<iceberg::Transaction> transaction;
   std::vector<PendingModifyChange> changes;
+  std::optional<int64_t> base_snapshot_id;
+  std::optional<int64_t> committed_snapshot_id;
   bool committed = false;
   bool commit_state_unknown = false;
 };
+
+struct XactCommitState {
+  std::string commit_id;
+  CommitRecoveryRecord recovery;
+};
+
+std::optional<int64_t> SnapshotIdIfPresent(const iceberg::Table& table) {
+  auto snapshot = table.current_snapshot();
+  if (!snapshot) {
+    return std::nullopt;
+  }
+  return snapshot.value()->snapshot_id;
+}
+
+std::string GenerateCommitId() {
+  unsigned char bytes[16];
+  if (pg_strong_random(bytes, sizeof(bytes))) {
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (unsigned char byte : bytes) {
+      out << std::setw(2) << static_cast<int>(byte);
+    }
+    return out.str();
+  }
+
+  std::ostringstream out;
+  out << std::hex << GetTopTransactionId() << MyProcPid << GetCurrentTimestamp();
+  return out.str();
+}
+
+std::string PostgresXidText() {
+  return std::to_string(U64FromFullTransactionId(GetTopFullTransactionId()));
+}
+
+XactCommitState& CurrentXactCommitState() {
+  static auto* state = new XactCommitState();
+  return *state;
+}
+
+void ResetXactCommitState() { CurrentXactCommitState() = XactCommitState{}; }
+
+const std::string& EnsureXactCommitId() {
+  auto& state = CurrentXactCommitState();
+  if (state.commit_id.empty()) {
+    state.commit_id = GenerateCommitId();
+    state.recovery.commit_id = state.commit_id;
+    state.recovery.postgres_xid = PostgresXidText();
+    state.recovery.state = std::string(kRecoveryStatePreparing);
+    state.recovery.created_at_unix_micros =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+  }
+  return state.commit_id;
+}
+
+CommitProperties CurrentXactProperties() {
+  return {{std::string(kXactCommitIdProperty), EnsureXactCommitId()},
+          {std::string(kXactPostgresXidProperty), PostgresXidText()}};
+}
+
+CommitRecoveryTable RecoveryTableFor(const PendingTableChange& table_change) {
+  return CommitRecoveryTable{
+      .options = table_change.options,
+      .base_snapshot_id = table_change.base_snapshot_id,
+      .committed_snapshot_id = table_change.committed_snapshot_id,
+      .iceberg_state = table_change.commit_state_unknown
+                           ? std::string(kTableIcebergUnknown)
+                           : (table_change.committed ? std::string(kTableIcebergCommitted)
+                                                     : std::string(kTableIcebergPending)),
+  };
+}
+
+void UpsertRecoveryTable(CommitRecoveryRecord& record, CommitRecoveryTable table) {
+  for (auto& existing : record.tables) {
+    if (existing.options.catalog == table.options.catalog &&
+        existing.options.name_space == table.options.name_space &&
+        existing.options.table == table.options.table) {
+      existing = std::move(table);
+      return;
+    }
+  }
+  record.tables.push_back(std::move(table));
+}
+
+std::string RecoveryStateFor(const CommitRecoveryRecord& record) {
+  bool any_committed = false;
+  bool any_pending = false;
+  bool any_unknown = false;
+  for (const auto& table : record.tables) {
+    if (table.iceberg_state == kTableIcebergCommitted) {
+      any_committed = true;
+    } else if (table.iceberg_state == kTableIcebergUnknown) {
+      any_unknown = true;
+    } else {
+      any_pending = true;
+    }
+  }
+  if (any_unknown || (any_committed && any_pending)) {
+    return std::string(kRecoveryStateIcebergPartial);
+  }
+  if (any_committed) {
+    return std::string(kRecoveryStateIcebergComplete);
+  }
+  return std::string(kRecoveryStatePreparing);
+}
+
+Status PersistCurrentRecoveryLog() {
+  auto& state = CurrentXactCommitState();
+  if (state.commit_id.empty()) {
+    return Ok();
+  }
+  state.recovery.commit_id = state.commit_id;
+  state.recovery.postgres_xid = PostgresXidText();
+  state.recovery.state = RecoveryStateFor(state.recovery);
+  return WriteCommitRecoveryLog(state.recovery);
+}
+
+void ForgetCurrentRecoveryLog() {
+  auto& state = CurrentXactCommitState();
+  if (!state.commit_id.empty()) {
+    auto status = RemoveCommitRecoveryLog(state.commit_id);
+    if (!status) {
+      elog(WARNING, "%s", status.error().message().c_str());
+    }
+  }
+  ResetXactCommitState();
+}
+
+void AbortPendingModifyChanges() {
+  auto& state = CurrentXactCommitState();
+  bool iceberg_published = false;
+  for (const auto& table : state.recovery.tables) {
+    if (table.iceberg_state == kTableIcebergCommitted ||
+        table.iceberg_state == kTableIcebergUnknown) {
+      iceberg_published = true;
+      break;
+    }
+  }
+
+  if (iceberg_published) {
+    auto rollback = BestEffortRollbackCommittedTables(state.recovery);
+    if (rollback) {
+      ForgetCurrentRecoveryLog();
+    } else {
+      state.recovery.state = std::string(kRecoveryStateNeedsRepair);
+      auto persist = WriteCommitRecoveryLog(state.recovery);
+      if (!persist) {
+        elog(WARNING, "%s", persist.error().message().c_str());
+      }
+      elog(WARNING,
+           "pgiceberg published Iceberg snapshots for commit %s after a "
+           "PostgreSQL abort; run pgiceberg.reconcile_commits() and "
+           "pgiceberg.repair_commit() to resolve",
+           state.commit_id.c_str());
+      ResetXactCommitState();
+    }
+  } else if (!state.commit_id.empty()) {
+    ForgetCurrentRecoveryLog();
+  } else {
+    ResetXactCommitState();
+  }
+}
 
 // LoadIcebergTable returns a fresh Table object for each executor entry, so
 // pointer identity would split pending work from later statements.  Length
@@ -307,8 +502,9 @@ Status RebuildPendingTransaction(PendingTableChange& table_change) {
   PGICEBERG_ASSIGN_OR_RETURN(auto transaction,
                              FromIcebergResult(table_change.base_table->NewTransaction(),
                                                "create Iceberg transaction"));
+  const auto xact_properties = CurrentXactProperties();
   for (auto& change : table_change.changes) {
-    PGICEBERG_RETURN_NOT_OK(change.change->Apply(*transaction));
+    PGICEBERG_RETURN_NOT_OK(change.change->Apply(*transaction, xact_properties));
   }
   table_change.transaction = std::move(transaction);
   return Ok();
@@ -321,19 +517,33 @@ Result<PendingTableChange*> EnsurePendingTableChange(
     return pending;
   }
 
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
+  Options stored = options;
+  stored.catalog_type = catalog_options.catalog_type;
+  stored.catalog_uri = catalog_options.catalog_uri;
+  stored.warehouse = catalog_options.warehouse;
+  stored.catalog_name = catalog_options.catalog_name;
+  stored.name_space = catalog_options.name_space;
+  stored.table = catalog_options.table;
+
   PGICEBERG_ASSIGN_OR_RETURN(
       auto transaction,
       FromIcebergResult(table->NewTransaction(), "create Iceberg transaction"));
+  const auto base_snapshot_id = SnapshotIdIfPresent(*table);
   auto& changes = PendingTableChanges();
   changes.push_back(PendingTableChange{
       .key = std::move(key),
       .logger = iceberg::GetCurrentLogger(),
+      .options = std::move(stored),
       .base_table = std::move(table),
       .transaction = std::move(transaction),
       .changes = {},
+      .base_snapshot_id = base_snapshot_id,
+      .committed_snapshot_id = std::nullopt,
       .committed = false,
       .commit_state_unknown = false,
   });
+  (void)EnsureXactCommitId();
   return &changes.back();
 }
 
@@ -426,7 +636,7 @@ Status QueuePendingModifyChange(PendingTableChange& table_change,
   // Apply now, but do not publish to the catalog yet.  Applying now gives later
   // statements read-your-writes behavior; delaying the transaction commit lets
   // PostgreSQL abort discard the Iceberg metadata update.
-  auto status = pending_change->Apply(*table_change.transaction);
+  auto status = pending_change->Apply(*table_change.transaction, CurrentXactProperties());
   if (!status) {
     CleanupDataFiles(table_change.base_table, pending_change->NewDataFilePaths());
     table_change.changes.pop_back();
@@ -438,8 +648,33 @@ Status QueuePendingModifyChange(PendingTableChange& table_change,
 Status CommitPendingModifyChanges() {
   // PRE_COMMIT is the latest point where an ERROR can still abort the
   // PostgreSQL transaction.  Commit Iceberg here so a catalog failure does not
-  // leave PostgreSQL thinking the statement succeeded.
-  for (auto& table_change : PendingTableChanges()) {
+  // leave PostgreSQL thinking the statement succeeded.  Iceberg catalog
+  // commits are still not atomic with PostgreSQL, and multiple Iceberg tables
+  // are committed sequentially, so a durable recovery log records the commit
+  // identifier before the first catalog publish.
+  auto& pending = PendingTableChanges();
+  bool has_work = false;
+  for (const auto& table_change : pending) {
+    if (!table_change.committed && !table_change.changes.empty()) {
+      has_work = true;
+      break;
+    }
+  }
+  if (!has_work) {
+    return Ok();
+  }
+
+  (void)EnsureXactCommitId();
+  auto& recovery = CurrentXactCommitState().recovery;
+  for (const auto& table_change : pending) {
+    if (table_change.committed || table_change.changes.empty()) {
+      continue;
+    }
+    UpsertRecoveryTable(recovery, RecoveryTableFor(table_change));
+  }
+  PGICEBERG_RETURN_NOT_OK(PersistCurrentRecoveryLog());
+
+  for (auto& table_change : pending) {
     if (table_change.committed || table_change.changes.empty()) {
       continue;
     }
@@ -452,13 +687,22 @@ Status CommitPendingModifyChanges() {
         // catalog.  Leave the files in place and surface the commit error.
         table_change.commit_state_unknown = true;
       }
+      UpsertRecoveryTable(recovery, RecoveryTableFor(table_change));
+      recovery.state = std::string(kRecoveryStateNeedsRepair);
+      auto persist = PersistCurrentRecoveryLog();
+      if (!persist) {
+        elog(WARNING, "%s", persist.error().message().c_str());
+      }
       return std::unexpected(
           MakePgError(commit_result.error(), "commit pending Iceberg transaction"));
     }
     auto committed_table = std::move(commit_result).value();
     table_change.base_table = std::move(committed_table);
+    table_change.committed_snapshot_id = SnapshotIdIfPresent(*table_change.base_table);
     table_change.changes.clear();
     table_change.committed = true;
+    UpsertRecoveryTable(recovery, RecoveryTableFor(table_change));
+    PGICEBERG_RETURN_NOT_OK(PersistCurrentRecoveryLog());
   }
   ClearPendingTableChanges(false);
   return Ok();
@@ -468,8 +712,12 @@ Status XactCallbackImpl(XactEvent event) {
   switch (event) {
     case XACT_EVENT_PRE_COMMIT:
       return CommitPendingModifyChanges();
+    case XACT_EVENT_COMMIT:
+    case XACT_EVENT_PARALLEL_COMMIT:
+      ForgetCurrentRecoveryLog();
+      break;
     case XACT_EVENT_PRE_PREPARE:
-      if (!PendingTableChanges().empty()) {
+      if (!PendingTableChanges().empty() || !CurrentXactCommitState().commit_id.empty()) {
         // Prepared transactions would require durable pending Iceberg change
         // state across backend exit and crash recovery.  This queue is only
         // backend-local, so fail before PostgreSQL prepares.
@@ -480,6 +728,7 @@ Status XactCallbackImpl(XactEvent event) {
       break;
     case XACT_EVENT_ABORT:
     case XACT_EVENT_PARALLEL_ABORT:
+      AbortPendingModifyChanges();
       ClearPendingTableChanges(true);
       break;
     default:
@@ -934,6 +1183,14 @@ Result<std::shared_ptr<iceberg::Table>> ReadTableForCurrentTransaction(
 }
 
 Status FlushPendingModifyChanges() { return CommitPendingModifyChanges(); }
+
+std::optional<std::string> CurrentXactCommitId() {
+  const auto& commit_id = CurrentXactCommitState().commit_id;
+  if (commit_id.empty()) {
+    return std::nullopt;
+  }
+  return commit_id;
+}
 
 Result<std::optional<std::string>> ReadTableProperty(const Options& options,
                                                      const char* relation_name,

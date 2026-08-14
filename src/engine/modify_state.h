@@ -58,6 +58,9 @@ Result<std::optional<std::string>> ReadTableProperty(const Options& options,
 // Durably commit any pending Iceberg DML for the current PostgreSQL transaction.
 // Safe to call before PRE_COMMIT; later PRE_COMMIT becomes a no-op for flushed work.
 Status FlushPendingModifyChanges();
+// Identifier stamped onto Iceberg snapshots for the current PostgreSQL
+// transaction's pending DML.  Empty when this backend has no pending writes.
+std::optional<std::string> CurrentXactCommitId();
 void RegisterTransactionCallbacks();
 
 }  // namespace pgiceberg::engine

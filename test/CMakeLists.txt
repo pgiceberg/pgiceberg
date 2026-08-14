@@ -15,6 +15,7 @@ if(POSTGRESQL_REGRESS)
       fdw_options
       logical_decoding
       fdw_dml
+      commit_recovery
       fdw_import_schema
       tableam_native
       fdw_parquet
