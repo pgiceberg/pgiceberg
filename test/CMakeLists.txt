@@ -66,8 +66,16 @@ if(POSTGRESQL_REGRESS)
                  "${PGICEBERG_REGRESS_EXTENSION_DIR}/pgiceberg--0.1.0.sql" COPYONLY)
 
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
-       "unix_socket_directories = '/tmp'\n" "listen_addresses = '127.0.0.1'\n"
+       "unix_socket_directories = '/tmp'\n"
+       "listen_addresses = '127.0.0.1'\n"
        "wal_level = logical\n"
+       "logging_collector = on\n"
+       "log_destination = 'stderr,csvlog,jsonlog'\n"
+       "log_directory = 'log'\n"
+       "log_filename = 'postgresql.log'\n"
+       "log_rotation_age = 0\n"
+       "log_rotation_size = 0\n"
+       "log_error_verbosity = verbose\n"
        "dynamic_library_path = '${PROJECT_BINARY_DIR}/src:$libdir'\n")
   if(POSTGRESQL_VERSION VERSION_GREATER_EQUAL "18")
     file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"

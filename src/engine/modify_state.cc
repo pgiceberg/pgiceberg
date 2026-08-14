@@ -254,6 +254,7 @@ struct PendingModifyChange {
 // until PostgreSQL reaches PRE_COMMIT.
 struct PendingTableChange {
   std::string key;
+  std::shared_ptr<iceberg::Logger> logger;
   std::shared_ptr<iceberg::Table> base_table;
   std::shared_ptr<iceberg::Transaction> transaction;
   std::vector<PendingModifyChange> changes;
@@ -302,6 +303,7 @@ PendingTableChange* FindPendingTableChange(const std::string& key) {
 // Iceberg transaction.  That makes abort handling depend only on the list of
 // surviving logical changes, not on iceberg-cpp internals.
 Status RebuildPendingTransaction(PendingTableChange& table_change) {
+  OperationLoggerScope log_scope(table_change.logger);
   PGICEBERG_ASSIGN_OR_RETURN(auto transaction,
                              FromIcebergResult(table_change.base_table->NewTransaction(),
                                                "create Iceberg transaction"));
@@ -325,6 +327,7 @@ Result<PendingTableChange*> EnsurePendingTableChange(
   auto& changes = PendingTableChanges();
   changes.push_back(PendingTableChange{
       .key = std::move(key),
+      .logger = iceberg::GetCurrentLogger(),
       .base_table = std::move(table),
       .transaction = std::move(transaction),
       .changes = {},
@@ -407,6 +410,7 @@ void ClearPendingTableChanges(bool cleanup_data_files) {
   if (cleanup_data_files) {
     for (const auto& table_change : PendingTableChanges()) {
       if (!table_change.committed && !table_change.commit_state_unknown) {
+        OperationLoggerScope log_scope(table_change.logger);
         CleanupDataFiles(table_change.base_table, NewDataFilePaths(table_change));
       }
     }
@@ -439,6 +443,7 @@ Status CommitPendingModifyChanges() {
     if (table_change.committed || table_change.changes.empty()) {
       continue;
     }
+    OperationLoggerScope log_scope(table_change.logger);
     auto commit_result = table_change.transaction->Commit();
     if (!commit_result) {
       if (commit_result.error().kind == iceberg::ErrorKind::kCommitStateUnknown) {
@@ -505,6 +510,7 @@ Status SubXactCallbackImpl(SubXactEvent event, SubTransactionId my_subid,
       break;
     case SUBXACT_EVENT_ABORT_SUB:
       for (auto& table_change : table_changes) {
+        OperationLoggerScope log_scope(table_change.logger);
         std::vector<std::string> aborted_paths;
         for (const auto& change : table_change.changes) {
           if (change.subtransaction_id == my_subid) {
@@ -1020,6 +1026,7 @@ struct ModifyState {
   MemoryContext row_context = nullptr;
   CmdType operation = CMD_UNKNOWN;
   Options options;
+  std::shared_ptr<iceberg::Logger> logger;
   std::shared_ptr<iceberg::Table> table;
   std::shared_ptr<iceberg::Table> read_table;
   std::shared_ptr<iceberg::Schema> iceberg_schema;
@@ -1034,7 +1041,14 @@ struct ModifyState {
   std::int64_t rows = 0;
 };
 
-void DeleteModifyState(void* arg) { delete static_cast<ModifyState*>(arg); }
+void DeleteModifyState(void* arg) {
+  auto* state = static_cast<ModifyState*>(arg);
+  if (state == nullptr) {
+    return;
+  }
+  OperationLoggerScope log_scope(state->logger);
+  delete state;
+}
 
 void RegisterMemoryContextCleanup(ModifyState* state, MemoryContext context) {
   // FDW EndForeignModify is not guaranteed after an ERROR.  Register with the
@@ -1074,7 +1088,8 @@ Result<ModifyState*> BeginModify(ModifyTableState* mtstate, ResultRelInfo* rinfo
   state->operation = mtstate->operation;
   state->options = options;
   Relation relation = rinfo->ri_RelationDesc;
-  OperationLoggerScope log_scope("modify", RelationGetRelationName(relation));
+  state->logger = MakeOperationLogger("modify", RelationGetRelationName(relation));
+  OperationLoggerScope log_scope(state->logger);
   state->tuple_desc = RelationGetDescr(relation);
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
@@ -1170,10 +1185,14 @@ Result<TupleTableSlot*> ExecDelete(ModifyState* state, TupleTableSlot* slot,
 }
 
 Status EndModify(ModifyState* state) {
+  if (state == nullptr) {
+    return Ok();
+  }
+  OperationLoggerScope log_scope(state->logger);
   DetachMemoryContextCleanup(state);
   std::unique_ptr<ModifyState, decltype(&DeleteModifyStateAndRowContext)> guard(
       state, DeleteModifyStateAndRowContext);
-  if (state == nullptr || state->rows == 0) {
+  if (state->rows == 0) {
     return Ok();
   }
 

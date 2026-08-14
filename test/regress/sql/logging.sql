@@ -15,6 +15,9 @@ CREATE EXTENSION pgiceberg;
 \pset format unaligned
 \set VERBOSITY terse
 
+SHOW pgiceberg.iceberg_log_level;
+SET pgiceberg.iceberg_log_level = 'invalid';
+
 DO $$
 BEGIN
   PERFORM pgiceberg.add_catalog(
@@ -44,9 +47,66 @@ LIMIT TO (yellow_trip)
 FROM SERVER logging_server
 INTO logging_imported;
 
+SET pgiceberg.iceberg_log_level = 'off';
+
+SELECT count(*) AS row_count_with_logging_off FROM logging_imported.yellow_trip;
+
+ALTER FOREIGN TABLE logging_imported.yellow_trip
+RENAME TO "yellow trip=""quoted""";
+
+SET client_min_messages = log;
 SET pgiceberg.iceberg_log_level = 'info';
 
-SELECT count(*) AS row_count FROM logging_imported.yellow_trip;
+SELECT count(*) AS row_count_with_logging_info
+FROM logging_imported."yellow trip=""quoted""";
+
+-- Rotation flushes the collector streams. Poll for the last scan record in
+-- both structured destinations so loaded CI does not depend on a fixed delay.
+DO $$
+DECLARE
+  json_log_path text := pg_current_logfile('jsonlog');
+  csv_log_path text := pg_current_logfile('csvlog');
+  deadline timestamptz := clock_timestamp() + interval '10 seconds';
+  json_ready boolean;
+  csv_ready boolean;
+BEGIN
+  PERFORM pg_rotate_logfile();
+  LOOP
+    SELECT EXISTS (
+      SELECT 1
+      FROM string_to_table(pg_read_file(json_log_path), E'\n') AS lines(line)
+      WHERE line LIKE '%pgiceberg: opened scan task 1 of 1%'
+        AND pg_input_is_valid(line, 'jsonb')
+    ) INTO json_ready;
+    csv_ready := pg_read_file(csv_log_path) LIKE
+                 '%pgiceberg: opened scan task 1 of 1%';
+
+    EXIT WHEN json_ready AND csv_ready;
+    IF clock_timestamp() >= deadline THEN
+      RAISE EXCEPTION 'timed out waiting for pgiceberg collector records';
+    END IF;
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+END $$;
+
+WITH json_records AS (
+  SELECT line::jsonb AS record
+  FROM string_to_table(pg_read_file(pg_current_logfile('jsonlog')), E'\n') AS lines(line)
+  WHERE line <> ''
+)
+SELECT count(*) > 0 AS logged_through_postgres_json
+FROM json_records
+WHERE record ->> 'message' = 'pgiceberg: planned 1 scan tasks across 1 data files'
+  AND record ->> 'detail' =
+      'iceberg_level=info attributes={"operation":"scan","relation":"yellow trip=\"quoted\""}'
+  AND record ->> 'error_severity' = 'LOG'
+  AND record ->> 'file_name' LIKE '%iceberg_scan.cc';
+
+SELECT pg_read_file(pg_current_logfile('csvlog')) LIKE
+       '%pgiceberg: planned 1 scan tasks across 1 data files%'
+       AS logged_through_postgres_csv;
+
+RESET client_min_messages;
 
 DROP SCHEMA logging_imported CASCADE;
 DROP SERVER logging_server;
