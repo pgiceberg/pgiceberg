@@ -66,6 +66,21 @@ WHERE table_schema = 'imported'
 column_name|numeric_precision|numeric_scale
 fare_amount|38|0
 (1 row)
+SELECT att.attname, opt.option_name, opt.option_value
+FROM pg_attribute AS att
+JOIN LATERAL pg_options_to_table(att.attfdwoptions) AS opt(option_name, option_value)
+  ON true
+WHERE att.attrelid = 'imported.trip_fixture'::regclass
+  AND att.attnum > 0
+  AND NOT att.attisdropped
+ORDER BY att.attnum, opt.option_name;
+attname|option_name|option_value
+vendorid|field_id|1
+passenger_count|field_id|2
+trip_distance|field_id|3
+store_and_fwd_flag|field_id|4
+fare_amount|field_id|5
+(5 rows)
 IMPORT FOREIGN SCHEMA "default"
 FROM SERVER iceberg
 INTO public;

@@ -56,6 +56,23 @@ COMMENT ON COLUMN pgiceberg.table_bindings.namespace IS
 COMMENT ON COLUMN pgiceberg.table_bindings.table_name IS
   'Iceberg table name used to load the table.';
 
+CREATE TABLE pgiceberg.column_bindings (
+  relid oid NOT NULL REFERENCES pgiceberg.table_bindings(relid) ON DELETE CASCADE,
+  attnum smallint NOT NULL,
+  field_id integer NOT NULL CHECK (field_id > 0),
+  PRIMARY KEY (relid, attnum),
+  UNIQUE (relid, field_id)
+) USING heap;
+
+COMMENT ON TABLE pgiceberg.column_bindings IS
+  'Native table access method mapping from PostgreSQL attributes to Iceberg field ids.';
+COMMENT ON COLUMN pgiceberg.column_bindings.relid IS
+  'OID of the PostgreSQL iceberg table.';
+COMMENT ON COLUMN pgiceberg.column_bindings.attnum IS
+  'PostgreSQL attribute number.';
+COMMENT ON COLUMN pgiceberg.column_bindings.field_id IS
+  'Iceberg schema field id that survives rename and reordering.';
+
 -- The logical output plugin excludes the pgiceberg schema, so this control
 -- table can remain crash-safe without feeding its progress updates back into
 -- mirror replication slots.
@@ -697,3 +714,82 @@ $$;
 
 COMMENT ON FUNCTION pgiceberg.table_format_version(text, text, text) IS
   'Return the Iceberg table format version from the current table metadata.';
+
+CREATE FUNCTION pgiceberg.schema_diff_json(rel regclass)
+RETURNS jsonb
+AS 'MODULE_PATHNAME', 'pgiceberg_schema_diff_json'
+LANGUAGE C STRICT SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg
+;
+
+COMMENT ON FUNCTION pgiceberg.schema_diff_json(regclass) IS
+  'Compare a foreign table or iceberg table with the current Iceberg schema and return JSON schema changes.';
+
+CREATE FUNCTION pgiceberg.schema_diff(rel regclass)
+RETURNS TABLE (
+  change text,
+  local_column text,
+  local_type text,
+  iceberg_field_id integer,
+  iceberg_name text,
+  iceberg_type text,
+  detail text
+)
+LANGUAGE sql STRICT SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg
+AS $$
+  SELECT
+    x.change,
+    x.local_column,
+    x.local_type,
+    x.iceberg_field_id,
+    x.iceberg_name,
+    x.iceberg_type,
+    x.detail
+  FROM jsonb_to_recordset(pgiceberg.schema_diff_json($1)) AS x(
+    change text,
+    local_column text,
+    local_type text,
+    iceberg_field_id integer,
+    iceberg_name text,
+    iceberg_type text,
+    detail text
+  )
+  ORDER BY x.iceberg_field_id NULLS LAST, x.local_column NULLS LAST, x.change;
+$$;
+
+COMMENT ON FUNCTION pgiceberg.schema_diff(regclass) IS
+  'Compare a foreign table or iceberg table with the current Iceberg schema.';
+
+CREATE FUNCTION pgiceberg.refresh_schema(rel regclass)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_refresh_schema'
+LANGUAGE C STRICT SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg
+;
+
+COMMENT ON FUNCTION pgiceberg.refresh_schema(regclass) IS
+  'Apply ALTER FOREIGN TABLE statements so the local definition matches the current Iceberg schema, preserving field ids.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.refresh_schema(regclass) FROM PUBLIC;
+
+CREATE FUNCTION pgiceberg.update_schema(
+  name text,
+  namespace text,
+  table_name text,
+  add_names text[],
+  add_types regtype[],
+  drop_names text[],
+  rename_from text[],
+  rename_to text[]
+)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_update_schema'
+LANGUAGE C STRICT SECURITY DEFINER
+SET search_path = pg_catalog, pgiceberg
+;
+
+COMMENT ON FUNCTION pgiceberg.update_schema(text, text, text, text[], regtype[], text[], text[], text[]) IS
+  'Apply Iceberg schema updates: add optional columns, drop columns, and rename columns.';
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.update_schema(text, text, text, text[], regtype[], text[], text[], text[]) FROM PUBLIC;
