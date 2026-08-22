@@ -15,6 +15,8 @@
 #include <memory>
 #include <string_view>
 
+#include <iceberg/logging/logger.h>
+
 namespace pgiceberg {
 
 // Install the shared iceberg-cpp logger that forwards to PostgreSQL elog.
@@ -23,18 +25,22 @@ void InstallDefaultIcebergLogger();
 // Register pgiceberg.iceberg_log_level (PGC_USERSET).
 void RegisterIcebergLoggingGucs();
 
-// Bind iceberg-cpp logging for one engine operation on the current thread.
+// Create a reusable logger decorated with one engine operation's context.
+std::shared_ptr<iceberg::Logger> MakeOperationLogger(std::string_view operation,
+                                                     std::string_view relation);
+
+// Bind an operation logger on the current thread for the lifetime of this scope.
 class OperationLoggerScope {
  public:
   OperationLoggerScope(std::string_view operation, std::string_view relation);
+  explicit OperationLoggerScope(std::shared_ptr<iceberg::Logger> logger) noexcept;
   ~OperationLoggerScope();
 
   OperationLoggerScope(const OperationLoggerScope&) = delete;
   OperationLoggerScope& operator=(const OperationLoggerScope&) = delete;
 
  private:
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
+  iceberg::ScopedLogger scope_;
 };
 
 }  // namespace pgiceberg

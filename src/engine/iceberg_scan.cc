@@ -157,6 +157,8 @@ Result<bool> IcebergScanCursor::OpenCurrentTask() {
   PGICEBERG_ASSIGN_OR_RETURN(
       batch_reader_, FromArrowResult(arrow::ImportRecordBatchReader(&*current_stream_),
                                      "import record batch reader"));
+  iceberg::Log(iceberg::LogLevel::kInfo, "opened scan task {} of {}", task_index_ + 1,
+               tasks_.size());
   return true;
 }
 

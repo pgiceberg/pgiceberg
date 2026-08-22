@@ -12,10 +12,12 @@
 
 #include "common/pg_logger.h"
 
+#include <array>
 #include <atomic>
-#include <chrono>
 #include <cstdio>
+#include <cstdint>
 #include <format>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -28,6 +30,7 @@
 
 extern "C" {
 #include "postgres.h"
+#include "postmaster/syslogger.h"
 #include "utils/guc.h"
 #include "utils/elog.h"
 }
@@ -36,13 +39,13 @@ namespace pgiceberg {
 namespace {
 
 std::thread::id g_backend_main_thread_id;
+bool g_stderr_redirected_to_collector = false;
 char* IcebergLogLevelGuc = nullptr;
-std::shared_ptr<iceberg::Logger> g_pg_logger;
+constexpr std::size_t kMaxPendingWorkerLogs = 1024;
+constexpr std::size_t kWorkerFatalBufferSize = 1024;
 
-std::string_view Basename(std::string_view path) noexcept {
-  const auto pos = path.find_last_of("/\\");
-  return pos == std::string_view::npos ? path : path.substr(pos + 1);
-}
+class PgElogLogger;
+std::weak_ptr<PgElogLogger> g_pg_logger;
 
 bool IsBackendMainThread() noexcept {
   return std::this_thread::get_id() == g_backend_main_thread_id;
@@ -67,44 +70,141 @@ int IcebergLevelToPgElevel(iceberg::LogLevel level) noexcept {
   std::unreachable();
 }
 
+void AppendJsonString(std::string& output, std::string_view value) {
+  constexpr char kHexDigits[] = "0123456789abcdef";
+
+  output += '"';
+  for (const unsigned char ch : value) {
+    switch (ch) {
+      case '"':
+        output += "\\\"";
+        break;
+      case '\\':
+        output += "\\\\";
+        break;
+      case '\b':
+        output += "\\b";
+        break;
+      case '\f':
+        output += "\\f";
+        break;
+      case '\n':
+        output += "\\n";
+        break;
+      case '\r':
+        output += "\\r";
+        break;
+      case '\t':
+        output += "\\t";
+        break;
+      default:
+        if (ch < 0x20) {
+          output += "\\u00";
+          output += kHexDigits[ch >> 4];
+          output += kHexDigits[ch & 0x0f];
+        } else {
+          output += static_cast<char>(ch);
+        }
+        break;
+    }
+  }
+  output += '"';
+}
+
 std::string FormatAttributes(const std::vector<iceberg::LogAttribute>& attributes) {
   if (attributes.empty()) {
     return {};
   }
-  std::string formatted = " {";
+
+  std::string formatted = "attributes={";
   for (std::size_t i = 0; i < attributes.size(); ++i) {
     if (i > 0) {
-      formatted += ' ';
+      formatted += ',';
     }
-    formatted += attributes[i].key;
-    formatted += '=';
-    formatted += attributes[i].value;
+    AppendJsonString(formatted, attributes[i].key);
+    formatted += ':';
+    AppendJsonString(formatted, attributes[i].value);
   }
   formatted += '}';
   return formatted;
 }
 
-std::string FormatLine(const iceberg::LogMessage& message) {
-  const auto now =
-      std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
-  return std::format("{:%Y-%m-%dT%H:%M:%S}Z {} [{}:{}] {}{}", now,
-                     iceberg::ToString(message.level),
-                     Basename(message.location.file_name()), message.location.line(),
-                     message.message, FormatAttributes(message.attributes));
+std::string FormatDetail(const iceberg::LogMessage& message) {
+  auto detail = std::format("iceberg_level={}", iceberg::ToString(message.level));
+  auto attributes = FormatAttributes(message.attributes);
+  if (!attributes.empty()) {
+    detail += ' ';
+    detail += attributes;
+  }
+  return detail;
 }
 
-void EmitToStderr(std::string_view line) noexcept {
-  std::fwrite(line.data(), 1, line.size(), stderr);
-  std::fputc('\n', stderr);
+void EmitWorkerFatal(const iceberg::LogMessage& message) noexcept {
+  // A fatal log is immediately followed by abort(), so it cannot wait for the
+  // backend main thread to drain the regular worker queue. Keep this fallback
+  // allocation-free and bounded; all non-fatal worker records still use elog on
+  // the main thread.
+  constexpr std::string_view kPrefix = "WARNING:  pgiceberg: ";
+  constexpr std::string_view kDetail =
+      "\nDETAIL:  iceberg_level=fatal worker_thread=true\n";
+  static_assert(kPrefix.size() + kDetail.size() <= kWorkerFatalBufferSize);
+
+  std::array<char, kWorkerFatalBufferSize> output{};
+  std::size_t length = 0;
+  const auto append = [&output, &length](std::string_view text) noexcept {
+    for (const char ch : text) {
+      if (length >= output.size()) {
+        return;
+      }
+      output[length++] = ch;
+    }
+  };
+
+  append(kPrefix);
+  const std::size_t available = output.size() - length - kDetail.size();
+  const bool truncated = message.message.size() > available;
+  const std::size_t message_limit =
+      truncated && available >= 3 ? available - 3 : available;
+  std::size_t copied = 0;
+  for (const unsigned char ch : message.message) {
+    if (copied >= message_limit) {
+      break;
+    }
+    output[length++] = ch < 0x20 || ch == 0x7f ? ' ' : static_cast<char>(ch);
+    ++copied;
+  }
+  if (truncated && available >= 3) {
+    append("...");
+  }
+  append(kDetail);
+
+  if (g_stderr_redirected_to_collector) {
+    write_pipe_chunks(output.data(), static_cast<int>(length), LOG_DESTINATION_STDERR);
+    return;
+  }
+  const auto written = std::fwrite(output.data(), 1, length, stderr);
+  (void)written;
   std::fflush(stderr);
 }
 
-void EmitToPostgres(int elevel, const std::string& line) noexcept {
+void EmitToPostgres(const iceberg::LogMessage& message) {
+  const int elevel = IcebergLevelToPgElevel(message.level);
   if (!message_level_is_interesting(elevel)) {
     return;
   }
+
+  const std::string detail = FormatDetail(message);
   if (errstart(elevel, TEXTDOMAIN)) {
-    errmsg_internal("pgiceberg: %s", line.c_str());
+    errmsg_internal("pgiceberg: %s", message.message.c_str());
+    errdetail_log("%s", detail.c_str());
+    errfinish(message.location.file_name(), static_cast<int>(message.location.line()),
+              message.location.function_name());
+  }
+}
+
+void EmitFormattingFailureToPostgres() noexcept {
+  if (errstart(WARNING, TEXTDOMAIN)) {
+    errmsg_internal("pgiceberg: log record could not be formatted");
     errfinish(__FILE__, __LINE__, __func__);
   }
 }
@@ -112,29 +212,27 @@ void EmitToPostgres(int elevel, const std::string& line) noexcept {
 class PgElogLogger final : public iceberg::Logger {
  public:
   explicit PgElogLogger(iceberg::LogLevel level = iceberg::LogLevel::kWarn)
-      : level_(level) {}
+      : level_(level) {
+    pending_.reserve(kMaxPendingWorkerLogs);
+    draining_.reserve(kMaxPendingWorkerLogs);
+  }
 
   bool ShouldLog(iceberg::LogLevel level) const noexcept override {
     return level >= level_.load(std::memory_order_relaxed);
   }
 
   void Log(iceberg::LogMessage&& message) noexcept override {
-    try {
-      const std::string line = FormatLine(message);
-      const int elevel = IcebergLevelToPgElevel(message.level);
-      std::lock_guard lock(mutex_);
-      if (IsBackendMainThread()) {
-        EmitToPostgres(elevel, line);
-      } else {
-        EmitToStderr(line);
+    if (!IsBackendMainThread()) {
+      if (message.level == iceberg::LogLevel::kFatal) {
+        EmitWorkerFatal(message);
+        return;
       }
-    } catch (...) {
-      try {
-        std::lock_guard lock(mutex_);
-        EmitToStderr("pgiceberg: <log formatting error>");
-      } catch (...) {  // NOLINT(bugprone-empty-catch)
-      }
+      Enqueue(std::move(message));
+      return;
     }
+
+    Drain();
+    Emit(std::move(message));
   }
 
   void SetLevel(iceberg::LogLevel level) noexcept override {
@@ -145,9 +243,75 @@ class PgElogLogger final : public iceberg::Logger {
     return level_.load(std::memory_order_relaxed);
   }
 
+  void Flush() noexcept override { Drain(); }
+
+  void Drain() noexcept {
+    if (!IsBackendMainThread()) {
+      return;
+    }
+
+    std::uint64_t dropped = 0;
+    try {
+      std::lock_guard lock(mutex_);
+      pending_.swap(draining_);
+      dropped = std::exchange(dropped_, 0);
+    } catch (...) {
+      return;
+    }
+
+    for (auto& message : draining_) {
+      Emit(std::move(message));
+    }
+    draining_.clear();
+    if (dropped > 0) {
+      try {
+        iceberg::LogMessage warning{
+            .level = iceberg::LogLevel::kWarn,
+            .message = std::format("dropped {} worker log records because the pending "
+                                   "queue reached its {}-record limit",
+                                   dropped, kMaxPendingWorkerLogs),
+        };
+        EmitToPostgres(warning);
+      } catch (...) {
+        EmitFormattingFailureToPostgres();
+      }
+    }
+  }
+
  private:
+  void Enqueue(iceberg::LogMessage&& message) noexcept {
+    try {
+      std::lock_guard lock(mutex_);
+      if (pending_.size() >= kMaxPendingWorkerLogs) {
+        if (dropped_ < std::numeric_limits<std::uint64_t>::max()) {
+          ++dropped_;
+        }
+        return;
+      }
+      try {
+        pending_.push_back(std::move(message));
+      } catch (...) {
+        if (dropped_ < std::numeric_limits<std::uint64_t>::max()) {
+          ++dropped_;
+        }
+      }
+    } catch (...) {  // NOLINT(bugprone-empty-catch)
+    }
+  }
+
+  static void Emit(iceberg::LogMessage&& message) noexcept {
+    try {
+      EmitToPostgres(message);
+    } catch (...) {
+      EmitFormattingFailureToPostgres();
+    }
+  }
+
   std::atomic<iceberg::LogLevel> level_;
   std::mutex mutex_;
+  std::vector<iceberg::LogMessage> pending_;
+  std::vector<iceberg::LogMessage> draining_;
+  std::uint64_t dropped_ = 0;
 };
 
 class ContextLogger final : public iceberg::Logger {
@@ -161,8 +325,14 @@ class ContextLogger final : public iceberg::Logger {
   }
 
   void Log(iceberg::LogMessage&& message) noexcept override {
-    message.attributes.insert(message.attributes.end(), attributes_.begin(),
-                              attributes_.end());
+    try {
+      message.attributes.insert(message.attributes.end(), attributes_.begin(),
+                                attributes_.end());
+    } catch (...) {
+      // Logging is best effort. Preserve the record without context rather than
+      // terminating the backend if decorating it cannot allocate.
+      message.attributes.clear();
+    }
     inner_->Log(std::move(message));
   }
 
@@ -185,20 +355,6 @@ void ApplyConfiguredIcebergLogLevel() {
   }
 }
 
-void InstallFatalHandler() {
-  iceberg::SetFatalHandler(
-      [](const std::source_location& location, std::string_view message) {
-        if (g_pg_logger == nullptr) {
-          return;
-        }
-        g_pg_logger->Log(iceberg::LogMessage{
-            .level = iceberg::LogLevel::kFatal,
-            .message = std::string(message),
-            .location = location,
-        });
-      });
-}
-
 }  // namespace
 
 static bool CheckIcebergLogLevel(char** newval, void** /*extra*/, GucSource /*source*/) {
@@ -218,10 +374,11 @@ static void OnIcebergLogLevelAssign(const char* newval, void* /*extra*/) {
 
 void InstallDefaultIcebergLogger() {
   g_backend_main_thread_id = std::this_thread::get_id();
-  g_pg_logger = std::make_shared<PgElogLogger>(iceberg::LogLevel::kWarn);
-  iceberg::SetDefaultLogger(g_pg_logger);
+  g_stderr_redirected_to_collector = Logging_collector;
+  auto logger = std::make_shared<PgElogLogger>(iceberg::LogLevel::kWarn);
+  g_pg_logger = logger;
+  iceberg::SetDefaultLogger(std::move(logger));
   ApplyConfiguredIcebergLogLevel();
-  InstallFatalHandler();
 }
 
 void RegisterIcebergLoggingGucs() {
@@ -233,24 +390,28 @@ void RegisterIcebergLoggingGucs() {
       OnIcebergLogLevelAssign, nullptr);
 }
 
-struct OperationLoggerScope::Impl {
-  std::shared_ptr<iceberg::Logger> logger;
-  iceberg::ScopedLogger scope;
-
-  Impl(std::string_view operation, std::string_view relation)
-      : logger(std::make_shared<ContextLogger>(
-            iceberg::GetDefaultLogger(),
-            std::vector<iceberg::LogAttribute>{
-                {.key = "operation", .value = std::string(operation)},
-                {.key = "relation", .value = std::string(relation)},
-            })),
-        scope(logger) {}
-};
+std::shared_ptr<iceberg::Logger> MakeOperationLogger(std::string_view operation,
+                                                     std::string_view relation) {
+  return std::make_shared<ContextLogger>(
+      iceberg::GetCurrentLogger(),
+      std::vector<iceberg::LogAttribute>{
+          {.key = "operation", .value = std::string(operation)},
+          {.key = "relation", .value = std::string(relation)},
+      });
+}
 
 OperationLoggerScope::OperationLoggerScope(std::string_view operation,
                                            std::string_view relation)
-    : impl_(std::make_unique<Impl>(operation, relation)) {}
+    : OperationLoggerScope(MakeOperationLogger(operation, relation)) {}
 
-OperationLoggerScope::~OperationLoggerScope() = default;
+OperationLoggerScope::OperationLoggerScope(
+    std::shared_ptr<iceberg::Logger> logger) noexcept
+    : scope_(std::move(logger)) {}
+
+OperationLoggerScope::~OperationLoggerScope() {
+  if (auto logger = g_pg_logger.lock()) {
+    logger->Drain();
+  }
+}
 
 }  // namespace pgiceberg

@@ -55,6 +55,7 @@ struct ColumnState {
 
 struct ScanState {
   MemoryContextCallback* cleanup_callback = nullptr;
+  std::shared_ptr<iceberg::Logger> logger;
   std::shared_ptr<iceberg::Table> table;
   std::unique_ptr<IcebergScanCursor> cursor;
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -66,6 +67,7 @@ namespace {
 
 Result<bool> LoadNextBatch(ScanState* state) {
   while (state->batch == nullptr || state->row >= state->batch->num_rows()) {
+    OperationLoggerScope log_scope(state->logger);
     PGICEBERG_RETURN_NOT_OK(pgiceberg::CheckForInterrupts());
     std::shared_ptr<arrow::RecordBatch> batch;
     PGICEBERG_ASSIGN_OR_RETURN(auto has_batch, state->cursor->NextBatch(&batch));
@@ -126,7 +128,14 @@ void WarnIfNanosecondNarrowing(const arrow::Schema& arrow_schema, int column_ind
   }
 }
 
-void DeleteScanState(void* arg) { delete static_cast<ScanState*>(arg); }
+void DeleteScanState(void* arg) {
+  auto* state = static_cast<ScanState*>(arg);
+  if (state == nullptr) {
+    return;
+  }
+  OperationLoggerScope log_scope(state->logger);
+  delete state;
+}
 
 void RegisterMemoryContextCleanup(ScanState* state) {
   auto* callback = static_cast<MemoryContextCallback*>(
@@ -147,8 +156,9 @@ void DetachMemoryContextCleanup(ScanState* state) {
 Result<ScanState*> BeginScan(Relation relation, const Options& options,
                              const std::vector<int>& projected_attnums,
                              const ScanFilterBuilder& filter_builder) {
-  OperationLoggerScope log_scope("scan", RelationGetRelationName(relation));
   auto state = std::make_unique<ScanState>();
+  state->logger = MakeOperationLogger("scan", RelationGetRelationName(relation));
+  OperationLoggerScope log_scope(state->logger);
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   PGICEBERG_ASSIGN_OR_RETURN(
       state->table,
@@ -240,6 +250,7 @@ void ReScan(ScanState* state) {
   if (state == nullptr) {
     return;
   }
+  OperationLoggerScope log_scope(state->logger);
   state->cursor->Reset();
   state->batch.reset();
   state->row = 0;
@@ -247,7 +258,7 @@ void ReScan(ScanState* state) {
 
 void EndScan(ScanState* state) {
   DetachMemoryContextCleanup(state);
-  delete state;
+  DeleteScanState(state);
 }
 
 std::size_t ScanTaskCount(const ScanState* state) {
