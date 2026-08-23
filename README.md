@@ -158,6 +158,37 @@ Iceberg data files are Parquet, but pgiceberg does not read a Parquet path
 directly. It loads the Iceberg table through iceberg-cpp so table metadata,
 snapshots, manifests, and deletes are respected.
 
+## Transaction semantics
+
+Iceberg catalog publishes happen at PostgreSQL `PRE_COMMIT`. That lets an
+Iceberg commit failure abort PostgreSQL, but it is **not** a two-phase commit:
+
+- External Iceberg readers can see the new snapshot before PostgreSQL
+  `COMMIT`.
+- If Iceberg publish succeeds and PostgreSQL then aborts or crashes, Iceberg
+  may retain data that PostgreSQL does not. pgiceberg writes a durable
+  recovery log under `$PGDATA/pg_iceberg/xact/` and stamps
+  `pgiceberg.xact.commit-id` on each snapshot.
+- Multiple Iceberg tables in one PostgreSQL transaction are committed
+  sequentially. A failure can publish only a prefix of those tables.
+- `SERIALIZABLE` and `REPEATABLE READ` apply to PostgreSQL relations only.
+  They do not isolate Iceberg catalog commits or writers in other engines.
+- `PREPARE TRANSACTION` is rejected for pgiceberg DML.
+
+After a crash, inspect and repair in-doubt publishes. `reconcile_commits`
+checks the stored PostgreSQL xid first so a leftover log after a successful
+`COMMIT` is not treated as an Iceberg orphan:
+
+```sql
+SELECT * FROM pgiceberg.commit_recovery_log();
+SELECT * FROM pgiceberg.reconcile_commits();
+SELECT pgiceberg.repair_commit('<commit-id>', 'rollback');
+-- or: SELECT pgiceberg.repair_commit('<commit-id>', 'acknowledge');
+```
+
+See [PostgreSQL and Iceberg commit protocol](docs/design/postgres-iceberg-commit.md)
+for the full failure table and unsupported isolation guarantees.
+
 ## Import Tables
 
 Use `IMPORT FOREIGN SCHEMA` when the Iceberg table already exists and you want
