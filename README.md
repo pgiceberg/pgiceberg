@@ -175,7 +175,9 @@ Iceberg commit failure abort PostgreSQL, but it is **not** a two-phase commit:
   They do not isolate Iceberg catalog commits or writers in other engines.
 - `PREPARE TRANSACTION` is rejected for pgiceberg DML.
 
-After a crash, inspect and repair in-doubt publishes:
+After a crash, inspect and repair in-doubt publishes. `reconcile_commits`
+checks the stored PostgreSQL xid first so a leftover log after a successful
+`COMMIT` is not treated as an Iceberg orphan:
 
 ```sql
 SELECT * FROM pgiceberg.commit_recovery_log();

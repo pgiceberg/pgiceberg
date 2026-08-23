@@ -10,17 +10,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "common/constants.h"
-#include "common/fcinfo.h"
-#include "common/pg_error.h"
-#include "common/status.h"
-#include "engine/commit_recovery.h"
-#include "engine/modify_state.h"
-#include "engine/options.h"
-
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "engine/modify_state.h"
 
 extern "C" {
 #include "postgres.h"
@@ -32,6 +26,13 @@ extern "C" {
 #include "utils/jsonb.h"
 #include "utils/timestamp.h"
 }
+
+#include "common/constants.h"
+#include "common/fcinfo.h"
+#include "common/pg_error.h"
+#include "common/status.h"
+#include "engine/commit_recovery.h"
+#include "engine/options.h"
 
 namespace {
 

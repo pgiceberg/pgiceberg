@@ -14,6 +14,7 @@
 
 #include <cctype>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
@@ -37,6 +38,8 @@
 
 extern "C" {
 #include "postgres.h"
+#include "access/transam.h"
+#include "access/xact.h"
 #include "miscadmin.h"
 #include "utils/elog.h"
 #include "utils/errcodes.h"
@@ -49,6 +52,8 @@ constexpr std::string_view kLogMagic = "pgiceberg-commit-recovery";
 constexpr int kLogVersion = 1;
 constexpr const char* kRecoveryDirName = "pg_iceberg";
 constexpr const char* kRecoveryXactDirName = "xact";
+constexpr std::size_t kMaxLogFieldBytes = 1 << 20;
+constexpr std::size_t kMaxLogTables = 4096;
 
 bool IsSafeCommitId(std::string_view commit_id) {
   if (commit_id.empty() || commit_id.size() > 128) {
@@ -101,13 +106,35 @@ Status FsyncPath(const std::filesystem::path& path, bool directory) {
   return status;
 }
 
-Status DurableWriteFile(const std::filesystem::path& path, std::string_view contents) {
+Status DurableCreateDirectories(const std::filesystem::path& dir) {
+  std::vector<std::filesystem::path> created;
+  for (std::filesystem::path current = dir; !current.empty() && current != current.root_path();
+       current = current.parent_path()) {
+    std::error_code exists_ec;
+    if (std::filesystem::exists(current, exists_ec) && !exists_ec) {
+      break;
+    }
+    created.push_back(current);
+  }
+
   std::error_code ec;
-  std::filesystem::create_directories(path.parent_path(), ec);
+  std::filesystem::create_directories(dir, ec);
   if (ec) {
     return std::unexpected(MakeError(
         ERRCODE_IO_ERROR, "could not create commit recovery directory: " + ec.message()));
   }
+
+  // Fsync each newly created directory, then its parent, so a crash cannot
+  // drop $PGDATA/pg_iceberg or pg_iceberg/xact after the log file is synced.
+  for (const auto& path : created) {
+    PGICEBERG_RETURN_NOT_OK(FsyncPath(path, true));
+    PGICEBERG_RETURN_NOT_OK(FsyncPath(path.parent_path(), true));
+  }
+  return Ok();
+}
+
+Status DurableWriteFile(const std::filesystem::path& path, std::string_view contents) {
+  PGICEBERG_RETURN_NOT_OK(DurableCreateDirectories(path.parent_path()));
 
   auto tmp = path;
   tmp += ".tmp";
@@ -198,6 +225,10 @@ Status DecodeField(std::istream& in, std::string& value) {
   if (!(in >> size)) {
     return std::unexpected(
         MakeError(ERRCODE_DATA_EXCEPTION, "truncated pgiceberg commit recovery log"));
+  }
+  if (size > kMaxLogFieldBytes) {
+    return std::unexpected(MakeError(ERRCODE_DATA_EXCEPTION,
+                                     "pgiceberg commit recovery log field is too large"));
   }
   if (in.get() != ' ') {
     return std::unexpected(
@@ -296,7 +327,7 @@ Result<CommitRecoveryRecord> ParseRecord(std::istream& in) {
 
   PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "table_count"));
   std::size_t table_count = 0;
-  if (!(in >> table_count)) {
+  if (!(in >> table_count) || table_count > kMaxLogTables) {
     return std::unexpected(
         MakeError(ERRCODE_DATA_EXCEPTION, "invalid table_count in commit recovery log"));
   }
@@ -344,6 +375,87 @@ Result<std::optional<int64_t>> LoadCurrentSnapshotId(const iceberg::Table& table
 bool SnapshotHasCommitId(const iceberg::Snapshot& snapshot, std::string_view commit_id) {
   auto it = snapshot.summary.find(std::string(kXactCommitIdProperty));
   return it != snapshot.summary.end() && it->second == commit_id;
+}
+
+enum class PostgresXactOutcome {
+  kInProgress,
+  kCommitted,
+  kAborted,
+  kUnknown,
+};
+
+PostgresXactOutcome PostgresOutcomeForXid(std::string_view xid_text) {
+  if (xid_text.empty()) {
+    return PostgresXactOutcome::kUnknown;
+  }
+  try {
+    const auto value = std::stoull(std::string(xid_text));
+    const FullTransactionId full_xid = FullTransactionIdFromU64(value);
+    const TransactionId xid = XidFromFullTransactionId(full_xid);
+    if (!TransactionIdIsValid(xid)) {
+      return PostgresXactOutcome::kUnknown;
+    }
+    if (TransactionIdIsCurrentTransactionId(xid) || TransactionIdIsInProgress(xid)) {
+      return PostgresXactOutcome::kInProgress;
+    }
+    if (TransactionIdDidCommit(xid)) {
+      return PostgresXactOutcome::kCommitted;
+    }
+    if (TransactionIdDidAbort(xid)) {
+      return PostgresXactOutcome::kAborted;
+    }
+  } catch (...) {
+    return PostgresXactOutcome::kUnknown;
+  }
+  return PostgresXactOutcome::kUnknown;
+}
+
+CatalogOptions CatalogOptionsFromStored(const Options& options) {
+  CatalogOptions catalog_options;
+  catalog_options.catalog_type = options.catalog_type;
+  catalog_options.catalog_uri = options.catalog_uri;
+  catalog_options.warehouse = options.warehouse;
+  catalog_options.catalog_name = options.catalog_name;
+  catalog_options.name_space = options.name_space;
+  catalog_options.table = options.table;
+  return catalog_options;
+}
+
+Result<CatalogOptions> CatalogOptionsForRepair(const Options& options) {
+  if (!options.catalog_uri.empty()) {
+    return CatalogOptionsFromStored(options);
+  }
+  return ToCatalogOptions(options);
+}
+
+enum class SnapshotOwnership {
+  kOurs,
+  kBase,
+  kMissing,
+  kForeign,
+};
+
+Result<SnapshotOwnership> InspectSnapshotOwnership(const CommitRecoveryTable& table,
+                                                   std::string_view commit_id) {
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, CatalogOptionsForRepair(table.options));
+  PGICEBERG_ASSIGN_OR_RETURN(auto iceberg_table,
+                             LoadIcebergTable(catalog_options, table.options.table.c_str()));
+  PGICEBERG_ASSIGN_OR_RETURN(auto current_id, LoadCurrentSnapshotId(*iceberg_table));
+  if (!current_id.has_value()) {
+    return SnapshotOwnership::kMissing;
+  }
+  if (table.committed_snapshot_id.has_value() &&
+      *current_id == *table.committed_snapshot_id) {
+    return SnapshotOwnership::kOurs;
+  }
+  auto current_snapshot = iceberg_table->current_snapshot();
+  if (current_snapshot && SnapshotHasCommitId(*current_snapshot.value(), commit_id)) {
+    return SnapshotOwnership::kOurs;
+  }
+  if (table.base_snapshot_id.has_value() && *current_id == *table.base_snapshot_id) {
+    return SnapshotOwnership::kBase;
+  }
+  return SnapshotOwnership::kForeign;
 }
 
 bool IsAncestorOf(const iceberg::Table& table, int64_t ancestor_id,
@@ -407,18 +519,18 @@ std::string OverallVerdict(const std::vector<std::string>& table_verdicts) {
     }
   }
   if (any_unresolved) {
-    return "needs_operator";
+    return std::string(kVerdictNeedsOperator);
   }
   if (any_published && any_pending) {
-    return "iceberg_partial";
+    return std::string(kVerdictIcebergPartial);
   }
   if (any_published) {
-    return "iceberg_orphan";
+    return std::string(kVerdictIcebergOrphan);
   }
   if (any_rolled_back || any_pending) {
-    return "stale_intent";
+    return std::string(kVerdictStaleIntent);
   }
-  return "needs_operator";
+  return std::string(kVerdictNeedsOperator);
 }
 
 Status RollbackTableToBase(const CommitRecoveryTable& table) {
@@ -538,6 +650,23 @@ Result<std::vector<ReconcileResult>> ReconcileCommitRecoveryLogs() {
   std::vector<ReconcileResult> results;
   results.reserve(records.size());
   for (auto& record : records) {
+    const auto postgres_outcome = PostgresOutcomeForXid(record.postgres_xid);
+    if (postgres_outcome == PostgresXactOutcome::kInProgress) {
+      results.push_back(ReconcileResult{.record = std::move(record),
+                                        .verdict = std::string(kVerdictInProgress),
+                                        .detail_json = "{\"tables\":[]}"});
+      continue;
+    }
+    if (postgres_outcome == PostgresXactOutcome::kCommitted) {
+      auto removed = RemoveCommitRecoveryLog(record.commit_id);
+      if (!removed) {
+        elog(WARNING, "%s", removed.error().message().c_str());
+      }
+      results.push_back(ReconcileResult{.record = std::move(record),
+                                        .verdict = std::string(kVerdictPostgresCommitted),
+                                        .detail_json = "{\"tables\":[]}"});
+      continue;
+    }
     std::vector<std::string> table_verdicts;
     table_verdicts.reserve(record.tables.size());
     std::ostringstream detail;
@@ -546,7 +675,7 @@ Result<std::vector<ReconcileResult>> ReconcileCommitRecoveryLogs() {
       auto& table = record.tables[i];
       std::string verdict;
       std::string error;
-      auto catalog_options = ToCatalogOptions(table.options);
+      auto catalog_options = CatalogOptionsForRepair(table.options);
       if (!catalog_options) {
         verdict = "catalog_error";
         error = catalog_options.error().message();
@@ -585,24 +714,6 @@ Result<std::vector<ReconcileResult>> ReconcileCommitRecoveryLogs() {
   return results;
 }
 
-CatalogOptions CatalogOptionsFromStored(const Options& options) {
-  CatalogOptions catalog_options;
-  catalog_options.catalog_type = options.catalog_type;
-  catalog_options.catalog_uri = options.catalog_uri;
-  catalog_options.warehouse = options.warehouse;
-  catalog_options.catalog_name = options.catalog_name;
-  catalog_options.name_space = options.name_space;
-  catalog_options.table = options.table;
-  return catalog_options;
-}
-
-Result<CatalogOptions> CatalogOptionsForRepair(const Options& options) {
-  if (!options.catalog_uri.empty()) {
-    return CatalogOptionsFromStored(options);
-  }
-  return ToCatalogOptions(options);
-}
-
 Status RollbackIcebergSnapshot(const Options& options, int64_t snapshot_id) {
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, CatalogOptionsForRepair(options));
   PGICEBERG_ASSIGN_OR_RETURN(auto table,
@@ -623,6 +734,36 @@ Status BestEffortRollbackCommittedTables(const CommitRecoveryRecord& record) {
   for (auto it = record.tables.rbegin(); it != record.tables.rend(); ++it) {
     if (it->iceberg_state != kTableIcebergCommitted &&
         it->iceberg_state != kTableIcebergUnknown) {
+      continue;
+    }
+    auto ownership = InspectSnapshotOwnership(*it, record.commit_id);
+    if (!ownership) {
+      elog(WARNING,
+           "pgiceberg could not inspect Iceberg table %s.%s after "
+           "PostgreSQL abort: %s",
+           it->options.name_space.c_str(), it->options.table.c_str(),
+           ownership.error().message().c_str());
+      if (first_error) {
+        first_error = std::unexpected(ownership.error());
+      }
+      continue;
+    }
+    if (*ownership == SnapshotOwnership::kBase ||
+        *ownership == SnapshotOwnership::kMissing) {
+      continue;
+    }
+    if (*ownership != SnapshotOwnership::kOurs) {
+      elog(WARNING,
+           "pgiceberg skipped rollback of Iceberg table %s.%s after "
+           "PostgreSQL abort because the current snapshot is no longer the "
+           "in-doubt commit",
+           it->options.name_space.c_str(), it->options.table.c_str());
+      if (first_error) {
+        first_error = std::unexpected(MakeError(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "Iceberg table \"" + it->options.name_space + "." + it->options.table +
+                "\" current snapshot is no longer the in-doubt pgiceberg commit"));
+      }
       continue;
     }
     auto status = RollbackTableToBase(*it);
@@ -648,6 +789,19 @@ Result<std::string> RepairCommit(std::string_view commit_id, std::string_view ac
                                          std::string(commit_id) + "\" does not exist"));
   }
   auto record = std::move(*loaded);
+  const auto postgres_outcome = PostgresOutcomeForXid(record.postgres_xid);
+  if (postgres_outcome == PostgresXactOutcome::kInProgress) {
+    return std::unexpected(MakeError(
+        ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+        "pgiceberg commit \"" + record.commit_id +
+            "\" still belongs to an in-progress PostgreSQL transaction",
+        "Wait for that transaction to commit or abort before repairing."));
+  }
+  if (postgres_outcome == PostgresXactOutcome::kCommitted) {
+    PGICEBERG_RETURN_NOT_OK(RemoveCommitRecoveryLog(commit_id));
+    return "PostgreSQL committed transaction for commit " + record.commit_id +
+           "; removed leftover recovery log";
+  }
 
   if (action == kRepairActionAcknowledge) {
     PGICEBERG_RETURN_NOT_OK(RemoveCommitRecoveryLog(commit_id));
@@ -660,33 +814,13 @@ Result<std::string> RepairCommit(std::string_view commit_id, std::string_view ac
   }
 
   for (auto it = record.tables.rbegin(); it != record.tables.rend(); ++it) {
-    if (it->iceberg_state == kTableIcebergPending) {
+    PGICEBERG_ASSIGN_OR_RETURN(auto ownership,
+                               InspectSnapshotOwnership(*it, record.commit_id));
+    if (ownership == SnapshotOwnership::kBase ||
+        ownership == SnapshotOwnership::kMissing) {
       continue;
     }
-    PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options,
-                               CatalogOptionsForRepair(it->options));
-    auto table = LoadIcebergTable(catalog_options, it->options.table.c_str());
-    if (!table) {
-      return std::unexpected(table.error());
-    }
-    PGICEBERG_ASSIGN_OR_RETURN(auto current_id, LoadCurrentSnapshotId(**table));
-    bool current_is_ours = false;
-    if (current_id.has_value()) {
-      if (it->committed_snapshot_id.has_value() &&
-          *current_id == *it->committed_snapshot_id) {
-        current_is_ours = true;
-      } else {
-        auto current_snapshot = (*table)->current_snapshot();
-        current_is_ours =
-            current_snapshot &&
-            SnapshotHasCommitId(*current_snapshot.value(), record.commit_id);
-      }
-    }
-    if (it->iceberg_state != kTableIcebergPending && current_id.has_value() &&
-        !current_is_ours) {
-      if (it->base_snapshot_id.has_value() && *current_id == *it->base_snapshot_id) {
-        continue;
-      }
+    if (ownership != SnapshotOwnership::kOurs) {
       return std::unexpected(MakeError(
           ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
           "Iceberg table \"" + it->options.name_space + "." + it->options.table +

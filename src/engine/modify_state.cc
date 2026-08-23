@@ -299,10 +299,14 @@ struct XactCommitState {
   CommitRecoveryRecord recovery;
 };
 
-std::optional<int64_t> SnapshotIdIfPresent(const iceberg::Table& table) {
+Result<std::optional<int64_t>> SnapshotIdIfPresent(const iceberg::Table& table) {
   auto snapshot = table.current_snapshot();
   if (!snapshot) {
-    return std::nullopt;
+    if (snapshot.error().kind == iceberg::ErrorKind::kNotFound) {
+      return std::optional<int64_t>{};
+    }
+    return std::unexpected(
+        MakePgError(snapshot.error(), "load current Iceberg snapshot"));
   }
   return snapshot.value()->snapshot_id;
 }
@@ -366,11 +370,16 @@ CommitRecoveryTable RecoveryTableFor(const PendingTableChange& table_change) {
   };
 }
 
+bool SameRecoveryTable(const Options& left, const Options& right) {
+  return left.catalog == right.catalog && left.catalog_type == right.catalog_type &&
+         left.catalog_uri == right.catalog_uri && left.warehouse == right.warehouse &&
+         left.catalog_name == right.catalog_name && left.name_space == right.name_space &&
+         left.table == right.table;
+}
+
 void UpsertRecoveryTable(CommitRecoveryRecord& record, CommitRecoveryTable table) {
   for (auto& existing : record.tables) {
-    if (existing.options.catalog == table.options.catalog &&
-        existing.options.name_space == table.options.name_space &&
-        existing.options.table == table.options.table) {
+    if (SameRecoveryTable(existing.options, table.options)) {
       existing = std::move(table);
       return;
     }
@@ -529,7 +538,7 @@ Result<PendingTableChange*> EnsurePendingTableChange(
   PGICEBERG_ASSIGN_OR_RETURN(
       auto transaction,
       FromIcebergResult(table->NewTransaction(), "create Iceberg transaction"));
-  const auto base_snapshot_id = SnapshotIdIfPresent(*table);
+  PGICEBERG_ASSIGN_OR_RETURN(const auto base_snapshot_id, SnapshotIdIfPresent(*table));
   auto& changes = PendingTableChanges();
   changes.push_back(PendingTableChange{
       .key = std::move(key),
@@ -698,7 +707,8 @@ Status CommitPendingModifyChanges() {
     }
     auto committed_table = std::move(commit_result).value();
     table_change.base_table = std::move(committed_table);
-    table_change.committed_snapshot_id = SnapshotIdIfPresent(*table_change.base_table);
+    PGICEBERG_ASSIGN_OR_RETURN(table_change.committed_snapshot_id,
+                               SnapshotIdIfPresent(*table_change.base_table));
     table_change.changes.clear();
     table_change.committed = true;
     UpsertRecoveryTable(recovery, RecoveryTableFor(table_change));
@@ -782,6 +792,22 @@ Status SubXactCallbackImpl(SubXactEvent event, SubTransactionId my_subid,
       std::erase_if(table_changes, [](const PendingTableChange& table_change) {
         return table_change.changes.empty();
       });
+      if (table_changes.empty()) {
+        bool published = false;
+        for (const auto& table : CurrentXactCommitState().recovery.tables) {
+          if (table.iceberg_state == kTableIcebergCommitted ||
+              table.iceberg_state == kTableIcebergUnknown) {
+            published = true;
+            break;
+          }
+        }
+        if (!published) {
+          // A savepoint rollback that discards every pending write must also
+          // drop the unused commit identifier so PREPARE TRANSACTION and
+          // current_xact_commit_id() see an idle transaction.
+          ResetXactCommitState();
+        }
+      }
       break;
     default:
       break;

@@ -42,6 +42,13 @@ inline constexpr std::string_view kTableIcebergUnknown = "unknown";
 inline constexpr std::string_view kRepairActionRollback = "rollback";
 inline constexpr std::string_view kRepairActionAcknowledge = "acknowledge";
 
+inline constexpr std::string_view kVerdictInProgress = "in_progress";
+inline constexpr std::string_view kVerdictPostgresCommitted = "postgres_committed";
+inline constexpr std::string_view kVerdictStaleIntent = "stale_intent";
+inline constexpr std::string_view kVerdictIcebergPartial = "iceberg_partial";
+inline constexpr std::string_view kVerdictIcebergOrphan = "iceberg_orphan";
+inline constexpr std::string_view kVerdictNeedsOperator = "needs_operator";
+
 struct CommitRecoveryTable {
   Options options;
   std::optional<int64_t> base_snapshot_id;

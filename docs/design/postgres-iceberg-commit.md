@@ -41,8 +41,9 @@ The engine therefore publishes Iceberg at PostgreSQL `PRE_COMMIT`:
    each success (or `kCommitStateUnknown`).
 4. On PostgreSQL `COMMIT`, delete the recovery log.
 5. On PostgreSQL `ABORT` after any Iceberg publish, attempt a best-effort
-   rollback to each table's base snapshot. If that fails, leave the log as
-   `needs_repair`.
+   rollback to each table's base snapshot **only if** that table's current
+   snapshot is still the in-doubt commit. If that check or the rollback fails,
+   leave the log as `needs_repair`.
 
 `PRE_COMMIT` is still the latest point at which an Iceberg catalog error can
 fail the PostgreSQL transaction. That does **not** make the two systems a
@@ -56,7 +57,7 @@ single atomic commit.
 | Iceberg commit fails with a definite error | Aborts | Earlier tables in the same transaction may already be published | Recovery log is `iceberg_partial` / `needs_repair`; abort tries rollback |
 | Iceberg commit state unknown | Aborts | May or may not have published | Files are retained; log records `unknown`; reconcile inspects the table |
 | Iceberg succeeds, later `PRE_COMMIT` hook fails | Aborts | Published | Abort tries rollback; otherwise `pgiceberg.repair_commit` |
-| Iceberg succeeds, PostgreSQL crashes before `COMMIT` | Aborts at recovery | Published | Durable recovery log survives; `reconcile_commits` / `repair_commit` |
+| Iceberg succeeds, PostgreSQL crashes after WAL `COMMIT` but before the log is unlinked | Visible | Published | `reconcile_commits` sees `postgres_committed` from the stored xid and removes the leftover log |
 | Multi-table publish, table *k* fails after 1..*k-1* succeed | Aborts | Prefix of tables published | Same as partial Iceberg commit |
 | PostgreSQL `COMMIT` succeeds | Visible | Published | Recovery log removed |
 
@@ -70,16 +71,21 @@ that already happened.
 SQL:
 
 - `pgiceberg.commit_recovery_log()` lists unfinished logs.
-- `pgiceberg.reconcile_commits()` compares each log with the current Iceberg
-  snapshot. Verdicts:
+- `pgiceberg.reconcile_commits()` first checks the stored PostgreSQL xid, then
+  compares each remaining log with the current Iceberg snapshot. Verdicts:
+  - `in_progress` — the originating PostgreSQL transaction is still running
+  - `postgres_committed` — PostgreSQL committed; a leftover log is removed
+    without rolling Iceberg back
   - `stale_intent` — log exists, Iceberg never published or already rolled back
   - `iceberg_partial` — some tables in the log are published, others are not
-  - `iceberg_orphan` — Iceberg has the commit and PostgreSQL does not
+  - `iceberg_orphan` — Iceberg has the commit and PostgreSQL aborted
   - `needs_operator` — current snapshot moved, load failed, or the table had
     no parent snapshot to roll back to
-- `pgiceberg.repair_commit(commit_id, 'rollback')` rolls each published table
+- `pgiceberg.repair_commit(commit_id, 'rollback')` inspects Iceberg for every
+  table in the log, including rows still marked `pending`. It rolls a table
   back to its recorded base snapshot **only if** that table's current snapshot
-  is still the in-doubt commit.
+  is still the in-doubt commit. It refuses while the PostgreSQL xid is in
+  progress, and it will not roll Iceberg back when PostgreSQL committed.
 - `pgiceberg.repair_commit(commit_id, 'acknowledge')` keeps the Iceberg data
   and removes the log.
 - `pgiceberg.rollback_iceberg_snapshot(catalog, namespace, table, snapshot_id)`
@@ -134,6 +140,9 @@ PostgreSQL transaction that performs Iceberg DML. It is written to:
 - table properties for the same keys (so `ReadTableProperty` can observe it)
 - the durable recovery log
 
-`pgiceberg.xact.postgres-xid` stores the full PostgreSQL transaction id for
-diagnostics. It is not used as the recovery key because transaction ids are
-reused after wraparound and are not meaningful after clog truncation.
+`pgiceberg.xact.postgres-xid` stores the full PostgreSQL transaction id. It is
+not the recovery key — commit ids are — but reconcile and repair consult it so
+a leftover log after a successful `COMMIT` is not treated as an orphan, and so
+repair refuses while that xid is still in progress. After clog truncation or
+xid wraparound the clog status can be unknown; those logs stay `needs_operator`
+rather than being rolled back automatically.
