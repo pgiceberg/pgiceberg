@@ -41,6 +41,7 @@ extern "C" {
 #include "access/transam.h"
 #include "access/xact.h"
 #include "miscadmin.h"
+#include "storage/procarray.h"
 #include "utils/elog.h"
 #include "utils/errcodes.h"
 }
@@ -108,7 +109,8 @@ Status FsyncPath(const std::filesystem::path& path, bool directory) {
 
 Status DurableCreateDirectories(const std::filesystem::path& dir) {
   std::vector<std::filesystem::path> created;
-  for (std::filesystem::path current = dir; !current.empty() && current != current.root_path();
+  for (std::filesystem::path current = dir;
+       !current.empty() && current != current.root_path();
        current = current.parent_path()) {
     std::error_code exists_ec;
     if (std::filesystem::exists(current, exists_ec) && !exists_ec) {
@@ -437,9 +439,10 @@ enum class SnapshotOwnership {
 
 Result<SnapshotOwnership> InspectSnapshotOwnership(const CommitRecoveryTable& table,
                                                    std::string_view commit_id) {
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, CatalogOptionsForRepair(table.options));
-  PGICEBERG_ASSIGN_OR_RETURN(auto iceberg_table,
-                             LoadIcebergTable(catalog_options, table.options.table.c_str()));
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options,
+                             CatalogOptionsForRepair(table.options));
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto iceberg_table, LoadIcebergTable(catalog_options, table.options.table.c_str()));
   PGICEBERG_ASSIGN_OR_RETURN(auto current_id, LoadCurrentSnapshotId(*iceberg_table));
   if (!current_id.has_value()) {
     return SnapshotOwnership::kMissing;
@@ -791,11 +794,11 @@ Result<std::string> RepairCommit(std::string_view commit_id, std::string_view ac
   auto record = std::move(*loaded);
   const auto postgres_outcome = PostgresOutcomeForXid(record.postgres_xid);
   if (postgres_outcome == PostgresXactOutcome::kInProgress) {
-    return std::unexpected(MakeError(
-        ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-        "pgiceberg commit \"" + record.commit_id +
-            "\" still belongs to an in-progress PostgreSQL transaction",
-        "Wait for that transaction to commit or abort before repairing."));
+    return std::unexpected(
+        MakeError(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                  "pgiceberg commit \"" + record.commit_id +
+                      "\" still belongs to an in-progress PostgreSQL transaction",
+                  "Wait for that transaction to commit or abort before repairing."));
   }
   if (postgres_outcome == PostgresXactOutcome::kCommitted) {
     PGICEBERG_RETURN_NOT_OK(RemoveCommitRecoveryLog(commit_id));
