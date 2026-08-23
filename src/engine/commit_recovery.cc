@@ -14,6 +14,7 @@
 
 #include <cctype>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -379,7 +380,7 @@ bool SnapshotHasCommitId(const iceberg::Snapshot& snapshot, std::string_view com
   return it != snapshot.summary.end() && it->second == commit_id;
 }
 
-enum class PostgresXactOutcome {
+enum class PostgresXactOutcome : std::uint8_t {
   kInProgress,
   kCommitted,
   kAborted,
@@ -430,7 +431,7 @@ Result<CatalogOptions> CatalogOptionsForRepair(const Options& options) {
   return ToCatalogOptions(options);
 }
 
-enum class SnapshotOwnership {
+enum class SnapshotOwnership : std::uint8_t {
   kOurs,
   kBase,
   kMissing,
