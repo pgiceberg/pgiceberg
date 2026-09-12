@@ -969,11 +969,33 @@ Result<bool> RowEquals(const Row& left, const Row& right, TupleDesc desc) {
 
 Status AppendRow(std::vector<std::unique_ptr<arrow::ArrayBuilder>>& builders,
                  const arrow::Schema& schema, const std::vector<BoundField>& fields,
-                 TupleDesc desc, const Row& row) {
+                 TupleDesc desc, const Row& row,
+                 const arrow::RecordBatch* source_batch = nullptr,
+                 std::int64_t source_row_index = 0) {
   for (int i = 0; i < schema.num_fields(); i++) {
     const auto& field = fields[static_cast<std::size_t>(i)];
     auto value_type = StorageTypeForValues(schema.field(i)->type());
     if (field.attnum == InvalidAttrNumber) {
+      if (source_batch != nullptr) {
+        int source_index = ArrowFieldIndexById(*source_batch->schema(), field.field_id);
+        if (source_index < 0) {
+          source_index = source_batch->schema()->GetFieldIndex(field.iceberg_name);
+        }
+        if (source_index < 0) {
+          return std::unexpected(MakeError(
+              ERRCODE_FDW_ERROR, "unbound Iceberg field \"" + field.iceberg_name +
+                                     "\" is missing from the row being rewritten"));
+        }
+        auto source = source_batch->column(source_index);
+        if (source->type_id() == arrow::Type::EXTENSION) {
+          source = static_cast<const arrow::ExtensionArray&>(*source).storage();
+        }
+        PGICEBERG_RETURN_NOT_OK(
+            FromArrowStatus(builders[i]->AppendArraySlice(
+                                arrow::ArraySpan(*source->data()), source_row_index, 1),
+                            "preserve unbound Iceberg field"));
+        continue;
+      }
       if (field.write_default != nullptr) {
         PGICEBERG_RETURN_NOT_OK(AppendLiteral(*builders[i], *field.write_default,
                                               field.pg_type, *value_type));
@@ -1049,6 +1071,19 @@ class RowBatchWriter {
     PGICEBERG_RETURN_NOT_OK(EnsureWriter());
     PGICEBERG_RETURN_NOT_OK(
         AppendRow(builders_, *arrow_schema_, write_fields, desc, row));
+    rows_in_batch_++;
+    if (rows_in_batch_ >= kDmlRewriteBatchRows) {
+      PGICEBERG_RETURN_NOT_OK(Flush());
+    }
+    return Ok();
+  }
+
+  Status AppendRewritten(const std::vector<BoundField>& write_fields, TupleDesc desc,
+                         const Row& row, const arrow::RecordBatch& source_batch,
+                         std::int64_t source_row_index) {
+    PGICEBERG_RETURN_NOT_OK(EnsureWriter());
+    PGICEBERG_RETURN_NOT_OK(AppendRow(builders_, *arrow_schema_, write_fields, desc, row,
+                                      &source_batch, source_row_index));
     rows_in_batch_++;
     if (rows_in_batch_ >= kDmlRewriteBatchRows) {
       PGICEBERG_RETURN_NOT_OK(Flush());
@@ -1583,8 +1618,9 @@ Status EndModify(ModifyState* state) {
                                            state->spec, data_file->second->partition),
             "write deletion vector"));
         if (state->operation == CMD_UPDATE) {
-          PGICEBERG_RETURN_NOT_OK(update_writer->Append(
-              state->write_fields, state->tuple_desc, state->new_rows[*matched_change]));
+          PGICEBERG_RETURN_NOT_OK(update_writer->AppendRewritten(
+              state->write_fields, state->tuple_desc, state->new_rows[*matched_change],
+              *batch, row_index));
         }
       }
     }
@@ -1664,11 +1700,12 @@ Status EndModify(ModifyState* state) {
       }
 
       if (!matched_change.has_value()) {
-        PGICEBERG_RETURN_NOT_OK(
-            rewrite_writer->Append(state->write_fields, state->tuple_desc, current_row));
+        PGICEBERG_RETURN_NOT_OK(rewrite_writer->AppendRewritten(
+            state->write_fields, state->tuple_desc, current_row, *batch, row_index));
       } else if (state->operation == CMD_UPDATE) {
-        PGICEBERG_RETURN_NOT_OK(rewrite_writer->Append(
-            state->write_fields, state->tuple_desc, state->new_rows[*matched_change]));
+        PGICEBERG_RETURN_NOT_OK(rewrite_writer->AppendRewritten(
+            state->write_fields, state->tuple_desc, state->new_rows[*matched_change],
+            *batch, row_index));
       }
     }
   }

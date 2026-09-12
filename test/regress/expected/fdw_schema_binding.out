@@ -130,6 +130,26 @@ passenger_count|2
 trip_distance|3
 extra_flag|4
 (4 rows)
+INSERT INTO trips VALUES
+  (3, 4, 9.5, 'preserve-through-update'),
+  (4, 5, 10.5, 'delete-me');
+-- Simulate a locally stale schema after another engine added and populated a
+-- field.  Rewrites must copy the unbound Arrow value instead of applying the
+-- field's write default to every row.
+ALTER FOREIGN TABLE trips DROP COLUMN extra_flag;
+UPDATE trips SET passenger_count = 40 WHERE vendorid = 3;
+DELETE FROM trips WHERE vendorid = 4;
+SELECT pgiceberg.refresh_schema('trips');
+refresh_schema
+
+(1 row)
+SELECT vendorid, passenger_count, extra_flag
+FROM trips
+WHERE vendorid >= 3
+ORDER BY vendorid;
+vendorid|passenger_count|extra_flag
+3|40|preserve-through-update
+(1 row)
 SELECT pgiceberg.update_schema(
   'schema_binding_regress',
   'default',
@@ -147,7 +167,8 @@ SELECT vendorid, extra_flag FROM trips ORDER BY vendorid;
 vendorid|extra_flag
 1|
 2|
-(2 rows)
+3|preserve-through-update
+(3 rows)
 SELECT change, local_column, iceberg_name
 FROM pgiceberg.schema_diff('trips')
 WHERE change = 'renamed';
@@ -204,6 +225,96 @@ vendorid
 passenger_count
 trip_distance
 (3 rows)
+-- A name-matched legacy column still needs a field id for rename safety.
+ALTER FOREIGN TABLE trips ALTER COLUMN passenger_count OPTIONS (DROP field_id);
+SELECT change, local_column, iceberg_field_id
+FROM pgiceberg.schema_diff('trips')
+WHERE local_column = 'passenger_count';
+change|local_column|iceberg_field_id
+missing_field_id|passenger_count|2
+(1 row)
+SELECT pgiceberg.refresh_schema('trips');
+refresh_schema
+
+(1 row)
+SELECT change
+FROM pgiceberg.schema_diff('trips')
+WHERE local_column = 'passenger_count';
+change
+(0 rows)
+-- A readable but non-identical type must still be refreshed.
+SELECT pgiceberg.update_schema(
+  'schema_binding_regress',
+  'default',
+  'trips',
+  ARRAY['count32'],
+  ARRAY['integer'::regtype],
+  ARRAY[]::text[],
+  ARRAY[]::text[],
+  ARRAY[]::text[]
+);
+update_schema
+
+(1 row)
+SELECT pgiceberg.refresh_schema('trips');
+refresh_schema
+
+(1 row)
+ALTER FOREIGN TABLE trips ALTER COLUMN count32 TYPE bigint;
+SELECT change, local_type, iceberg_type
+FROM pgiceberg.schema_diff('trips')
+WHERE local_column = 'count32';
+change|local_type|iceberg_type
+type_changed|bigint|integer
+(1 row)
+SELECT pgiceberg.refresh_schema('trips');
+refresh_schema
+
+(1 row)
+SELECT format_type(atttypid, atttypmod) AS column_type
+FROM pg_attribute
+WHERE attrelid = 'trips'::regclass AND attname = 'count32';
+column_type
+integer
+(1 row)
+-- Renames and incompatibilities are independent drift dimensions.  Refresh
+-- applies the rename first, then addresses the type using the new name.
+ALTER FOREIGN TABLE trips ALTER COLUMN vendorid TYPE text;
+SELECT pgiceberg.update_schema(
+  'schema_binding_regress',
+  'default',
+  'trips',
+  ARRAY[]::text[],
+  ARRAY[]::regtype[],
+  ARRAY[]::text[],
+  ARRAY['vendorid'],
+  ARRAY['vendor_key']
+);
+update_schema
+
+(1 row)
+SELECT change, local_column, iceberg_name
+FROM pgiceberg.schema_diff('trips')
+WHERE iceberg_field_id = 1
+ORDER BY change;
+change|local_column|iceberg_name
+incompatible|vendorid|vendor_key
+renamed|vendorid|vendor_key
+(2 rows)
+SELECT pgiceberg.refresh_schema('trips');
+refresh_schema
+
+(1 row)
+SELECT attname, format_type(atttypid, atttypmod) AS column_type
+FROM pg_attribute
+WHERE attrelid = 'trips'::regclass AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
+attname|column_type
+vendor_key|bigint
+passenger_count|bigint
+trip_distance|double precision
+count32|integer
+(4 rows)
 CREATE FOREIGN TABLE bad_column_option (
   id bigint OPTIONS (unknown_option '1')
 )

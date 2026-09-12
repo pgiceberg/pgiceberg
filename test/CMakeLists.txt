@@ -79,6 +79,24 @@ if(POSTGRESQL_REGRESS)
        "log_rotation_size = 0\n"
        "log_error_verbosity = verbose\n"
        "dynamic_library_path = '${PROJECT_BINARY_DIR}/src:$libdir'\n")
+
+  # The output plugin allowlist was backported to multiple PostgreSQL branches.
+  # Probe the server used by pg_regress so older minor versions stay supported.
+  execute_process(COMMAND "${POSTGRESQL_BIN_DIR}/postgres" --describe-config
+                  RESULT_VARIABLE PGICEBERG_DESCRIBE_CONFIG_RESULT
+                  OUTPUT_VARIABLE PGICEBERG_DESCRIBE_CONFIG
+                  ERROR_VARIABLE PGICEBERG_DESCRIBE_CONFIG_ERROR
+                  TIMEOUT 10)
+  if(NOT PGICEBERG_DESCRIBE_CONFIG_RESULT STREQUAL "0")
+    message(FATAL_ERROR "Could not inspect PostgreSQL configuration parameters: "
+                        "${PGICEBERG_DESCRIBE_CONFIG_RESULT}: ${PGICEBERG_DESCRIBE_CONFIG_ERROR}"
+    )
+  endif()
+  if(PGICEBERG_DESCRIBE_CONFIG MATCHES "(^|\n)output_plugin_libraries\t")
+    file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
+         "output_plugin_libraries = 'pgoutput, test_decoding, pgiceberg'\n")
+  endif()
+
   if(POSTGRESQL_VERSION VERSION_GREATER_EQUAL "18")
     file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
          "extension_control_path = '${CMAKE_CURRENT_BINARY_DIR}:$system'\n")

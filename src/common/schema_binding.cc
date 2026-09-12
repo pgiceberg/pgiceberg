@@ -584,10 +584,8 @@ Result<std::vector<SchemaChange>> DiffSchema(const SchemaBinding& binding) {
     if (!field.readable) {
       change.kind = SchemaChangeKind::kIncompatible;
       change.detail = field.incompatibility;
-      AddChange(&changes, std::move(change));
-      continue;
-    }
-    if (field.type_changed) {
+      AddChange(&changes, change);
+    } else if (field.type_changed) {
       change.kind = SchemaChangeKind::kTypeChanged;
       change.detail = "local type " + *change.local_type + " differs from Iceberg type " +
                       *change.iceberg_type;
@@ -598,6 +596,11 @@ Result<std::vector<SchemaChange>> DiffSchema(const SchemaBinding& binding) {
       change.detail = "local column \"" + field.local_name +
                       "\" maps to Iceberg field \"" + field.iceberg_name + "\" by id " +
                       std::to_string(field.field_id);
+      AddChange(&changes, change);
+    }
+    if (!field.had_field_id) {
+      change.kind = SchemaChangeKind::kMissingFieldId;
+      change.detail = "local column \"" + field.local_name + "\" has no Iceberg field_id";
       AddChange(&changes, std::move(change));
     }
   }

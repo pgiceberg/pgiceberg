@@ -46,6 +46,14 @@ if(APPLE)
   endif()
   target_link_options(pgiceberg PRIVATE
                       "LINKER:-bundle_loader,${POSTGRESQL_SERVER_EXECUTABLE}")
+  # PostgreSQL's module suffix can differ from CMake's on macOS. Match the
+  # installed extensionless link so build-tree tests can load the plugin by name.
+  add_custom_command(TARGET pgiceberg
+                     POST_BUILD
+                     COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                             "$<TARGET_FILE_NAME:pgiceberg>"
+                             "$<TARGET_FILE_DIR:pgiceberg>/pgiceberg"
+                     VERBATIM)
 endif()
 if(PGICEBERG_HAS_EXCLUDE_LIBS)
   target_link_options(pgiceberg PRIVATE "LINKER:--exclude-libs,ALL")

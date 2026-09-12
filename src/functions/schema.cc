@@ -249,7 +249,7 @@ pgiceberg::Status RefreshForeignTable(const std::string& qualified,
   }
 
   for (const auto& field : binding.fields) {
-    if (field.attnum == InvalidAttrNumber || field.readable) {
+    if (field.attnum == InvalidAttrNumber || !field.type_changed) {
       continue;
     }
     PGICEBERG_ASSIGN_OR_RETURN(auto sql_type,

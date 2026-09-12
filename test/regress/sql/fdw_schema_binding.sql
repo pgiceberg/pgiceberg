@@ -107,6 +107,22 @@ WHERE att.attrelid = 'trips'::regclass
   AND NOT att.attisdropped
 ORDER BY att.attnum;
 
+INSERT INTO trips VALUES
+  (3, 4, 9.5, 'preserve-through-update'),
+  (4, 5, 10.5, 'delete-me');
+
+-- Simulate a locally stale schema after another engine added and populated a
+-- field.  Rewrites must copy the unbound Arrow value instead of applying the
+-- field's write default to every row.
+ALTER FOREIGN TABLE trips DROP COLUMN extra_flag;
+UPDATE trips SET passenger_count = 40 WHERE vendorid = 3;
+DELETE FROM trips WHERE vendorid = 4;
+SELECT pgiceberg.refresh_schema('trips');
+SELECT vendorid, passenger_count, extra_flag
+FROM trips
+WHERE vendorid >= 3
+ORDER BY vendorid;
+
 SELECT pgiceberg.update_schema(
   'schema_binding_regress',
   'default',
@@ -156,6 +172,60 @@ WHERE att.attrelid = 'trips'::regclass
   AND att.attnum > 0
   AND NOT att.attisdropped
 ORDER BY att.attnum;
+
+-- A name-matched legacy column still needs a field id for rename safety.
+ALTER FOREIGN TABLE trips ALTER COLUMN passenger_count OPTIONS (DROP field_id);
+SELECT change, local_column, iceberg_field_id
+FROM pgiceberg.schema_diff('trips')
+WHERE local_column = 'passenger_count';
+SELECT pgiceberg.refresh_schema('trips');
+SELECT change
+FROM pgiceberg.schema_diff('trips')
+WHERE local_column = 'passenger_count';
+
+-- A readable but non-identical type must still be refreshed.
+SELECT pgiceberg.update_schema(
+  'schema_binding_regress',
+  'default',
+  'trips',
+  ARRAY['count32'],
+  ARRAY['integer'::regtype],
+  ARRAY[]::text[],
+  ARRAY[]::text[],
+  ARRAY[]::text[]
+);
+SELECT pgiceberg.refresh_schema('trips');
+ALTER FOREIGN TABLE trips ALTER COLUMN count32 TYPE bigint;
+SELECT change, local_type, iceberg_type
+FROM pgiceberg.schema_diff('trips')
+WHERE local_column = 'count32';
+SELECT pgiceberg.refresh_schema('trips');
+SELECT format_type(atttypid, atttypmod) AS column_type
+FROM pg_attribute
+WHERE attrelid = 'trips'::regclass AND attname = 'count32';
+
+-- Renames and incompatibilities are independent drift dimensions.  Refresh
+-- applies the rename first, then addresses the type using the new name.
+ALTER FOREIGN TABLE trips ALTER COLUMN vendorid TYPE text;
+SELECT pgiceberg.update_schema(
+  'schema_binding_regress',
+  'default',
+  'trips',
+  ARRAY[]::text[],
+  ARRAY[]::regtype[],
+  ARRAY[]::text[],
+  ARRAY['vendorid'],
+  ARRAY['vendor_key']
+);
+SELECT change, local_column, iceberg_name
+FROM pgiceberg.schema_diff('trips')
+WHERE iceberg_field_id = 1
+ORDER BY change;
+SELECT pgiceberg.refresh_schema('trips');
+SELECT attname, format_type(atttypid, atttypmod) AS column_type
+FROM pg_attribute
+WHERE attrelid = 'trips'::regclass AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum;
 
 CREATE FOREIGN TABLE bad_column_option (
   id bigint OPTIONS (unknown_option '1')
