@@ -213,6 +213,12 @@ pgiceberg::Result<std::string> QualifiedRelationName(Relation relation) {
       quote_qualified_identifier(nspname, RelationGetRelationName(relation)));
 }
 
+std::string AlterForeignTableSql(const std::string& qualified) {
+  std::string sql = "ALTER FOREIGN TABLE ";
+  sql += qualified;
+  return sql;
+}
+
 pgiceberg::Status RefreshForeignTable(const std::string& qualified,
                                       const std::vector<pgiceberg::SchemaChange>& changes,
                                       const pgiceberg::SchemaBinding& binding) {
@@ -223,8 +229,9 @@ pgiceberg::Status RefreshForeignTable(const std::string& qualified,
   for (const auto& change : changes) {
     if (change.kind == pgiceberg::SchemaChangeKind::kDropped &&
         change.local_column.has_value()) {
-      std::string sql = "ALTER FOREIGN TABLE " + qualified + " DROP COLUMN " +
-                        quote_identifier(change.local_column->c_str());
+      std::string sql = AlterForeignTableSql(qualified);
+      sql += " DROP COLUMN ";
+      sql += quote_identifier(change.local_column->c_str());
       PGICEBERG_RETURN_NOT_OK(ExecuteSql(sql));
     }
   }
@@ -232,9 +239,11 @@ pgiceberg::Status RefreshForeignTable(const std::string& qualified,
   for (const auto& change : changes) {
     if (change.kind == pgiceberg::SchemaChangeKind::kRenamed &&
         change.local_column.has_value() && change.iceberg_name.has_value()) {
-      std::string sql = "ALTER FOREIGN TABLE " + qualified + " RENAME COLUMN " +
-                        quote_identifier(change.local_column->c_str()) + " TO " +
-                        quote_identifier(change.iceberg_name->c_str());
+      std::string sql = AlterForeignTableSql(qualified);
+      sql += " RENAME COLUMN ";
+      sql += quote_identifier(change.local_column->c_str());
+      sql += " TO ";
+      sql += quote_identifier(change.iceberg_name->c_str());
       PGICEBERG_RETURN_NOT_OK(ExecuteSql(sql));
     }
   }
@@ -246,8 +255,11 @@ pgiceberg::Status RefreshForeignTable(const std::string& qualified,
     PGICEBERG_ASSIGN_OR_RETURN(auto sql_type,
                                pgiceberg::IcebergTypeToSql(*field.iceberg_type));
     const auto column_name = column_name_after_rename(field);
-    std::string sql = "ALTER FOREIGN TABLE " + qualified + " ALTER COLUMN " +
-                      quote_identifier(column_name.c_str()) + " TYPE " + sql_type;
+    std::string sql = AlterForeignTableSql(qualified);
+    sql += " ALTER COLUMN ";
+    sql += quote_identifier(column_name.c_str());
+    sql += " TYPE ";
+    sql += sql_type;
     PGICEBERG_RETURN_NOT_OK(ExecuteSql(sql));
   }
 
@@ -257,10 +269,16 @@ pgiceberg::Status RefreshForeignTable(const std::string& qualified,
     }
     const auto column_name = column_name_after_rename(field);
     const char* action = field.had_field_id ? "SET" : "ADD";
-    std::string sql = "ALTER FOREIGN TABLE " + qualified + " ALTER COLUMN " +
-                      quote_identifier(column_name.c_str()) + " OPTIONS (" + action +
-                      " " + pgiceberg::kFieldIdOption + " '" +
-                      std::to_string(field.field_id) + "')";
+    std::string sql = AlterForeignTableSql(qualified);
+    sql += " ALTER COLUMN ";
+    sql += quote_identifier(column_name.c_str());
+    sql += " OPTIONS (";
+    sql += action;
+    sql += " ";
+    sql += pgiceberg::kFieldIdOption;
+    sql += " '";
+    sql += std::to_string(field.field_id);
+    sql += "')";
     PGICEBERG_RETURN_NOT_OK(ExecuteSql(sql));
   }
 
@@ -270,10 +288,16 @@ pgiceberg::Status RefreshForeignTable(const std::string& qualified,
         !change.iceberg_field_id.has_value()) {
       continue;
     }
-    std::string sql = "ALTER FOREIGN TABLE " + qualified + " ADD COLUMN " +
-                      quote_identifier(change.iceberg_name->c_str()) + " " +
-                      *change.iceberg_type + " OPTIONS (" + pgiceberg::kFieldIdOption +
-                      " '" + std::to_string(*change.iceberg_field_id) + "')";
+    std::string sql = AlterForeignTableSql(qualified);
+    sql += " ADD COLUMN ";
+    sql += quote_identifier(change.iceberg_name->c_str());
+    sql += " ";
+    sql += *change.iceberg_type;
+    sql += " OPTIONS (";
+    sql += pgiceberg::kFieldIdOption;
+    sql += " '";
+    sql += std::to_string(*change.iceberg_field_id);
+    sql += "')";
     PGICEBERG_RETURN_NOT_OK(ExecuteSql(sql));
   }
   return pgiceberg::Ok();
