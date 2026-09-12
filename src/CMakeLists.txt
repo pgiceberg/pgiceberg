@@ -16,6 +16,7 @@ add_library(pgiceberg MODULE
             common/catalog.cc
             common/datum_convert.cc
             common/pg_logger.cc
+            common/schema_binding.cc
             common/type_mapping.cc
             engine/commit_recovery.cc
             engine/iceberg_scan.cc
@@ -29,6 +30,7 @@ add_library(pgiceberg MODULE
             functions/create_table.cc
             functions/metadata.cc
             functions/register_table.cc
+            functions/schema.cc
             logical/logical.cc
             tableam/tableam.cc
             utilities/avro_fdw.cc
@@ -44,6 +46,14 @@ if(APPLE)
   endif()
   target_link_options(pgiceberg PRIVATE
                       "LINKER:-bundle_loader,${POSTGRESQL_SERVER_EXECUTABLE}")
+  # PostgreSQL's module suffix can differ from CMake's on macOS. Match the
+  # installed extensionless link so build-tree tests can load the plugin by name.
+  add_custom_command(TARGET pgiceberg
+                     POST_BUILD
+                     COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                             "$<TARGET_FILE_NAME:pgiceberg>"
+                             "$<TARGET_FILE_DIR:pgiceberg>/pgiceberg"
+                     VERBATIM)
 endif()
 if(PGICEBERG_HAS_EXCLUDE_LIBS)
   target_link_options(pgiceberg PRIVATE "LINKER:--exclude-libs,ALL")

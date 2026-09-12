@@ -63,6 +63,15 @@ WHERE table_schema = 'imported'
   AND table_name = 'trip_fixture'
   AND column_name = 'fare_amount';
 
+SELECT att.attname, opt.option_name, opt.option_value
+FROM pg_attribute AS att
+JOIN LATERAL pg_options_to_table(att.attfdwoptions) AS opt(option_name, option_value)
+  ON true
+WHERE att.attrelid = 'imported.trip_fixture'::regclass
+  AND att.attnum > 0
+  AND NOT att.attisdropped
+ORDER BY att.attnum, opt.option_name;
+
 IMPORT FOREIGN SCHEMA "default"
 FROM SERVER iceberg
 INTO public;
