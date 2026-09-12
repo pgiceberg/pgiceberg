@@ -20,9 +20,13 @@ logical mirrors:
 - options parsing and catalog binding (`options`)
 - scan state (`scan_state`, `iceberg_scan`)
 - modify/append state and PostgreSQL transaction hooks (`modify_state`)
+- durable non-atomic commit recovery (`commit_recovery`)
 
 - **Depends on:** `common/`, iceberg-cpp
 - **Must not depend on:** `fdw/`, `tableam/`, `logical/`
 
 Callers that need crash-recognizable commits pass generic `CommitProperties`
 into `AppendSlots`; logical batch-id bookkeeping stays in `src/logical/`.
+Iceberg catalog publishes happen at PostgreSQL `PRE_COMMIT` and are **not**
+atomic with PostgreSQL or with each other. See
+[PostgreSQL and Iceberg commit protocol](../../docs/design/postgres-iceberg-commit.md).

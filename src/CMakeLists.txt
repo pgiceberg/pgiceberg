@@ -17,6 +17,7 @@ add_library(pgiceberg MODULE
             common/datum_convert.cc
             common/pg_logger.cc
             common/type_mapping.cc
+            engine/commit_recovery.cc
             engine/iceberg_scan.cc
             engine/modify_state.cc
             engine/options.cc
@@ -24,6 +25,7 @@ add_library(pgiceberg MODULE
             fdw/fdw.cc
             fdw/qual_pushdown.cc
             fdw/scan_projection.cc
+            functions/commit_recovery.cc
             functions/create_table.cc
             functions/metadata.cc
             functions/register_table.cc
