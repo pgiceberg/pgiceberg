@@ -195,7 +195,7 @@ log_min_messages = warning
 EOF
 
   if ((pg_version_major >= 18)); then
-    echo "extension_control_path = '${build_dir}/test/extension:${runtime_dir}:$system" \
+    echo "extension_control_path = '${build_dir}/test/extension:${runtime_dir}:\$system'" \
       >>"${conf_file}"
   fi
 }
