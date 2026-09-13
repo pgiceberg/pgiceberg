@@ -31,7 +31,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PG_VERSION: "18.4"
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   PGICEBERG_FUZZ_MAX_QUERIES: ${{ github.event.inputs.max_queries || '100000' }}
   PGICEBERG_FUZZ_MAX_RUNTIME: ${{ github.event.inputs.max_runtime || '3600' }}
@@ -39,9 +38,16 @@ env:
 
 jobs:
   sqlsmith:
-    name: SQLsmith fuzz (PostgreSQL ${{ env.PG_VERSION }})
+    name: SQLsmith fuzz (PostgreSQL ${{ matrix.pg-version }})
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg-version:
+          - "18.4"
+    env:
+      PG_VERSION: ${{ matrix.pg-version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -54,9 +60,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.pgenv
-          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-${{ github.run_id }}-v1
+          key: pgenv-${{ runner.os }}-${{ matrix.pg-version }}-${{ github.run_id }}-v1
           restore-keys: |
-            pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-
+            pgenv-${{ runner.os }}-${{ matrix.pg-version }}-
 
       - name: Restore CMake build dependencies cache
         id: cache-cmake-deps
@@ -114,7 +120,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: sqlsmith-fuzz-${{ env.PG_VERSION }}
+          name: sqlsmith-fuzz-${{ matrix.pg-version }}
           path: |
             build/sql-fuzz/test/fuzz/tmp_check/log
             build/sql-fuzz/test/fuzz/tmp_check/postmaster.crashed
@@ -136,4 +142,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.pgenv
-          key: pgenv-${{ runner.os }}-${{ env.PG_VERSION }}-${{ github.run_id }}-v1
+          key: pgenv-${{ runner.os }}-${{ matrix.pg-version }}-${{ github.run_id }}-v1
