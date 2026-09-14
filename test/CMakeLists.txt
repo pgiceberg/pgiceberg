@@ -140,6 +140,11 @@ else()
   message(STATUS "pg_regress not found; regression tests are not registered")
 endif()
 
+add_test(NAME sqlsmith_write_postgresql_conf
+         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/test_write_postgresql_conf.sh")
+set_tests_properties(sqlsmith_write_postgresql_conf
+                     PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+
 if(PGICEBERG_ENABLE_SQL_FUZZ)
   if(NOT POSTGRESQL_REGRESS)
     message(FATAL_ERROR "PGICEBERG_ENABLE_SQL_FUZZ requires pg_regress (PG_CONFIG)")
