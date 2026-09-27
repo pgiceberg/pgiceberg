@@ -49,7 +49,6 @@
 #include <iceberg/table.h>
 #include <iceberg/table_metadata.h>
 #include <iceberg/transaction.h>
-#include <iceberg/snapshot.h>
 #include <iceberg/update/fast_append.h>
 #include <iceberg/update/overwrite_files.h>
 #include <iceberg/update/row_delta.h>
@@ -300,18 +299,6 @@ struct XactCommitState {
   CommitRecoveryRecord recovery;
 };
 
-Result<std::optional<int64_t>> SnapshotIdIfPresent(const iceberg::Table& table) {
-  auto snapshot = table.current_snapshot();
-  if (!snapshot) {
-    if (snapshot.error().kind == iceberg::ErrorKind::kNotFound) {
-      return std::optional<int64_t>{};
-    }
-    return std::unexpected(
-        MakePgError(snapshot.error(), "load current Iceberg snapshot"));
-  }
-  return snapshot.value()->snapshot_id;
-}
-
 std::string GenerateCommitId() {
   unsigned char bytes[16];
   if (pg_strong_random(bytes, sizeof(bytes))) {
@@ -539,7 +526,7 @@ Result<PendingTableChange*> EnsurePendingTableChange(
   PGICEBERG_ASSIGN_OR_RETURN(
       auto transaction,
       FromIcebergResult(table->NewTransaction(), "create Iceberg transaction"));
-  PGICEBERG_ASSIGN_OR_RETURN(const auto base_snapshot_id, SnapshotIdIfPresent(*table));
+  PGICEBERG_ASSIGN_OR_RETURN(const auto base_snapshot_id, CurrentSnapshotId(*table));
   auto& changes = PendingTableChanges();
   changes.push_back(PendingTableChange{
       .key = std::move(key),
@@ -709,7 +696,7 @@ Status CommitPendingModifyChanges() {
     auto committed_table = std::move(commit_result).value();
     table_change.base_table = std::move(committed_table);
     PGICEBERG_ASSIGN_OR_RETURN(table_change.committed_snapshot_id,
-                               SnapshotIdIfPresent(*table_change.base_table));
+                               CurrentSnapshotId(*table_change.base_table));
     table_change.changes.clear();
     table_change.committed = true;
     UpsertRecoveryTable(recovery, RecoveryTableFor(table_change));

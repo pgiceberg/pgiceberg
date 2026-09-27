@@ -55,6 +55,8 @@ Status ValidateFormatVersion(int format_version);
 
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name);
+// Returns nullopt when the table has no current snapshot.
+Result<std::optional<int64_t>> CurrentSnapshotId(const iceberg::Table& table);
 Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& options,
                                                          const char* relation_name);
 Result<TableFilesSummary> LoadIcebergTableFilesSummary(
