@@ -18,7 +18,6 @@
 
 #include <iceberg/arrow/arrow_register.h>
 #include <iceberg/avro/avro_register.h>
-#include <iceberg/data/puffin_dv_register.h>
 #include <iceberg/expression/expression.h>
 #include <iceberg/parquet/parquet_register.h>
 #include <iceberg/schema.h>
@@ -80,7 +79,6 @@ void EnsureIcebergRegistrations() {
     iceberg::arrow::RegisterAll();
     iceberg::parquet::RegisterAll();
     iceberg::avro::RegisterAll();
-    iceberg::RegisterPuffinDVIO();
     return true;
   }();
   (void)registered;

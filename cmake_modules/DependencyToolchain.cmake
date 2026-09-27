@@ -30,9 +30,11 @@ endmacro()
 # ----------------------------------------------------------------------
 # Apache Iceberg C++
 
-set(PGICEBERG_ICEBERG_GIT_TAG
-    "ab083862eab5ac1a002200bcc174e51697851afc"
-    CACHE STRING "apache/iceberg-cpp commit or tag to fetch")
+# Develop against official releases. Update the version and checksum together.
+set(PGICEBERG_ICEBERG_VERSION "0.4.0")
+set(PGICEBERG_ICEBERG_SHA512
+    "8f4e688ea739b480c5daff0f8b5f0a53602eafecc0ef91276d7e08c16db28eee55c7185cc9635911972af065564f8ae13e8f4b70ff6266e56e3e856672d2b589"
+)
 
 function(resolve_iceberg_dependency out_target)
   prepare_fetchcontent()
@@ -71,21 +73,13 @@ function(resolve_iceberg_dependency out_target)
       ON
       CACHE BOOL "" FORCE)
 
+  set(iceberg_archive "apache-iceberg-cpp-${PGICEBERG_ICEBERG_VERSION}")
   fetchcontent_declare(Iceberg
-                       GIT_REPOSITORY https://github.com/apache/iceberg-cpp.git
-                       GIT_TAG ${PGICEBERG_ICEBERG_GIT_TAG})
+                       URL "https://downloads.apache.org/iceberg/${iceberg_archive}/${iceberg_archive}.tar.gz"
+                           "https://archive.apache.org/dist/iceberg/${iceberg_archive}/${iceberg_archive}.tar.gz"
+                       URL_HASH "SHA512=${PGICEBERG_ICEBERG_SHA512}"
+                       DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
   fetchcontent_makeavailable(Iceberg)
-
-  # iceberg-cpp generates iceberg/version.h relative to the top-level build
-  # directory. When it is embedded with FetchContent, expose that generated
-  # header to the targets that include it (the data target for deletion-vector
-  # writers and the REST catalog target).
-  foreach(candidate iceberg_data_static iceberg_data_shared iceberg_rest_static
-                    iceberg_rest_shared)
-    if(TARGET ${candidate})
-      target_include_directories(${candidate} PRIVATE "${CMAKE_BINARY_DIR}/src")
-    endif()
-  endforeach()
 
   set(iceberg_targets)
 

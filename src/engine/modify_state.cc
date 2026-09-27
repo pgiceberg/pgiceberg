@@ -35,8 +35,8 @@
 #include <arrow/record_batch.h>
 #include <iceberg/data/data_writer.h>
 #include <iceberg/data/delete_loader.h>
-#include <iceberg/data/deletion_vector_writer.h>
 #include <iceberg/data/writer.h>
+#include <iceberg/deletes/dv_writer.h>
 #include <iceberg/deletes/position_delete_index.h>
 #include <iceberg/file_io.h>
 #include <iceberg/file_format.h>
@@ -1554,7 +1554,7 @@ Status EndModify(ModifyState* state) {
     PGICEBERG_ASSIGN_OR_RETURN(
         auto deletion_vector_writer,
         FromIcebergResult(
-            iceberg::DeletionVectorWriter::Make(iceberg::DeletionVectorWriterOptions{
+            iceberg::DVWriter::Make(iceberg::DVWriterOptions{
                 .path = deletion_vector_path,
                 .io = state->table->io(),
                 .load_previous_deletes = [&](std::string_view data_file_path)
