@@ -96,6 +96,5 @@ install(FILES "${PROJECT_SOURCE_DIR}/pgiceberg.control"
         DESTINATION "${POSTGRESQL_EXTENSION_DIR}"
         COMPONENT pgiceberg)
 install(FILES "${PROJECT_SOURCE_DIR}/sql/pgiceberg--0.1.0.sql"
-              "${PROJECT_SOURCE_DIR}/sql/pgiceberg--0.1.0--0.1.1.sql"
         DESTINATION "${POSTGRESQL_EXTENSION_DIR}"
         COMPONENT pgiceberg)

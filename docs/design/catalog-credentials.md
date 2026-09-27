@@ -27,8 +27,6 @@ Connection properties belong to a foreign server. Foreign table and IMPORT
 options may select only `namespace`, `table`, and `snapshot_id`. In particular,
 a table owner with server USAGE cannot redirect a connection to another endpoint
 while retaining the server's mapped credentials.
-Existing foreign tables with connection options must move those options to their
-foreign server before using this version.
 
 A direct foreign server uses its own USER MAPPING when present. A registered
 catalog may name a `credential_server` (sixth optional `add_catalog` argument).
@@ -85,16 +83,6 @@ another patch revision. After updating patches locally, use a fresh dependency
 checkout if configuration reports that an earlier patched source no longer matches.
 
 ## Example
-
-After installing the new extension files, upgrade each existing database before
-using the new library:
-
-```sql
-ALTER EXTENSION pgiceberg UPDATE TO '0.1.1';
-```
-
-The upgrade preserves registered catalogs and adds a nullable credential-server
-reference. New installations use the same upgrade path automatically.
 
 ```sql
 CREATE SERVER lake_credentials FOREIGN DATA WRAPPER pgiceberg
@@ -161,8 +149,6 @@ worker threads stop before C++ global objects are destroyed.
 
 The `catalog_config` SQL regression covers configuration validation, per-role and
 PUBLIC mappings, SECURITY DEFINER calls, role switches, and permission revocation.
-`extension_upgrade` checks the 0.1.0-to-0.1.1 migration, existing catalog rows,
-legacy helper calls, and the new credential-server argument.
 
 Run the default build's regression suite with:
 

@@ -19,7 +19,7 @@ endif()
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules")
 
 project(pgIceberg
-        VERSION 0.1.1
+        VERSION 0.1.0
         DESCRIPTION "PostgreSQL extension for Apache Iceberg tables"
         LANGUAGES C CXX)
 

@@ -14,7 +14,6 @@ if(POSTGRESQL_REGRESS)
   set(PGICEBERG_REGRESS_TESTS
       fdw_options
       catalog_config
-      extension_upgrade
       logical_decoding
       fdw_dml
       commit_recovery
@@ -73,10 +72,6 @@ if(POSTGRESQL_REGRESS)
        CONTENT "${PGICEBERG_REGRESS_CONTROL}")
   configure_file("${PROJECT_SOURCE_DIR}/sql/pgiceberg--0.1.0.sql"
                  "${PGICEBERG_REGRESS_EXTENSION_DIR}/pgiceberg--0.1.0.sql" COPYONLY)
-
-  configure_file("${PROJECT_SOURCE_DIR}/sql/pgiceberg--0.1.0--0.1.1.sql"
-                 "${PGICEBERG_REGRESS_EXTENSION_DIR}/pgiceberg--0.1.0--0.1.1.sql"
-                 COPYONLY)
 
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/pg_regress.conf"
        "unix_socket_directories = '/tmp'\n"
