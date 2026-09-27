@@ -44,8 +44,9 @@ for when to use each path.
 ## Install
 
 Build pgiceberg against the PostgreSQL installation that will load the
-extension. The vendored iceberg-cpp dependency requires a C++23 compiler such
-as GCC 14 or newer.
+extension. The vendored iceberg-cpp dependency is pinned to the official
+Apache Iceberg C++ 0.4.0 source release, verified with SHA-512. It requires a
+C++23 compiler such as GCC 14 or newer.
 
 ```sh
 BUILD_DIR=build/pg18.4-debug

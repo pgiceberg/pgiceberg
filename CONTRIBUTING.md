@@ -128,6 +128,28 @@ For a pgenv-driven build, install, and test cycle:
 scripts/pgenv-build.sh 18.4
 ```
 
+### Iceberg C++ Releases
+
+Develop against official Apache Iceberg C++ releases. The current baseline is
+0.4.0; `cmake_modules/DependencyToolchain.cmake` pins the release source archive
+and its SHA-512 checksum. Downloads fall back to the permanent Apache archive
+when the release is no longer available on the active mirror.
+
+To upgrade the baseline:
+
+1. Select a published release from the
+   [Apache release directory](https://dist.apache.org/repos/dist/release/iceberg/).
+2. Verify the source archive against its published `.sha512` file, then update
+   `PGICEBERG_ICEBERG_VERSION` and `PGICEBERG_ICEBERG_SHA512` together. Update the
+   version in this guide and `README.md` as well.
+3. Configure a fresh build directory, build, and run the regression tests.
+   Also build with `PGICEBERG_ENABLE_REST_CATALOG=ON` to check the optional REST
+   catalog integration.
+
+New features must work with this release baseline. Upgrade to a newer official
+release when additional upstream APIs are needed. The former
+`PGICEBERG_ICEBERG_GIT_TAG` override is no longer supported.
+
 ## Regression Tests
 
 Run all configured tests from the build directory:
