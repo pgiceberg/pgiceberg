@@ -19,7 +19,7 @@ endif()
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules")
 
 project(pgIceberg
-        VERSION 0.1.0
+        VERSION 0.1.1
         DESCRIPTION "PostgreSQL extension for Apache Iceberg tables"
         LANGUAGES C CXX)
 
@@ -31,6 +31,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PGICEBERG_ENABLE_REST_CATALOG
        "Build pgiceberg with iceberg-cpp REST catalog support" OFF)
+option(PGICEBERG_ENABLE_S3 "Build pgiceberg with Arrow S3 FileIO support" OFF)
 option(PGICEBERG_ENABLE_SQL_FUZZ
        "Register the SQLsmith fuzz smoke test (requires sqlsmith)" OFF)
 set(PGICEBERG_SANITIZERS

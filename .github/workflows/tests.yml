@@ -67,11 +67,9 @@ jobs:
           path: |
             .ccache
             build/tests/_deps
-          key: cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          key: cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-${{ github.run_id }}-v1
           restore-keys: |
-            cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-
-            cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-
-            cmake-deps-tests-${{ runner.os }}-
+            cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-
 
       - name: Write dependency cache summary
         if: always()
@@ -154,7 +152,7 @@ jobs:
           path: |
             .ccache
             build/tests/_deps
-          key: cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          key: cmake-deps-tests-${{ runner.os }}-pg${{ matrix.pg-version }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-${{ github.run_id }}-v1
 
       - name: Save pgenv PostgreSQL cache
         if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'

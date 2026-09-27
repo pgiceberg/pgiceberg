@@ -19,7 +19,9 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^cmake_modules/patches/.*\.patch$
       - id: end-of-file-fixer
+        exclude: ^cmake_modules/patches/.*\.patch$
       - id: check-yaml
       - id: check-added-large-files
 

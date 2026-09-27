@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <iceberg/type_fwd.h>
@@ -30,6 +31,10 @@ struct CatalogOptions {
   std::string catalog_name = "pgiceberg";
   std::string name_space = "default";
   std::string table;
+  // A reference only: secrets are resolved for the calling role at catalog open.
+  std::string credential_server;
+  bool credential_mapping_required = false;
+  std::unordered_map<std::string, std::string> properties;
 };
 
 struct TableFilesSummary {
@@ -52,6 +57,8 @@ struct TableFilesSummary {
 
 std::vector<std::string> SplitNamespace(const std::string& name_space);
 Status ValidateFormatVersion(int format_version);
+Result<std::shared_ptr<iceberg::Catalog>> CreateCatalog(const CatalogOptions& options,
+                                                        bool require_warehouse = true);
 
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name);

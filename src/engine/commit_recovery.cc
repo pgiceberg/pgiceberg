@@ -51,7 +51,7 @@ namespace pgiceberg::engine {
 namespace {
 
 constexpr std::string_view kLogMagic = "pgiceberg-commit-recovery";
-constexpr int kLogVersion = 1;
+constexpr int kLogVersion = 2;
 constexpr const char* kRecoveryDirName = "pg_iceberg";
 constexpr const char* kRecoveryXactDirName = "xact";
 constexpr std::size_t kMaxLogFieldBytes = 1 << 20;
@@ -271,6 +271,9 @@ std::string FormatRecord(const CommitRecoveryRecord& record) {
     out << "catalog_name " << EncodeField(table.options.catalog_name) << '\n';
     out << "namespace " << EncodeField(table.options.name_space) << '\n';
     out << "table_name " << EncodeField(table.options.table) << '\n';
+    out << "credential_server " << EncodeField(table.options.credential_server) << '\n';
+    out << "credential_mapping_required " << table.options.credential_mapping_required
+        << '\n';
     out << "base_snapshot_id ";
     if (table.base_snapshot_id.has_value()) {
       out << *table.base_snapshot_id;
@@ -310,7 +313,8 @@ Result<std::optional<int64_t>> ReadOptionalSnapshotId(std::istream& in) {
 Result<CommitRecoveryRecord> ParseRecord(std::istream& in) {
   std::string magic;
   int version = 0;
-  if (!(in >> magic >> version) || magic != kLogMagic || version != kLogVersion) {
+  if (!(in >> magic >> version) || magic != kLogMagic ||
+      (version != 1 && version != kLogVersion)) {
     return std::unexpected(
         MakeError(ERRCODE_DATA_EXCEPTION, "unsupported pgiceberg commit recovery log"));
   }
@@ -352,6 +356,17 @@ Result<CommitRecoveryRecord> ParseRecord(std::istream& in) {
     PGICEBERG_RETURN_NOT_OK(DecodeField(in, table.options.name_space));
     PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "table_name"));
     PGICEBERG_RETURN_NOT_OK(DecodeField(in, table.options.table));
+    if (version >= 2) {
+      PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "credential_server"));
+      PGICEBERG_RETURN_NOT_OK(DecodeField(in, table.options.credential_server));
+      PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "credential_mapping_required"));
+      int required = 0;
+      if (!(in >> required) || (required != 0 && required != 1)) {
+        return std::unexpected(MakeError(
+            ERRCODE_DATA_EXCEPTION, "invalid credential policy in commit recovery log"));
+      }
+      table.options.credential_mapping_required = required != 0;
+    }
     PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "base_snapshot_id"));
     PGICEBERG_ASSIGN_OR_RETURN(table.base_snapshot_id, ReadOptionalSnapshotId(in));
     PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "committed_snapshot_id"));
@@ -421,6 +436,8 @@ CatalogOptions CatalogOptionsFromStored(const Options& options) {
   catalog_options.catalog_name = options.catalog_name;
   catalog_options.name_space = options.name_space;
   catalog_options.table = options.table;
+  catalog_options.credential_server = options.credential_server;
+  catalog_options.credential_mapping_required = options.credential_mapping_required;
   return catalog_options;
 }
 

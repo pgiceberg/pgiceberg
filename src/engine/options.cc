@@ -11,6 +11,7 @@
 // limitations under the License.
 
 #include "engine/options.h"
+#include "common/catalog_config.h"
 
 #include <array>
 #include <charconv>
@@ -28,9 +29,9 @@ extern "C" {
 namespace pgiceberg::engine {
 namespace {
 
-constexpr std::array<const char*, 8> kValidOptions = {
-    "catalog",   "catalog_type", "catalog_uri", "warehouse",
-    "namespace", "table",        "snapshot_id", "catalog_name"};
+constexpr std::array<const char*, 9> kValidOptions = {
+    "catalog", "catalog_type", "catalog_uri",  "warehouse",        "namespace",
+    "table",   "snapshot_id",  "catalog_name", "credential_server"};
 
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
 constexpr const char* kValidCatalogTypes = "sql, sqlite, rest";
@@ -138,6 +139,12 @@ Status ApplyOption(Options& options, DefElem* def) {
     options.table = value;
   } else if (std::strcmp(def->defname, "snapshot_id") == 0) {
     PGICEBERG_ASSIGN_OR_RETURN(options.snapshot_id, ParseSnapshotIdOption(value));
+  } else if (std::strcmp(def->defname, "credential_server") == 0) {
+    options.credential_server = value;
+  } else if (IsCatalogProperty(def->defname, false)) {
+    CatalogOptions config;
+    PGICEBERG_RETURN_NOT_OK(ApplyCatalogProperties(config, list_make1(def), false));
+    options.properties.insert(config.properties.begin(), config.properties.end());
   }
   return Ok();
 }
@@ -151,13 +158,29 @@ Status ApplyOptions(Options& options, List* option_list) {
   return Ok();
 }
 
+Status ApplyTableOptions(Options& options, List* option_list) {
+  ListCell* cell = nullptr;
+  foreach (cell, option_list) {
+    auto* def = static_cast<DefElem*>(lfirst(cell));
+    const std::string_view name = def->defname;
+    if (name != "namespace" && name != "table" && name != "snapshot_id") {
+      return std::unexpected(
+          MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
+                    "pgiceberg connection options are only allowed on a foreign server"));
+    }
+    PGICEBERG_RETURN_NOT_OK(ApplyOption(options, def));
+  }
+  return Ok();
+}
+
 Result<Options> OptionsForForeignTable(unsigned int foreigntableid,
                                        const char* relation_name) {
   Options options;
   ForeignTable* table = GetForeignTable(foreigntableid);
   ForeignServer* server = GetForeignServer(table->serverid);
+  options.foreign_server = server->servername;
   PGICEBERG_RETURN_NOT_OK(ApplyOptions(options, server->options));
-  PGICEBERG_RETURN_NOT_OK(ApplyOptions(options, table->options));
+  PGICEBERG_RETURN_NOT_OK(ApplyTableOptions(options, table->options));
   if (options.table.empty()) {
     options.table = relation_name;
   }
@@ -177,6 +200,15 @@ pgiceberg::Result<pgiceberg::CatalogOptions> ToCatalogOptions(const Options& opt
   }
   catalog_options.name_space = options.name_space;
   catalog_options.table = options.table;
+  if (!options.credential_server.empty()) {
+    catalog_options.credential_server = options.credential_server;
+    catalog_options.credential_mapping_required = true;
+  } else if (catalog_options.credential_server.empty()) {
+    catalog_options.credential_server = options.foreign_server;
+  }
+  for (const auto& [key, value] : options.properties) {
+    catalog_options.properties[key] = value;
+  }
   return catalog_options;
 }
 

@@ -207,6 +207,7 @@ prepare_extension_control() {
   sed "s|module_pathname = '[^']*'|module_pathname = '${extension_so}'|" \
     "${repo_root}/pgiceberg.control" >"${extension_dir}/pgiceberg.control"
   cp "${repo_root}/sql/pgiceberg--0.1.0.sql" "${extension_dir}/"
+  cp "${repo_root}/sql/pgiceberg--0.1.0--0.1.1.sql" "${extension_dir}/"
 }
 
 start_instance() {

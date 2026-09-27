@@ -10,8 +10,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-comment = 'PostgreSQL extension for working with Apache Iceberg tables'
-default_version = '0.1.1'
-module_pathname = '$libdir/pgiceberg'
-relocatable = false
-superuser = true
+# Unified diff context lines intentionally contain a single space.
+cmake_modules/patches/*.patch -whitespace

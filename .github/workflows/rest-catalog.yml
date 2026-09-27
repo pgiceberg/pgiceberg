@@ -66,10 +66,9 @@ jobs:
           path: |
             .ccache
             build/rest/_deps
-          key: cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          key: cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-${{ github.run_id }}-v1
           restore-keys: |
-            cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-
-            cmake-deps-rest-${{ runner.os }}-
+            cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-
 
       - name: Write dependency cache summary
         if: always()
@@ -122,7 +121,8 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DPG_CONFIG="$(command -v pg_config)" \
-            -DPGICEBERG_ENABLE_REST_CATALOG=ON
+            -DPGICEBERG_ENABLE_REST_CATALOG=ON \
+            -DPGICEBERG_ENABLE_S3=ON
 
       - name: Build
         run: cmake --build build/rest
@@ -143,6 +143,9 @@ jobs:
 
       - name: Run REST catalog regression test
         run: ctest --test-dir build/rest --output-on-failure -R regress_rest
+
+      - name: Test catalog authentication, S3, credentials, and retries
+        run: ctest --test-dir build/rest --output-on-failure -R '^catalog_network(_policy)?$'
 
       - name: Show REST catalog server logs
         if: failure()
@@ -189,7 +192,7 @@ jobs:
           path: |
             .ccache
             build/rest/_deps
-          key: cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          key: cmake-deps-rest-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-${{ github.run_id }}-v1
 
       - name: Save pgenv PostgreSQL cache
         if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'

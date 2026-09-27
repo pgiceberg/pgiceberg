@@ -19,6 +19,9 @@
 #include <sstream>
 #include <string>
 
+#include <iceberg/file_io.h>
+#include <iceberg/table.h>
+
 extern "C" {
 #include "fmgr.h"
 #include "postgres.h"
@@ -122,9 +125,14 @@ Datum pgiceberg_table_metadata_file_location(PG_FUNCTION_ARGS) {
 
 Datum pgiceberg_table_metadata_json(PG_FUNCTION_ARGS) {
   return pgiceberg::PgResultGuard([&]() -> pgiceberg::Result<Datum> {
-    PGICEBERG_ASSIGN_OR_RETURN(auto metadata_file_location,
-                               LoadMetadataFileLocation(fcinfo));
-    PGICEBERG_ASSIGN_OR_RETURN(auto json, ReadMetadataFile(metadata_file_location));
+    PGICEBERG_ASSIGN_OR_RETURN(auto options, CatalogOptionsArg(fcinfo));
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto table, pgiceberg::LoadIcebergTable(options, options.table.c_str()));
+    PGICEBERG_ASSIGN_OR_RETURN(
+        auto json, pgiceberg::FromIcebergResult(
+                       table->io()->ReadFile(std::string(table->metadata_file_location()),
+                                             std::nullopt),
+                       "read Iceberg table metadata"));
     return JsonbDatum(json);
   });
 }
