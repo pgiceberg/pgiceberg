@@ -293,6 +293,39 @@ ORDER BY id;
 SELECT count(*) AS pending_log_after_repair
 FROM pgiceberg.commit_recovery_log();
 
+-- Reconciliation distinguishes descendants from snapshots on a different branch.
+INSERT INTO commit_a VALUES (3);
+
+SELECT metadata ->> 'current-snapshot-id' AS ancestry_snapshot,
+       s -> 'summary' ->> 'pgiceberg.xact.commit-id' AS ancestry_cid
+FROM (
+  SELECT pgiceberg.table_metadata_json(
+    'commit_recovery_regress', 'default', 'commit_a'
+  ) AS metadata
+) AS q,
+LATERAL jsonb_array_elements(metadata -> 'snapshots') AS s
+WHERE s ->> 'snapshot-id' = metadata ->> 'current-snapshot-id' \gset
+\setenv PGICEBERG_TEST_CID :ancestry_cid
+\setenv PGICEBERG_TEST_COMMITTED :ancestry_snapshot
+\! python3 -c "import os, pathlib; enc=lambda s: f'{len(s)} {s}'; cid=os.environ['PGICEBERG_TEST_CID']; path=pathlib.Path(os.environ['PGICEBERG_TEST_PGDATA'])/'pg_iceberg'/'xact'/f'{cid}.log'; path.parent.mkdir(parents=True, exist_ok=True); path.write_text('pgiceberg-commit-recovery 1\ncommit_id '+enc(cid)+'\npostgres_xid 1 0\nstate 16 iceberg_complete\ncreated_at 0\ntable_count 1\ntable\ncatalog '+enc('commit_recovery_regress')+'\ncatalog_type '+enc(os.environ['PGICEBERG_TEST_CATALOG_TYPE'])+'\ncatalog_uri '+enc(os.environ['PGICEBERG_TEST_CATALOG_URI'])+'\nwarehouse '+enc(os.environ['PGICEBERG_TEST_WAREHOUSE'])+'\ncatalog_name '+enc(os.environ['PGICEBERG_TEST_CATALOG_NAME'])+'\nnamespace '+enc('default')+'\ntable_name '+enc('commit_a')+'\nbase_snapshot_id '+os.environ['PGICEBERG_TEST_BASE']+'\ncommitted_snapshot_id '+os.environ['PGICEBERG_TEST_COMMITTED']+'\niceberg_state '+enc('committed')+'\n')"
+
+INSERT INTO commit_a VALUES (4);
+
+SELECT detail -> 'tables' -> 0 ->> 'verdict' AS descendant_verdict
+FROM pgiceberg.reconcile_commits();
+
+SELECT pgiceberg.rollback_iceberg_snapshot(
+  'commit_recovery_regress', 'default', 'commit_a', :'pending_base_snapshot'::bigint
+);
+
+INSERT INTO commit_a VALUES (5);
+
+SELECT detail -> 'tables' -> 0 ->> 'verdict' AS sibling_verdict
+FROM pgiceberg.reconcile_commits();
+
+SELECT pgiceberg.repair_commit(:'ancestry_cid', 'acknowledge')
+  LIKE 'acknowledged Iceberg snapshots for commit %' AS ancestry_log_acknowledged;
+
 DROP FOREIGN TABLE commit_b;
 DROP FOREIGN TABLE commit_a;
 DROP SERVER commit_recovery_iceberg;

@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include <iceberg/arrow/arrow_io_internal.h>
+#include <iceberg/arrow/arrow_io_util.h>
 #include <iceberg/catalog.h>
 #include <iceberg/catalog/sql/sql_catalog.h>
 #include <iceberg/manifest/manifest_entry.h>
@@ -35,6 +35,8 @@
 #include <iceberg/table_properties.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/update_properties.h>
+#include <iceberg/util/content_file_util.h>
+#include <iceberg/util/snapshot_util.h>
 
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
 #  include <unordered_map>
@@ -85,8 +87,7 @@ Status ValidateSqlCatalogOptions(const CatalogOptions& options, const char* cata
 
 Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
     const CatalogOptions& options, bool require_warehouse) {
-  std::shared_ptr<iceberg::FileIO> file_io(
-      iceberg::arrow::ArrowFileSystemFileIO::MakeLocalFileIO().release());
+  std::shared_ptr<iceberg::FileIO> file_io(iceberg::arrow::MakeLocalFileIO());
   iceberg::sql::SqlCatalogConfig config{
       .name = options.catalog_name,
       .uri = options.catalog_uri,
@@ -296,6 +297,17 @@ Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& o
                            "load Iceberg table");
 }
 
+Result<std::optional<int64_t>> CurrentSnapshotId(const iceberg::Table& table) {
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto snapshot, FromIcebergResult(iceberg::SnapshotUtil::OptionalLatestSnapshot(
+                                           *table.metadata(), ""),
+                                       "load current Iceberg snapshot"));
+  if (snapshot == nullptr) {
+    return std::nullopt;
+  }
+  return snapshot->snapshot_id;
+}
+
 Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& options,
                                                          const char* relation_name) {
   PGICEBERG_ASSIGN_OR_RETURN(auto table, LoadIcebergTable(options, relation_name));
@@ -330,13 +342,10 @@ Result<TableFilesSummary> LoadIcebergTableFilesSummary(
     return summary;
   }
 
-  PGICEBERG_ASSIGN_OR_RETURN(auto manifest_list_reader,
-                             FromIcebergResult(iceberg::ManifestListReader::Make(
-                                                   snapshot->manifest_list, table->io()),
-                                               "open Iceberg manifest list"));
-  PGICEBERG_ASSIGN_OR_RETURN(
-      auto manifests,
-      FromIcebergResult(manifest_list_reader->Files(), "read Iceberg manifest list"));
+  iceberg::SnapshotReader snapshot_reader(snapshot.get());
+  PGICEBERG_ASSIGN_OR_RETURN(auto manifests,
+                             FromIcebergResult(snapshot_reader.Manifests(table->io()),
+                                               "read Iceberg manifest list"));
   PGICEBERG_ASSIGN_OR_RETURN(auto schema,
                              FromIcebergResult(table->schema(), "load table schema"));
   PGICEBERG_ASSIGN_OR_RETURN(auto specs_by_id,
@@ -373,8 +382,7 @@ Result<TableFilesSummary> LoadIcebergTableFilesSummary(
           summary.delete_file_count++;
           summary.position_delete_file_count++;
           summary.delete_file_size_in_bytes += file.file_size_in_bytes;
-          if (file.referenced_data_file.has_value() && file.content_offset.has_value() &&
-              file.content_size_in_bytes.has_value()) {
+          if (iceberg::ContentFileUtil::IsDV(file)) {
             summary.deletion_vector_file_count++;
           }
           break;
