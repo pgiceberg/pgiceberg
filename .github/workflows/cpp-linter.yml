@@ -66,10 +66,9 @@ jobs:
           path: |
             .ccache
             build/cpp-linter/_deps
-          key: cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          key: cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-${{ github.run_id }}-v1
           restore-keys: |
-            cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-
-            cmake-deps-cpp-linter-${{ runner.os }}-
+            cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-
 
       - name: Write dependency cache summary
         if: always()
@@ -144,7 +143,7 @@ jobs:
           path: |
             .ccache
             build/cpp-linter/_deps
-          key: cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          key: cmake-deps-cpp-linter-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-${{ github.run_id }}-v1
 
       - name: Save pgenv PostgreSQL cache
         if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'

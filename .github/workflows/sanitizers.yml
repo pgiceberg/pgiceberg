@@ -55,10 +55,9 @@ jobs:
           path: |
             .ccache
             build/sanitizers/_deps
-          key: cmake-deps-sanitizers-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          key: cmake-deps-sanitizers-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-${{ github.run_id }}-v1
           restore-keys: |
-            cmake-deps-sanitizers-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-
-            cmake-deps-sanitizers-${{ runner.os }}-
+            cmake-deps-sanitizers-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-
 
       - name: Write dependency cache summary
         if: always()
@@ -113,7 +112,7 @@ jobs:
           path: |
             .ccache
             build/sanitizers/_deps
-          key: cmake-deps-sanitizers-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake') }}-${{ github.run_id }}-v1
+          key: cmake-deps-sanitizers-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch') }}-${{ github.run_id }}-v1
 
       - name: Save pgenv PostgreSQL cache
         if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'

@@ -14,6 +14,7 @@ add_library(pgiceberg MODULE
             extension.cc
             common/arrow_schema.cc
             common/catalog.cc
+            common/catalog_config.cc
             common/datum_convert.cc
             common/pg_logger.cc
             common/schema_binding.cc
@@ -79,6 +80,9 @@ endif()
 
 if(PGICEBERG_ENABLE_REST_CATALOG)
   target_compile_definitions(pgiceberg PRIVATE PGICEBERG_ENABLE_REST_CATALOG=1)
+endif()
+if(PGICEBERG_ENABLE_S3)
+  target_compile_definitions(pgiceberg PRIVATE PGICEBERG_ENABLE_S3=1)
 endif()
 
 install(TARGETS pgiceberg LIBRARY DESTINATION "${POSTGRESQL_PKGLIB_DIR}"

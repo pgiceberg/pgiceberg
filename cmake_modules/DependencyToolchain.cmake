@@ -42,6 +42,9 @@ function(resolve_iceberg_dependency out_target)
   set(ICEBERG_ARROW
       ON
       CACHE BOOL "" FORCE)
+  set(ICEBERG_S3
+      ${PGICEBERG_ENABLE_S3}
+      CACHE BOOL "" FORCE)
   set(ICEBERG_BUILD_STATIC
       ON
       CACHE BOOL "" FORCE)
@@ -80,6 +83,8 @@ function(resolve_iceberg_dependency out_target)
                        URL_HASH "SHA512=${PGICEBERG_ICEBERG_SHA512}"
                        DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
   fetchcontent_makeavailable(Iceberg)
+  include(ApplyIcebergPatches)
+  apply_iceberg_patches("${iceberg_SOURCE_DIR}")
 
   set(iceberg_targets)
 

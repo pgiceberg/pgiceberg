@@ -31,6 +31,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PGICEBERG_ENABLE_REST_CATALOG
        "Build pgiceberg with iceberg-cpp REST catalog support" OFF)
+option(PGICEBERG_ENABLE_S3 "Build pgiceberg with Arrow S3 FileIO support" OFF)
 option(PGICEBERG_ENABLE_SQL_FUZZ
        "Register the SQLsmith fuzz smoke test (requires sqlsmith)" OFF)
 set(PGICEBERG_SANITIZERS

@@ -13,6 +13,7 @@
 if(POSTGRESQL_REGRESS)
   set(PGICEBERG_REGRESS_TESTS
       fdw_options
+      catalog_config
       logical_decoding
       fdw_dml
       commit_recovery
@@ -34,8 +35,13 @@ if(POSTGRESQL_REGRESS)
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tmp_check")
   set(PGICEBERG_REGRESS_INPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/regress")
   set(PGICEBERG_REGRESS_EXPECTED_DIR "${PGICEBERG_REGRESS_INPUT_DIR}/expected")
-  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/regress/sql"
-       DESTINATION "${PGICEBERG_REGRESS_INPUT_DIR}")
+  file(GLOB PGICEBERG_REGRESS_SQL_FILES CONFIGURE_DEPENDS
+       "${CMAKE_CURRENT_SOURCE_DIR}/regress/sql/*.sql")
+  foreach(sql_file IN LISTS PGICEBERG_REGRESS_SQL_FILES)
+    get_filename_component(sql_name "${sql_file}" NAME)
+    configure_file("${sql_file}" "${PGICEBERG_REGRESS_INPUT_DIR}/sql/${sql_name}"
+                   COPYONLY)
+  endforeach()
   file(MAKE_DIRECTORY "${PGICEBERG_REGRESS_EXPECTED_DIR}")
   file(GLOB PGICEBERG_REGRESS_EXPECTED_FILES
        "${CMAKE_CURRENT_SOURCE_DIR}/regress/expected/*.out")
@@ -144,6 +150,24 @@ add_test(NAME sqlsmith_write_postgresql_conf
          COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/test_write_postgresql_conf.sh")
 set_tests_properties(sqlsmith_write_postgresql_conf
                      PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+
+if(PGICEBERG_ENABLE_REST_CATALOG AND PGICEBERG_ENABLE_S3)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_executable(catalog_network_test catalog_network_test.cc)
+  target_link_libraries(catalog_network_test PRIVATE ${PGICEBERG_ICEBERG_TARGET}
+                                                     PostgreSQL::Client)
+  add_test(NAME catalog_network_policy COMMAND catalog_network_test --validate-policy)
+  set(PGICEBERG_NETWORK_PG_ARGS)
+  if(POSTGRESQL_VERSION VERSION_GREATER_EQUAL "18")
+    list(APPEND PGICEBERG_NETWORK_PG_ARGS "${POSTGRESQL_BIN_DIR}"
+         "${CMAKE_CURRENT_BINARY_DIR}")
+  endif()
+  add_test(NAME catalog_network
+           COMMAND "${Python3_EXECUTABLE}"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/run_catalog_network.py"
+                   "$<TARGET_FILE:catalog_network_test>" ${PGICEBERG_NETWORK_PG_ARGS})
+  set_tests_properties(catalog_network PROPERTIES TIMEOUT 240)
+endif()
 
 if(PGICEBERG_ENABLE_SQL_FUZZ)
   if(NOT POSTGRESQL_REGRESS)

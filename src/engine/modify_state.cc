@@ -16,7 +16,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <filesystem>
 #include <iomanip>
 #include <memory>
 #include <optional>
@@ -57,6 +56,7 @@
 
 #include "common/arrow_schema.h"
 #include "common/catalog.h"
+#include "common/catalog_config.h"
 #include "common/datum_convert.h"
 #include "common/pg_error.h"
 #include "common/pg_interrupt.h"
@@ -472,10 +472,12 @@ void AbortPendingModifyChanges() {
 // prefixes keep the option tuple unambiguous without depending on a character
 // that catalog names cannot contain.
 std::string PendingTableKey(const Options& options) {
-  std::string key;
+  // A role switch in a transaction must not reuse another role's Table/FileIO.
+  std::string key = std::to_string(GetOuterUserId()) + ":";
   const std::string_view parts[] = {
-      options.catalog,      options.catalog_type, options.catalog_uri, options.warehouse,
-      options.catalog_name, options.name_space,   options.table};
+      options.catalog,   options.catalog_type,      options.catalog_uri,
+      options.warehouse, options.catalog_name,      options.name_space,
+      options.table,     options.credential_server, options.foreign_server};
   for (auto part : parts) {
     key += std::to_string(part.size());
     key += ':';
@@ -526,6 +528,15 @@ Result<PendingTableChange*> EnsurePendingTableChange(
   if (auto* pending = FindPendingTableChange(key); pending != nullptr) {
     return pending;
   }
+  for (const auto& pending : PendingTableChanges()) {
+    if (!pending.committed && pending.base_table->location() == table->location()) {
+      return std::unexpected(
+          MakeError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "cannot modify the same Iceberg table with different credential "
+                    "contexts in one transaction",
+                    "Commit or roll back before switching roles or foreign servers."));
+    }
+  }
 
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, ToCatalogOptions(options));
   Options stored = options;
@@ -535,6 +546,8 @@ Result<PendingTableChange*> EnsurePendingTableChange(
   stored.catalog_name = catalog_options.catalog_name;
   stored.name_space = catalog_options.name_space;
   stored.table = catalog_options.table;
+  stored.credential_server = catalog_options.credential_server;
+  stored.credential_mapping_required = catalog_options.credential_mapping_required;
 
   PGICEBERG_ASSIGN_OR_RETURN(
       auto transaction,
@@ -831,16 +844,14 @@ struct Value {
 
 using Row = std::vector<Value>;
 
-std::string DataFilePath(const iceberg::Table& table, std::string_view extension) {
+Result<std::string> DataFilePath(const iceberg::Table& table,
+                                 std::string_view extension) {
   auto now = std::chrono::system_clock::now().time_since_epoch().count();
   std::ostringstream name;
   name << table.location() << "/data/pgiceberg-" << getpid() << "-" << now << "."
        << extension;
 
-  if (!table.location().starts_with("s3://") && !table.location().starts_with("gs://")) {
-    std::filesystem::create_directories(
-        std::filesystem::path(std::string(table.location())) / "data");
-  }
+  PGICEBERG_RETURN_NOT_OK(CreateLocalDirectory(JoinLocation(table.location(), "data")));
 
   return name.str();
 }
@@ -1034,9 +1045,10 @@ Result<std::shared_ptr<iceberg::DataFile>> WriteRows(
   PGICEBERG_RETURN_NOT_OK(FromArrowStatus(arrow::ExportRecordBatch(*batch, &c_array),
                                           "export Arrow record batch"));
 
+  PGICEBERG_ASSIGN_OR_RETURN(auto data_path, DataFilePath(table, "parquet"));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto writer, FromIcebergResult(iceberg::DataWriter::Make(iceberg::DataWriterOptions{
-                                         .path = DataFilePath(table, "parquet"),
+                                         .path = std::move(data_path),
                                          .schema = iceberg_schema,
                                          .spec = spec,
                                          .format = iceberg::FileFormatType::kParquet,
@@ -1547,8 +1559,10 @@ Status EndModify(ModifyState* state) {
     }
 
     iceberg::DeleteLoader delete_loader(state->table->io());
-    const std::string deletion_vector_path = DataFilePath(*state->table, "puffin");
-    const std::string replacement_path = DataFilePath(*state->table, "parquet");
+    PGICEBERG_ASSIGN_OR_RETURN(auto deletion_vector_path,
+                               DataFilePath(*state->table, "puffin"));
+    PGICEBERG_ASSIGN_OR_RETURN(auto replacement_path,
+                               DataFilePath(*state->table, "parquet"));
     NewDataFilesCleanupGuard cleanup_new_files(state->table,
                                                {deletion_vector_path, replacement_path});
     PGICEBERG_ASSIGN_OR_RETURN(
@@ -1669,10 +1683,11 @@ Status EndModify(ModifyState* state) {
   // transaction, so the rewrite preserves read-your-writes across statements.
   IcebergScanCursor current(state->read_table);
   PGICEBERG_RETURN_NOT_OK(current.Init());
+  PGICEBERG_ASSIGN_OR_RETURN(auto rewrite_path, DataFilePath(*state->table, "parquet"));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto rewrite_writer,
       RowBatchWriter::Make(*state->table, state->iceberg_schema, state->spec,
-                           state->arrow_schema, DataFilePath(*state->table, "parquet")));
+                           state->arrow_schema, std::move(rewrite_path)));
   std::vector<bool> used_changes(state->old_rows.size(), false);
 
   std::shared_ptr<arrow::RecordBatch> batch;

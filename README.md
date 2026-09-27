@@ -354,6 +354,10 @@ A dedicated CI job (`.github/workflows/rest-catalog.yml`) builds pgiceberg with
 uses for its REST integration tests), and runs the `fdw_rest_catalog` regression
 test end to end.
 
+Catalog credentials and optional S3 support are described in
+[Catalog, object storage, and credential isolation](docs/design/catalog-credentials.md).
+The document covers network policies, temporary credential renewal, and verification status.
+
 ## Cleanup
 
 Drop the PostgreSQL objects when finished:

@@ -11,8 +11,8 @@
 // limitations under the License.
 
 #include "common/catalog.h"
+#include "common/catalog_config.h"
 
-#include <filesystem>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -20,9 +20,9 @@
 #include <utility>
 #include <vector>
 
-#include <iceberg/arrow/arrow_io_internal.h>
 #include <iceberg/catalog.h>
 #include <iceberg/catalog/sql/sql_catalog.h>
+#include <iceberg/file_io_registry.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/manifest/manifest_list.h>
 #include <iceberg/manifest/manifest_reader.h>
@@ -35,6 +35,10 @@
 #include <iceberg/table_properties.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/update_properties.h>
+
+#ifdef PGICEBERG_ENABLE_S3
+#  include <iceberg/arrow/arrow_io_util.h>
+#endif
 
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
 #  include <unordered_map>
@@ -49,6 +53,8 @@ extern "C" {
 #include "postgres.h"
 #include "catalog/pg_type_d.h"
 #include "executor/spi.h"
+#include "miscadmin.h"
+#include "storage/ipc.h"
 #include "utils/elog.h"
 #include "utils/errcodes.h"
 #include "utils/builtins.h"
@@ -56,6 +62,27 @@ extern "C" {
 
 namespace pgiceberg {
 namespace {
+
+#ifdef PGICEBERG_ENABLE_S3
+void FinalizeS3AtBackendExit(int, Datum) {
+  // AWS worker threads must stop before C++ static destructors destroy logging
+  // and networking globals. PostgreSQL exit callbacks run before std::exit.
+  const auto status = iceberg::arrow::FinalizeS3();
+  if (!status) {
+    ereport(WARNING, (errmsg("could not finalize pgiceberg S3 subsystem")));
+  }
+}
+
+void RegisterS3Shutdown() {
+  // Register lazily in each backend, including when the library was preloaded
+  // by the postmaster, whose exit callbacks are cleared after fork.
+  static int registered_pid = 0;
+  if (registered_pid != MyProcPid) {
+    on_proc_exit(FinalizeS3AtBackendExit, 0);
+    registered_pid = MyProcPid;
+  }
+}
+#endif
 
 iceberg::TableIdentifier TableIdentifierFor(const CatalogOptions& options,
                                             const char* relation_name) {
@@ -85,8 +112,18 @@ Status ValidateSqlCatalogOptions(const CatalogOptions& options, const char* cata
 
 Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
     const CatalogOptions& options, bool require_warehouse) {
-  std::shared_ptr<iceberg::FileIO> file_io(
-      iceberg::arrow::ArrowFileSystemFileIO::MakeLocalFileIO().release());
+  PGICEBERG_ASSIGN_OR_RETURN(auto implementation, FileIOImplementation(options));
+  if (implementation == iceberg::FileIORegistry::kArrowS3FileIO &&
+      options.properties.at("s3.access-key-id") == "pgiceberg-unconfigured") {
+    return std::unexpected(
+        MakeError(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE,
+                  "S3 catalog FileIO requires USER MAPPING credentials"));
+  }
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto io,
+      FromIcebergResult(iceberg::FileIORegistry::Load(implementation, options.properties),
+                        "create catalog FileIO"));
+  std::shared_ptr<iceberg::FileIO> file_io(std::move(io));
   iceberg::sql::SqlCatalogConfig config{
       .name = options.catalog_name,
       .uri = options.catalog_uri,
@@ -103,8 +140,22 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
 
   if (options.catalog_type == "sql") {
     PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQL", require_warehouse));
+    for (const auto& [property, keyword] :
+         {std::pair{"pgiceberg.catalog-user", "user"},
+          std::pair{"pgiceberg.catalog-password", "password"},
+          std::pair{"pgiceberg.catalog-connect-timeout-ms", "connect-timeout-ms"},
+          std::pair{"pgiceberg.catalog-request-timeout-ms", "request-timeout-ms"}}) {
+      if (auto it = options.properties.find(property); it != options.properties.end()) {
+        config.props[keyword] = it->second;
+      }
+    }
     auto catalog = iceberg::sql::SqlCatalog::MakePostgreSqlCatalog(config, file_io);
-    return FromIcebergResult(std::move(catalog), "create PostgreSQL catalog");
+    if (!catalog) {
+      // Connection errors can contain the URI, including mapping secrets.
+      return std::unexpected(MakeError(SqlStateForIcebergError(catalog.error().kind),
+                                       "could not open PostgreSQL Iceberg catalog"));
+    }
+    return std::move(*catalog);
   }
 
   return std::unexpected(
@@ -127,17 +178,19 @@ Result<std::shared_ptr<iceberg::Catalog>> CreateRestCatalog(
                   "pgiceberg option \"warehouse\" is required for REST catalog access"));
   }
 
-  // iceberg-cpp resolves the catalog FileIO from the warehouse location when no
-  // explicit io-impl is configured, so a local warehouse path selects the Arrow
-  // local FileIO that pgiceberg registers at extension load.
-  std::unordered_map<std::string, std::string> properties{
-      {std::string(iceberg::rest::RestCatalogProperties::kUri.key()),
-       options.catalog_uri},
-      {std::string(iceberg::rest::RestCatalogProperties::kName.key()),
-       options.catalog_name},
-      {std::string(iceberg::rest::RestCatalogProperties::kWarehouse.key()),
-       options.warehouse},
-  };
+  auto properties = options.properties;
+  properties["uri"] = options.catalog_uri;
+  properties["name"] = options.catalog_name;
+  properties["warehouse"] = options.warehouse;
+  auto impl = properties.find("io-impl");
+  if (impl == properties.end() || impl->second == "auto") {
+    // The REST /config response can resolve a logical warehouse name to a URI.
+    // Defer automatic resolution until defaults and server overrides are merged.
+    properties.erase("io-impl");
+  } else {
+    PGICEBERG_ASSIGN_OR_RETURN(properties["io-impl"], FileIOImplementation(options));
+  }
+  properties["header.X-Iceberg-Access-Delegation"] = "vended-credentials";
   auto config = iceberg::rest::RestCatalogProperties::FromMap(std::move(properties));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto session_catalog,
@@ -147,8 +200,14 @@ Result<std::shared_ptr<iceberg::Catalog>> CreateRestCatalog(
 }
 #endif
 
-Result<std::shared_ptr<iceberg::Catalog>> CreateCatalog(const CatalogOptions& options,
+}  // namespace
+
+Result<std::shared_ptr<iceberg::Catalog>> CreateCatalog(const CatalogOptions& source,
                                                         bool require_warehouse) {
+#ifdef PGICEBERG_ENABLE_S3
+  RegisterS3Shutdown();
+#endif
+  PGICEBERG_ASSIGN_OR_RETURN(auto options, ResolveCatalogCredentials(source));
   if (options.catalog_type == "rest") {
 #ifdef PGICEBERG_ENABLE_REST_CATALOG
     return CreateRestCatalog(options);
@@ -163,6 +222,8 @@ Result<std::shared_ptr<iceberg::Catalog>> CreateCatalog(const CatalogOptions& op
                              CreateSqlCatalog(options, require_warehouse));
   return std::shared_ptr<iceberg::Catalog>(std::move(sql_catalog));
 }
+
+namespace {
 
 Status EnsureNamespaceExists(std::shared_ptr<iceberg::Catalog>& catalog,
                              const iceberg::Namespace& ns) {
@@ -224,7 +285,8 @@ Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
   };
 
   const char* command =
-      "SELECT catalog_type, catalog_uri, warehouse, iceberg_catalog_name "
+      "SELECT catalog_type, catalog_uri, warehouse, iceberg_catalog_name, "
+      "COALESCE(credential_server, '') "
       "FROM pgiceberg.catalogs "
       "WHERE name = $1";
   Oid argtypes[] = {TEXTOID};
@@ -284,6 +346,14 @@ Result<CatalogOptions> LoadCatalogOptions(const std::string& name) {
     return std::unexpected(catalog_name.error());
   }
   options.catalog_name = std::move(catalog_name).value();
+
+  auto credential_server = text_column(5);
+  if (!credential_server) {
+    finish_if_started();
+    return std::unexpected(credential_server.error());
+  }
+  options.credential_server = std::move(credential_server).value();
+  options.credential_mapping_required = !options.credential_server.empty();
 
   finish_if_started();
   return options;
@@ -392,7 +462,12 @@ Result<TableFilesSummary> LoadIcebergTableFilesSummary(
 Result<std::shared_ptr<iceberg::Table>> RegisterIcebergTable(
     const CatalogOptions& options, const char* relation_name,
     const std::string& metadata_file_location, bool drop_if_exists) {
-  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateCatalog(options, false));
+  PGICEBERG_RETURN_NOT_OK(ValidateCatalogUri(metadata_file_location));
+  auto catalog_options = options;
+  if (catalog_options.warehouse.empty() && options.catalog_type != "rest") {
+    catalog_options.warehouse = metadata_file_location;
+  }
+  PGICEBERG_ASSIGN_OR_RETURN(auto catalog, CreateCatalog(catalog_options, false));
   const auto ident = TableIdentifierFor(options, relation_name);
   PGICEBERG_RETURN_NOT_OK(EnsureNamespaceExists(catalog, ident.ns));
 
@@ -433,16 +508,26 @@ Result<std::shared_ptr<iceberg::Table>> CreateUnpartitionedIcebergTable(
         FromIcebergStatus(catalog->DropTable(ident, false), "drop table"));
   }
 
+  // A REST warehouse can be a logical identifier. Let the service assign the
+  // table location after its configuration and namespace policies are applied.
   const auto table_location =
-      std::filesystem::path(options.warehouse) / options.name_space / options.table;
-  std::filesystem::create_directories(table_location / "metadata");
+      options.catalog_type == "rest"
+          ? std::string{}
+          : JoinLocation(JoinLocation(options.warehouse, options.name_space),
+                         options.table);
+  if (!table_location.empty()) {
+    PGICEBERG_RETURN_NOT_OK(
+        CreateLocalDirectory(JoinLocation(table_location, "metadata")));
+  }
   PGICEBERG_ASSIGN_OR_RETURN(
       auto staged_table,
       FromIcebergResult(catalog->StageCreateTable(
                             ident, schema, iceberg::PartitionSpec::Unpartitioned(),
-                            iceberg::SortOrder::Unsorted(), table_location.string(),
+                            iceberg::SortOrder::Unsorted(), table_location,
                             {{"write.parquet.compression-codec", "uncompressed"}}),
                         "stage create table"));
+  PGICEBERG_RETURN_NOT_OK(
+      CreateLocalDirectory(JoinLocation(staged_table->table()->location(), "metadata")));
   PGICEBERG_ASSIGN_OR_RETURN(auto properties_update,
                              FromIcebergResult(staged_table->NewUpdateProperties(),
                                                "create table properties update"));

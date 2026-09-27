@@ -26,6 +26,7 @@
 #include <iceberg/type.h>
 
 #include "common/catalog.h"
+#include "common/catalog_config.h"
 #include "common/fdw_path.h"
 #include "common/schema_binding.h"
 #include "common/type_mapping.h"
@@ -41,6 +42,7 @@ extern "C" {
 #include "catalog/pg_attribute_d.h"
 #include "catalog/pg_foreign_server_d.h"
 #include "catalog/pg_foreign_table_d.h"
+#include "catalog/pg_user_mapping_d.h"
 #include "commands/defrem.h"
 #if PG_VERSION_NUM >= 180000
 #  include "commands/explain_format.h"
@@ -371,8 +373,9 @@ pgiceberg::Result<List*> PgIcebergImportForeignSchemaImpl(ImportForeignSchemaStm
                                                           Oid server_oid) {
   pgiceberg::engine::Options options;
   ForeignServer* server = GetForeignServer(server_oid);
+  options.foreign_server = server->servername;
   PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ApplyOptions(options, server->options));
-  PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ApplyOptions(options, stmt->options));
+  PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ApplyTableOptions(options, stmt->options));
   if (options.name_space == "default" && stmt->remote_schema != nullptr &&
       std::strlen(stmt->remote_schema) > 0) {
     options.name_space = stmt->remote_schema;
@@ -450,6 +453,31 @@ pgiceberg::Status PgIcebergFdwValidatorImpl(Datum raw_options, Oid catalog) {
 
   foreach (cell, options) {
     DefElem* def = static_cast<DefElem*>(lfirst(cell));
+    if (catalog == UserMappingRelationId) {
+      if (!pgiceberg::IsCatalogProperty(def->defname, true)) {
+        return std::unexpected(pgiceberg::MakeError(
+            ERRCODE_FDW_INVALID_OPTION_NAME, "invalid pgiceberg USER MAPPING option \"" +
+                                                 std::string(def->defname) + "\""));
+      }
+      PGICEBERG_RETURN_NOT_OK(
+          pgiceberg::ValidateCatalogProperty(def->defname, defGetString(def)));
+      continue;
+    }
+    if (pgiceberg::IsCatalogProperty(def->defname, true)) {
+      return std::unexpected(pgiceberg::MakeError(
+          ERRCODE_FDW_INVALID_OPTION_NAME,
+          "pgiceberg credential options are only allowed in USER MAPPING"));
+    }
+    if (pgiceberg::IsCatalogProperty(def->defname, false)) {
+      if (catalog != ForeignServerRelationId) {
+        return std::unexpected(pgiceberg::MakeError(
+            ERRCODE_FDW_INVALID_OPTION_NAME,
+            "pgiceberg connection properties are only allowed on a foreign server"));
+      }
+      PGICEBERG_RETURN_NOT_OK(
+          pgiceberg::ValidateCatalogProperty(def->defname, defGetString(def)));
+      continue;
+    }
     if (catalog == AttributeRelationId) {
       if (!pgiceberg::IsValidColumnOption(def->defname)) {
         return std::unexpected(pgiceberg::MakeError(
@@ -472,13 +500,27 @@ pgiceberg::Status PgIcebergFdwValidatorImpl(Datum raw_options, Oid catalog) {
     }
 
     if (std::strcmp(def->defname, "catalog_type") == 0) {
+      if (catalog != ForeignServerRelationId) {
+        return std::unexpected(pgiceberg::MakeError(
+            ERRCODE_FDW_INVALID_OPTION_NAME,
+            "pgiceberg connection options are only allowed on a foreign server"));
+      }
       PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ValidateCatalogType(defGetString(def)));
+    }
+    if (std::strcmp(def->defname, "catalog_uri") == 0 ||
+        std::strcmp(def->defname, "warehouse") == 0) {
+      PGICEBERG_RETURN_NOT_OK(pgiceberg::ValidateCatalogUri(defGetString(def)));
     }
     if (std::strcmp(def->defname, "snapshot_id") == 0) {
       PGICEBERG_RETURN_NOT_OK(
           pgiceberg::engine::ValidateSnapshotIdOption(defGetString(def)));
     }
     PGICEBERG_RETURN_NOT_OK(pgiceberg::engine::ApplyOption(parsed_options, def));
+  }
+
+  if (catalog == ForeignTableRelationId) {
+    PGICEBERG_RETURN_NOT_OK(
+        pgiceberg::engine::ApplyTableOptions(parsed_options, options));
   }
 
   return pgiceberg::Ok();
