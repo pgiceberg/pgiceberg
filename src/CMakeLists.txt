@@ -32,6 +32,10 @@ add_library(pgiceberg MODULE
             functions/register_table.cc
             functions/schema.cc
             logical/logical.cc
+            metadata/client.cc
+            metadata/launcher.cc
+            metadata/shared.cc
+            metadata/worker.cc
             tableam/tableam.cc
             utilities/avro_fdw.cc
             utilities/file_fdw_options.cc

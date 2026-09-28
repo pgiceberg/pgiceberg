@@ -14,6 +14,7 @@
 #include "common/pg_logger.h"
 #include "engine/modify_state.h"
 #include "logical/logical.h"
+#include "metadata/worker.h"
 #include "tableam/tableam.h"
 
 #include <string>
@@ -143,5 +144,6 @@ void _PG_init(void) {
   pgiceberg::engine::RegisterTransactionCallbacks();
   pgiceberg::tableam::RegisterTableAmHooks();
   pgiceberg::logical::RegisterLogicalWorker();
+  pgiceberg::metadata::RegisterMetadataWorkers();
 }
 }
