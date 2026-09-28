@@ -117,6 +117,7 @@ jobs:
         if: failure()
         run: |
           for file in \
+            build/tests/test/metadata_worker.log \
             build/tests/test/pg_regress.conf \
             build/tests/test/extension/pgiceberg.control \
             build/tests/test/regress/regression.diffs \
@@ -137,6 +138,7 @@ jobs:
         with:
           name: regression-pg${{ matrix.pg-version }}-${{ matrix.os }}
           path: |
+            build/tests/test/metadata_worker.log
             build/tests/test/pg_regress.conf
             build/tests/test/extension
             build/tests/test/regress/regression.diffs
