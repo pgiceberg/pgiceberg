@@ -864,3 +864,21 @@ COMMENT ON FUNCTION pgiceberg.update_schema(text, text, text, text[], regtype[],
   'Apply Iceberg schema updates: add optional columns, drop columns, and rename columns.';
 
 REVOKE EXECUTE ON FUNCTION pgiceberg.update_schema(text, text, text, text[], regtype[], text[], text[], text[]) FROM PUBLIC;
+
+-- Diagnostic RPCs for the metadata-worker foundation. No catalog/data I/O is
+-- routed through these workers yet.
+CREATE FUNCTION pgiceberg.metadata_worker_ping(
+  OUT database_oid oid, OUT worker_pid integer,
+  OUT generation bigint, OUT protocol_version integer
+)
+RETURNS record
+AS 'MODULE_PATHNAME', 'pgiceberg_metadata_worker_ping'
+LANGUAGE C VOLATILE PARALLEL UNSAFE;
+
+CREATE FUNCTION pgiceberg.metadata_worker_echo(payload bytea)
+RETURNS bytea
+AS 'MODULE_PATHNAME', 'pgiceberg_metadata_worker_echo'
+LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
+
+REVOKE EXECUTE ON FUNCTION pgiceberg.metadata_worker_ping() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgiceberg.metadata_worker_echo(bytea) FROM PUBLIC;

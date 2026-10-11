@@ -58,6 +58,12 @@ cmake --install "$BUILD_DIR" --component pgiceberg
 For pgenv, local regression tests, hooks, sanitizer builds, and Dev Container
 setup, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Metadata worker foundation
+
+An optional preloaded launcher and per-database metadata workers provide ping/echo
+RPC diagnostics. Existing Iceberg operations retain their current execution paths.
+See [setup, lifecycle, and limits](docs/metadata-workers.md).
+
 ## Basic Usage
 
 Start PostgreSQL, create a database, and enable the extension:
