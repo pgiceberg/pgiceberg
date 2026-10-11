@@ -224,7 +224,8 @@ with tempfile.TemporaryDirectory(prefix='pgim-') as directory:
             eventually(lambda i=i: client_waiting(f'startup_{i}'))
         result = sql('SELECT pgiceberg.metadata_worker_ping()', 'worker_b', False)
         assert result.returncode and 'request limit reached' in result.stderr
-        sql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'startup_0'")
+        # Wait for server-side exit callbacks, not just the client's FATAL reply.
+        assert sql("SELECT pg_terminate_backend(pid, 10000) FROM pg_stat_activity WHERE application_name = 'startup_0'") == 't'
         startup[0].communicate(timeout=10)
         assert startup[0].returncode
         assert ping('worker_b')[1:3] == b[1:3]

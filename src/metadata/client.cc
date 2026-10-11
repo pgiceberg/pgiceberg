@@ -18,6 +18,7 @@ extern "C" {
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "storage/ipc.h"
 #include "storage/shm_mq.h"
 #include "utils/wait_event.h"
 }
@@ -34,6 +35,24 @@ struct Request {
   uint64 generation;
   TimestampTz deadline;
 };
+
+bool ExitCallbackRegistered;
+
+void ClientExit(int, Datum) {
+  // FATAL bypasses PG_CATCH, and PostgreSQL 16 leaves a released PGPROC's PID
+  // intact. Release our reservations before PostgreSQL recycles MyProc.
+  LWLockAcquire(RegistryLock, LW_EXCLUSIVE);
+  for (auto& connection : Registry->connections) {
+    if (!connection.active || connection.proc != MyProc || connection.pid != MyProcPid)
+      continue;
+    connection.active = false;
+    if (connection.worker_slot >= 0) {
+      auto& worker = Registry->workers[connection.worker_slot];
+      WakeProcess(worker.proc, worker.pid);
+    }
+  }
+  LWLockRelease(RegistryLock);
+}
 
 void Cleanup(Request* request) {
   if (request->connection >= 0) {
@@ -136,6 +155,10 @@ bytea* Call(MessageKind kind, const char* payload, Size payload_size,
     ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                     errmsg("metadata request payload exceeds %zu bytes", kMaxPayload)));
   AttachRegistry();
+  if (!ExitCallbackRegistered) {
+    before_shmem_exit(ClientExit, 0);
+    ExitCallbackRegistered = true;
+  }
   // Heap-allocated state remains defined after PostgreSQL's error longjmp.
   auto* request = static_cast<Request*>(palloc0(sizeof(Request)));
   request->connection = -1;
