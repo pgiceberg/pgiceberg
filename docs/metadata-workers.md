@@ -50,7 +50,7 @@ that disallow connections. It connects to no database itself.
 | --- | --- | --- | --- |
 | `pgiceberg.metadata_databases` | empty | at most `metadata_max_workers` names | reload |
 | `pgiceberg.metadata_max_workers` | 8 | 1–32 | restart |
-| `pgiceberg.metadata_max_connections` | 64 | 1–128, instance-wide | restart |
+| `pgiceberg.metadata_max_connections` | 64 | 1–128, instance-wide, including startup waiters | restart |
 | `pgiceberg.metadata_request_timeout_ms` | 5000 | 1–600000 ms | session |
 
 In each enabled database, the extension owner can run:
@@ -96,7 +96,8 @@ counts as an active connection. Removing a database stops its worker without
 dropping the extension or any local tables.
 
 An unavailable worker produces a bounded startup timeout; an unconfigured
-database produces a configuration error. A full connection registry fails
+database produces a configuration error. Requests reserve capacity before
+allocating DSM or waiting for worker startup. A full connection registry fails
 immediately with a retry hint. Worker exit, request timeout, statement
 cancellation, and client backend exit release request resources. A disconnected
 request fails; it is never silently replayed to a new worker. The worker processes
@@ -114,9 +115,9 @@ RPCs report an explicit preload error if it is missing.
 `ctest --test-dir build --output-on-failure` includes a wire-format test and an
 isolated-cluster integration test (`metadata_worker`). The latter covers two
 databases, concurrent and maximum-size binary requests, SQL permissions,
-backpressure, timeout/cancel/disconnect cleanup, worker and launcher restart,
-transactional extension lifecycle, reload, and postmaster restart. Its server
-log is saved to `build/test/metadata_worker.log`.
+backpressure, startup admission limits, timeout/cancel/disconnect cleanup, worker
+and launcher restart, transactional extension lifecycle, reload, and postmaster
+restart. Its server log is saved to `build/test/metadata_worker.log`.
 
 PostgreSQL 18 uses the build-tree extension control file. PostgreSQL 16/17 tests
 use the installed extension, so run `cmake --install build --component pgiceberg`

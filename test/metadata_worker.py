@@ -54,14 +54,14 @@ with tempfile.TemporaryDirectory(prefix='pgim-') as directory:
     started = False
     clients = []
 
-    def run(binary, *argv, check=True):
+    def run(binary, *argv, check=True, timeout=30):
         return subprocess.run([str(Path(args.bindir) / binary), *map(str, argv)],
                               env=env, capture_output=True, text=True,
-                              timeout=30, check=check)
+                              timeout=timeout, check=check)
 
-    def sql(command, database='postgres', check=True):
+    def sql(command, database='postgres', check=True, timeout=30):
         result = run('psql', '-XAt', '-v', 'ON_ERROR_STOP=1', '-d', database,
-                     '-c', command, check=check)
+                     '-c', command, check=check, timeout=timeout)
         return result.stdout.strip() if check else result
 
     def ping(database='worker_a'):
@@ -91,8 +91,31 @@ with tempfile.TemporaryDirectory(prefix='pgim-') as directory:
         return sql("SELECT count(*) FROM pg_stat_activity WHERE "
                    f"application_name = '{name}' AND wait_event_type = 'Extension'") == '1'
 
-    def pause_worker(pid):
-        os.kill(pid, signal.SIGSTOP)
+    def pause_process(pid):
+        def stop_idle():
+            safe = False
+            os.kill(pid, signal.SIGSTOP)
+            try:
+                # Confirm that SIGSTOP took effect before inspecting the wait
+                # event. Sampling before the signal would race with wakeup.
+                eventually(lambda: subprocess.run(
+                    ['ps', '-o', 'stat=', '-p', str(pid)], capture_output=True,
+                    text=True, check=True, timeout=1).stdout.strip(),
+                    lambda state: state.startswith('T'), timeout=2)
+                # These workers report Extension only in their lock-free idle
+                # WaitLatch. Resume and retry if the signal caught other work.
+                # Bound the probe too, in case a stopped process holds a PG lock.
+                safe = sql('SELECT count(*) FROM pg_stat_activity WHERE '
+                           f"pid = {pid} AND wait_event_type = 'Extension'",
+                           timeout=1) == '1'
+                return safe
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, AssertionError):
+                return False
+            finally:
+                if not safe:
+                    os.kill(pid, signal.SIGCONT)
+
+        eventually(stop_idle)
 
     try:
         run('initdb', '-D', data, '-A', 'trust', '-U', 'postgres', '--no-locale')
@@ -137,7 +160,7 @@ with tempfile.TemporaryDirectory(prefix='pgim-') as directory:
         print('PASS: binary payload, queue wrap, concurrent clients, limits and SQL permissions', flush=True)
 
         stopped_pid = a[1]
-        pause_worker(stopped_pid)
+        pause_process(stopped_pid)
         # Timeout cleanup must release slots even when the worker cannot run.
         for _ in range(6):
             result = sql('SET pgiceberg.metadata_request_timeout_ms=80; SELECT pgiceberg.metadata_worker_ping()', 'worker_a', False)
@@ -165,7 +188,7 @@ with tempfile.TemporaryDirectory(prefix='pgim-') as directory:
         print('PASS: timeout, statement cancellation, connection cap and backend exit cleanup', flush=True)
 
         stopped_pid = a[1]
-        pause_worker(stopped_pid)
+        pause_process(stopped_pid)
         interrupted = launch(echo, 'interrupted_rpc')
         eventually(lambda: client_waiting('interrupted_rpc'))
         sql(f'SELECT pg_terminate_backend({a[1]})')
@@ -182,6 +205,38 @@ with tempfile.TemporaryDirectory(prefix='pgim-') as directory:
         assert ping()[1:3] == a2[1:3]
         assert worker_count('worker_a') == '1'
         print('PASS: worker generation rollover and launcher restart without duplicate children', flush=True)
+
+        # Hold the launcher at its idle safe point so worker_a stays unavailable.
+        # Startup waiters must consume the same instance-wide admission budget
+        # as requests already connected to a ready worker.
+        stopped_pid = int(sql("SELECT pid FROM pg_stat_activity WHERE backend_type = 'pgiceberg metadata launcher'"))
+        pause_process(stopped_pid)
+        sql(f'SELECT pg_terminate_backend({a2[1]})')
+        eventually(lambda: not active(a2[1]))
+        for _ in range(6):
+            result = sql('SET pgiceberg.metadata_request_timeout_ms=80; SELECT pgiceberg.metadata_worker_ping()', 'worker_a', False)
+            assert result.returncode and 'request timed out' in result.stderr
+        result = sql('SET statement_timeout=80; SELECT pgiceberg.metadata_worker_ping()', 'worker_a', False)
+        assert result.returncode and 'statement timeout' in result.stderr
+        startup = [launch('SET pgiceberg.metadata_request_timeout_ms=20000; SELECT * FROM pgiceberg.metadata_worker_ping()',
+                          f'startup_{i}') for i in range(4)]
+        for i in range(4):
+            eventually(lambda i=i: client_waiting(f'startup_{i}'))
+        result = sql('SELECT pgiceberg.metadata_worker_ping()', 'worker_b', False)
+        assert result.returncode and 'request limit reached' in result.stderr
+        sql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'startup_0'")
+        startup[0].communicate(timeout=10)
+        assert startup[0].returncode
+        assert ping('worker_b')[1:3] == b[1:3]
+        os.kill(stopped_pid, signal.SIGCONT)
+        stopped_pid = None
+        previous = a2
+        a2 = eventually(ping, lambda result: result[1] != previous[1] and result[2] > previous[2])
+        for client in startup[1:]:
+            output, error = client.communicate(timeout=10)
+            assert client.returncode == 0, error
+            assert tuple(map(int, output.splitlines()[-1].split('|')))[1:3] == a2[1:3]
+        print('PASS: startup admission limit, timeout/cancellation cleanup and pending-request recovery', flush=True)
 
         sql('BEGIN; DROP EXTENSION pgiceberg CASCADE; ROLLBACK', 'worker_a')
         assert ping()[1:3] == a2[1:3]

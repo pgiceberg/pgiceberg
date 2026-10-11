@@ -40,8 +40,10 @@ void Cleanup(Request* request) {
     LWLockAcquire(RegistryLock, LW_EXCLUSIVE);
     auto& connection = Registry->connections[request->connection];
     if (connection.active && connection.request == request->id) connection.active = false;
-    auto& worker = Registry->workers[request->worker];
-    WakeProcess(worker.proc, worker.pid);
+    if (request->worker >= 0) {
+      auto& worker = Registry->workers[request->worker];
+      WakeProcess(worker.proc, worker.pid);
+    }
     LWLockRelease(RegistryLock);
     request->connection = -1;
   }
@@ -57,7 +59,7 @@ void Wait(Request* request) {
   if (now >= request->deadline)
     ereport(ERROR, (errcode(ERRCODE_QUERY_CANCELED),
                     errmsg("pgiceberg metadata request timed out")));
-  if (request->connection >= 0) {
+  if (request->worker >= 0) {
     LWLockAcquire(RegistryLock, LW_SHARED);
     auto& worker = Registry->workers[request->worker];
     auto& connection = Registry->connections[request->connection];
@@ -76,6 +78,26 @@ void Wait(Request* request) {
             PG_WAIT_EXTENSION);
 }
 
+void Reserve(Request* request) {
+  // Admission includes callers waiting for a worker, before any DSM is allocated.
+  // A reservation is not published to a worker until both queues are initialized.
+  LWLockAcquire(RegistryLock, LW_EXCLUSIVE);
+  for (int i = 0; i < MaxConnections; ++i) {
+    auto& connection = Registry->connections[i];
+    if (connection.active && ProcessAlive(connection.proc, connection.pid)) continue;
+    request->connection = i;
+    request->id = ++Registry->next_request;
+    connection = {true, -1, 0, request->id, MyProc, MyProcPid, DSM_HANDLE_INVALID};
+    LWLockRelease(RegistryLock);
+    return;
+  }
+  LWLockRelease(RegistryLock);
+  ereport(ERROR,
+          (errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
+           errmsg("pgiceberg metadata request limit reached"),
+           errhint("Retry later or increase pgiceberg.metadata_max_connections.")));
+}
+
 void Connect(Request* request) {
   for (;;) {
     ResetLatch(MyLatch);
@@ -86,30 +108,15 @@ void Connect(Request* request) {
       if (worker.database != MyDatabaseId || !worker.desired) continue;
       configured = true;
       if (worker.state == WorkerState::kReady && ProcessAlive(worker.proc, worker.pid)) {
-        for (int j = 0; j < MaxConnections; ++j) {
-          auto& connection = Registry->connections[j];
-          if (connection.active && ProcessAlive(connection.proc, connection.pid))
-            continue;
-          request->connection = j;
-          request->worker = i;
-          request->generation = worker.generation;
-          request->id = ++Registry->next_request;
-          connection = {true,
-                        i,
-                        worker.generation,
-                        request->id,
-                        MyProc,
-                        MyProcPid,
-                        dsm_segment_handle(request->segment)};
-          WakeProcess(worker.proc, worker.pid);
-          LWLockRelease(RegistryLock);
-          return;
-        }
+        request->worker = i;
+        request->generation = worker.generation;
+        auto& connection = Registry->connections[request->connection];
+        connection.worker_slot = i;
+        connection.worker_generation = worker.generation;
+        connection.handle = dsm_segment_handle(request->segment);
+        WakeProcess(worker.proc, worker.pid);
         LWLockRelease(RegistryLock);
-        ereport(ERROR,
-                (errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
-                 errmsg("pgiceberg metadata request limit reached"),
-                 errhint("Retry later or increase pgiceberg.metadata_max_connections.")));
+        return;
       }
       WakeProcess(Registry->launcher, Registry->launcher_pid);
     }
@@ -132,10 +139,12 @@ bytea* Call(MessageKind kind, const char* payload, Size payload_size,
   // Heap-allocated state remains defined after PostgreSQL's error longjmp.
   auto* request = static_cast<Request*>(palloc0(sizeof(Request)));
   request->connection = -1;
+  request->worker = -1;
   request->deadline = GetCurrentTimestamp() + static_cast<int64>(RequestTimeoutMs) * 1000;
   bytea* response = nullptr;
   PG_TRY();
   {
+    Reserve(request);
     request->segment = dsm_create(kSegmentSize, 0);
     auto* base = static_cast<char*>(dsm_segment_address(request->segment));
     auto* output = shm_mq_create(base, kQueueSize);

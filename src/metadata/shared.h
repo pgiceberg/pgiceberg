@@ -45,6 +45,7 @@ struct WorkerSlot {
 
 struct ConnectionSlot {
   bool active;
+  // -1 reserves admission capacity while a caller waits for worker readiness.
   int worker_slot;
   uint64 worker_generation;
   uint64 request;
