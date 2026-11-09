@@ -166,3 +166,27 @@ if(PGICEBERG_ENABLE_SQL_FUZZ)
                                   WORKING_DIRECTORY
                                   "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
 endif()
+
+if(POSTGRESQL_REGRESS)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  # PG 18 can use build-tree control files. Earlier releases use the installed
+  # extension, just like regress_fdw, so preload the same physical library.
+  if(POSTGRESQL_VERSION VERSION_GREATER_EQUAL "18")
+    set(PGICEBERG_METADATA_LIBRARY "$<TARGET_FILE:pgiceberg>")
+    set(PGICEBERG_METADATA_CONTROL_PATH "${CMAKE_CURRENT_BINARY_DIR}")
+  else()
+    set(PGICEBERG_METADATA_LIBRARY "${POSTGRESQL_PKGLIB_DIR}/pgiceberg")
+    set(PGICEBERG_METADATA_CONTROL_PATH "")
+  endif()
+  add_test(NAME metadata_worker
+           COMMAND "${Python3_EXECUTABLE}"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/metadata_worker.py" --bindir
+                   "${POSTGRESQL_BIN_DIR}" --library "${PGICEBERG_METADATA_LIBRARY}"
+                   --control-path "${PGICEBERG_METADATA_CONTROL_PATH}" --log
+                   "${CMAKE_CURRENT_BINARY_DIR}/metadata_worker.log")
+  set_tests_properties(metadata_worker PROPERTIES TIMEOUT 180)
+endif()
+
+add_executable(metadata_protocol metadata_protocol.cc)
+target_include_directories(metadata_protocol PRIVATE "${PROJECT_SOURCE_DIR}/src")
+add_test(NAME metadata_protocol COMMAND metadata_protocol)
