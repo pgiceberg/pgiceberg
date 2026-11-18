@@ -72,10 +72,9 @@ jobs:
             .ccache
             build/sql-fuzz/_deps
             build/sqlsmith
-          key: cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'scripts/build-sqlsmith.sh') }}-${{ github.run_id }}-v1
+          key: cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch', 'scripts/build-sqlsmith.sh') }}-${{ github.run_id }}-v1
           restore-keys: |
-            cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'scripts/build-sqlsmith.sh') }}-
-            cmake-deps-sql-fuzz-${{ runner.os }}-
+            cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch', 'scripts/build-sqlsmith.sh') }}-
 
       - name: Install PostgreSQL with pgenv
         run: .github/scripts/install-pgenv.sh "${PG_VERSION}"
@@ -135,7 +134,7 @@ jobs:
             .ccache
             build/sql-fuzz/_deps
             build/sqlsmith
-          key: cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'scripts/build-sqlsmith.sh') }}-${{ github.run_id }}-v1
+          key: cmake-deps-sql-fuzz-${{ runner.os }}-${{ hashFiles('cmake_modules/DependencyToolchain.cmake', 'cmake_modules/patches/*.patch', 'scripts/build-sqlsmith.sh') }}-${{ github.run_id }}-v1
 
       - name: Save pgenv PostgreSQL cache
         if: always() && steps.cache-pgenv.outputs.cache-hit != 'true'

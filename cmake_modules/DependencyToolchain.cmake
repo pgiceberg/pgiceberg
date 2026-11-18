@@ -39,8 +39,16 @@ set(PGICEBERG_ICEBERG_SHA512
 function(resolve_iceberg_dependency out_target)
   prepare_fetchcontent()
 
+  # Arrow's bundled Boost 1.88 groups locale.hpp under a sibling directory.
+  # Fix that group before Boost configures its libraries (CMake 4.5 rejects it).
+  set(CMAKE_PROJECT_Boost_INCLUDE
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PatchBoostLocale.cmake")
+
   set(ICEBERG_ARROW
       ON
+      CACHE BOOL "" FORCE)
+  set(ICEBERG_S3
+      ${PGICEBERG_ENABLE_S3}
       CACHE BOOL "" FORCE)
   set(ICEBERG_BUILD_STATIC
       ON
@@ -80,6 +88,21 @@ function(resolve_iceberg_dependency out_target)
                        URL_HASH "SHA512=${PGICEBERG_ICEBERG_SHA512}"
                        DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
   fetchcontent_makeavailable(Iceberg)
+  include(ApplyIcebergPatches)
+  apply_iceberg_patches("${iceberg_SOURCE_DIR}")
+
+  if(PGICEBERG_ENABLE_S3)
+    # The credential provider uses AWS types directly. Arrow's private SDK
+    # dependency does not propagate its headers to the Iceberg bundle.
+    if(NOT TARGET aws-cpp-sdk-core)
+      find_package(AWSSDK REQUIRED COMPONENTS core)
+    endif()
+    foreach(candidate iceberg_bundle_static iceberg_bundle_shared)
+      if(TARGET ${candidate})
+        target_link_libraries(${candidate} PRIVATE "$<BUILD_INTERFACE:aws-cpp-sdk-core>")
+      endif()
+    endforeach()
+  endif()
 
   set(iceberg_targets)
 

@@ -20,7 +20,8 @@ CREATE TABLE pgiceberg.catalogs (
   catalog_type text NOT NULL,
   catalog_uri text NOT NULL,
   warehouse text NOT NULL,
-  iceberg_catalog_name text NOT NULL
+  iceberg_catalog_name text NOT NULL,
+  credential_server text
 ) USING heap;
 
 COMMENT ON TABLE pgiceberg.catalogs IS
@@ -35,6 +36,8 @@ COMMENT ON COLUMN pgiceberg.catalogs.warehouse IS
   'Warehouse location used to create and load Iceberg table files.';
 COMMENT ON COLUMN pgiceberg.catalogs.iceberg_catalog_name IS
   'Logical Iceberg catalog name used to scope tables in the catalog backend.';
+COMMENT ON COLUMN pgiceberg.catalogs.credential_server IS
+  'Foreign server holding connection properties and per-role USER MAPPING credentials; no secrets are stored here.';
 
 CREATE TABLE pgiceberg.table_bindings (
   relid oid PRIMARY KEY,
@@ -113,32 +116,44 @@ COMMENT ON COLUMN pgiceberg.logical_mirrors.last_flushed_lsn IS
 COMMENT ON COLUMN pgiceberg.logical_mirrors.last_applied_batch_id IS
   'SHA-256 identity of the latest slot prefix durably applied to Iceberg and consumed.';
 
+CREATE FUNCTION pgiceberg.validate_catalog_uri(uri text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pgiceberg_validate_catalog_uri'
+LANGUAGE C STRICT;
+
 CREATE FUNCTION pgiceberg.add_catalog(
   name text,
   catalog_type text,
   catalog_uri text,
   warehouse text,
-  iceberg_catalog_name text DEFAULT NULL
+  iceberg_catalog_name text DEFAULT NULL,
+  credential_server text DEFAULT NULL
 )
 RETURNS void
-LANGUAGE sql
+LANGUAGE plpgsql
 AS $$
+BEGIN
+  PERFORM pgiceberg.validate_catalog_uri($3);
+  PERFORM pgiceberg.validate_catalog_uri($4);
   INSERT INTO pgiceberg.catalogs (
     name,
     catalog_type,
     catalog_uri,
     warehouse,
-    iceberg_catalog_name
+    iceberg_catalog_name,
+    credential_server
   )
-  VALUES ($1, $2, $3, $4, COALESCE($5, $1))
-  ON CONFLICT (name) DO UPDATE
+  VALUES ($1, $2, $3, $4, COALESCE($5, $1), $6)
+  ON CONFLICT ON CONSTRAINT catalogs_pkey DO UPDATE
   SET catalog_type = EXCLUDED.catalog_type,
       catalog_uri = EXCLUDED.catalog_uri,
       warehouse = EXCLUDED.warehouse,
-      iceberg_catalog_name = EXCLUDED.iceberg_catalog_name;
+      iceberg_catalog_name = EXCLUDED.iceberg_catalog_name,
+      credential_server = EXCLUDED.credential_server;
+END;
 $$;
 
-COMMENT ON FUNCTION pgiceberg.add_catalog(text, text, text, text, text) IS
+COMMENT ON FUNCTION pgiceberg.add_catalog(text, text, text, text, text, text) IS
   'Register or replace a local pgiceberg catalog name and its Iceberg catalog connection details.';
 
 CREATE FUNCTION pgiceberg.drop_catalog(name text)

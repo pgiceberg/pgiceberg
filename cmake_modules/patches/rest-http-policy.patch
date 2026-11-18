@@ -1,0 +1,282 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+--- a/src/iceberg/catalog/rest/http_client.h
++++ b/src/iceberg/catalog/rest/http_client.h
+@@ -67,10 +67,23 @@
+   std::unique_ptr<Impl> impl_;
+ };
+ 
++/// Bounded per-client transport policy, including initialization and OAuth calls.
++struct ICEBERG_REST_EXPORT HttpClientOptions {
++  int connect_timeout_ms = 5000;
++  int request_timeout_ms = 30000;
++  int max_retries = 3;
++  int retry_min_wait_ms = 100;
++  int retry_max_wait_ms = 2000;
++
++  static Result<HttpClientOptions> FromProperties(
++      const std::unordered_map<std::string, std::string>& properties);
++};
++
+ /// \brief HTTP client for making requests to Iceberg REST Catalog API.
+ class ICEBERG_REST_EXPORT HttpClient {
+  public:
+-  explicit HttpClient(std::unordered_map<std::string, std::string> default_headers = {});
++  explicit HttpClient(std::unordered_map<std::string, std::string> default_headers = {},
++                      HttpClientOptions options = {});
+   ~HttpClient();
+ 
+   HttpClient(const HttpClient&) = delete;
+@@ -111,6 +124,7 @@
+                               auth::AuthSession& session);
+ 
+  private:
++  HttpClientOptions options_;
+   std::unordered_map<std::string, std::string> default_headers_;
+   std::unique_ptr<cpr::ConnectionPool> connection_pool_;
+ };
+--- a/src/iceberg/catalog/rest/http_client.cc
++++ b/src/iceberg/catalog/rest/http_client.cc
+@@ -19,7 +19,13 @@
+ 
+ #include "iceberg/catalog/rest/http_client.h"
+ 
++#include <algorithm>
++#include <charconv>
++#include <chrono>
++#include <ctime>
++#include <curl/curl.h>
+ #include <map>
++#include <thread>
+ 
+ #include <cpr/cpr.h>
+ 
+@@ -32,6 +38,37 @@
+ 
+ namespace iceberg::rest {
+ 
++Result<HttpClientOptions> HttpClientOptions::FromProperties(
++    const std::unordered_map<std::string, std::string>& properties) {
++  HttpClientOptions options;
++  struct Field {
++    const char* name;
++    int* value;
++    int min;
++    int max;
++  };
++  for (const auto field :
++       {Field{"rest.connect-timeout-ms", &options.connect_timeout_ms, 1, 3600000},
++        Field{"rest.request-timeout-ms", &options.request_timeout_ms, 1, 3600000},
++        Field{"rest.max-retries", &options.max_retries, 0, 10},
++        Field{"rest.retry-min-wait-ms", &options.retry_min_wait_ms, 1, 60000},
++        Field{"rest.retry-max-wait-ms", &options.retry_max_wait_ms, 1, 60000}}) {
++    if (auto it = properties.find(field.name); it != properties.end()) {
++      const auto& value = it->second;
++      auto [end, ec] =
++          std::from_chars(value.data(), value.data() + value.size(), *field.value);
++      if (ec != std::errc{} || end != value.data() + value.size() ||
++          *field.value < field.min || *field.value > field.max) {
++        return InvalidArgument("Invalid HTTP client property '{}'", field.name);
++      }
++    }
++  }
++  if (options.retry_min_wait_ms > options.retry_max_wait_ms) {
++    return InvalidArgument("HTTP retry minimum exceeds maximum wait");
++  }
++  return options;
++}
++
+ class HttpResponse::Impl {
+  public:
+   explicit Impl(cpr::Response&& response) : response_(std::move(response)) {}
+@@ -63,6 +100,37 @@
+ }
+ 
+ namespace {
++
++// Retry only operations whose repetition is safe. Catalog mutations deliberately
++// get one transport attempt, preserving unknown commit outcomes for recovery.
++template <typename Send>
++cpr::Response SendWithRetry(const HttpClientOptions& options, bool retryable, Send send) {
++  int delay_ms = options.retry_min_wait_ms;
++  for (int attempt = 0;; ++attempt) {
++    auto response = send();
++    const auto code = response.status_code;
++    const bool transient = code == 0 || code == 408 || code == 429 || code == 500 ||
++                           code == 502 || code == 503 || code == 504;
++    if (!retryable || !transient || attempt >= options.max_retries) return response;
++    int wait_ms = delay_ms;
++    if (auto it = response.header.find("Retry-After"); it != response.header.end()) {
++      int64_t seconds = 0;
++      const auto& value = it->second;
++      auto [end, ec] = std::from_chars(value.data(), value.data() + value.size(), seconds);
++      if (ec != std::errc{} || end != value.data() + value.size()) {
++        const auto deadline = curl_getdate(value.c_str(), nullptr);
++        if (deadline < 0) return response;
++        seconds = std::max<int64_t>(0, deadline - std::time(nullptr));
++      }
++      // Never retry earlier than Retry-After, or turn a bounded request into a
++      // long sleep. Let the caller retry later if the server's wait exceeds budget.
++      if (seconds < 0 || seconds > options.retry_max_wait_ms / 1000) return response;
++      wait_ms = std::max(wait_ms, static_cast<int>(seconds * 1000));
++    }
++    std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
++    delay_ms = std::min(options.retry_max_wait_ms, delay_ms * 2);
++  }
++}
+ 
+ /// \brief Default error type for unparseable REST responses.
+ constexpr std::string_view kRestExceptionType = "RESTException";
+@@ -146,15 +214,27 @@
+   }
+   auto parse_result = error_handler.ParseResponse(
+       static_cast<uint32_t>(response.status_code), response.text);
+-  const ErrorResponse final_error =
+-      parse_result.value_or(BuildDefaultErrorResponse(response));
++  auto final_error = parse_result.value_or(BuildDefaultErrorResponse(response));
++  // Never trust a response body to supply the HTTP status, or echo remote error
++  // text that might contain Authorization headers, credentials, or signed URLs.
++  if (final_error.type != "NoSuchNamespaceException" &&
++      final_error.type != "NamespaceNotEmptyException" &&
++      final_error.type != "NotFoundException") {
++    final_error.type = "RESTException";
++  }
++  final_error.code = response.status_code == 0 ? 503 : response.status_code;
++  final_error.message = response.status_code == 0
++                            ? "HTTP transport failure"
++                            : GetStandardReasonPhrase(response.status_code);
+   return error_handler.Accept(final_error);
+ }
+ 
+ }  // namespace
+ 
+-HttpClient::HttpClient(std::unordered_map<std::string, std::string> default_headers)
+-    : default_headers_{std::move(default_headers)},
++HttpClient::HttpClient(std::unordered_map<std::string, std::string> default_headers,
++                       HttpClientOptions options)
++    : options_(options),
++      default_headers_{std::move(default_headers)},
+       connection_pool_{std::make_unique<cpr::ConnectionPool>()} {
+   // Set default Content-Type for all requests (including GET/HEAD/DELETE).
+   // Many systems require that content type is set regardless and will fail,
+@@ -173,8 +253,11 @@
+   ICEBERG_ASSIGN_OR_RAISE(auto authenticated,
+                           AuthenticateRequest(session, HttpMethod::kGet, std::move(url),
+                                               MergeHeaders(default_headers_, headers)));
+-  cpr::Response response = cpr::Get(cpr::Url{authenticated.url},
+-                                    ToCprHeader(authenticated), *connection_pool_);
++  cpr::Response response = SendWithRetry(options_, true, [&] {
++    return cpr::Get(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
++                    *connection_pool_, cpr::ConnectTimeout{options_.connect_timeout_ms},
++                    cpr::Timeout{options_.request_timeout_ms}, cpr::Redirect{false});
++  });
+ 
+   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
+   HttpResponse http_response;
+@@ -190,9 +273,12 @@
+       auto authenticated,
+       AuthenticateRequest(session, HttpMethod::kPost, path,
+                           MergeHeaders(default_headers_, headers), body));
+-  cpr::Response response =
+-      cpr::Post(cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
+-                ToCprHeader(authenticated), *connection_pool_);
++  cpr::Response response = SendWithRetry(options_, false, [&] {
++    return cpr::Post(cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
++                     ToCprHeader(authenticated), *connection_pool_,
++                     cpr::ConnectTimeout{options_.connect_timeout_ms},
++                     cpr::Timeout{options_.request_timeout_ms}, cpr::Redirect{false});
++  });
+ 
+   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
+   HttpResponse http_response;
+@@ -220,9 +306,12 @@
+       AuthenticateRequest(session, HttpMethod::kPost, path,
+                           MergeHeaders(default_headers_, form_headers),
+                           std::move(encoded_body)));
+-  cpr::Response response =
+-      cpr::Post(cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
+-                ToCprHeader(authenticated), *connection_pool_);
++  cpr::Response response = SendWithRetry(options_, true, [&] {
++    return cpr::Post(cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
++                     ToCprHeader(authenticated), *connection_pool_,
++                     cpr::ConnectTimeout{options_.connect_timeout_ms},
++                     cpr::Timeout{options_.request_timeout_ms}, cpr::Redirect{false});
++  });
+ 
+   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
+   HttpResponse http_response;
+@@ -236,8 +325,11 @@
+   ICEBERG_ASSIGN_OR_RAISE(auto authenticated,
+                           AuthenticateRequest(session, HttpMethod::kHead, path,
+                                               MergeHeaders(default_headers_, headers)));
+-  cpr::Response response = cpr::Head(cpr::Url{authenticated.url},
+-                                     ToCprHeader(authenticated), *connection_pool_);
++  cpr::Response response = SendWithRetry(options_, true, [&] {
++    return cpr::Head(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
++                     *connection_pool_, cpr::ConnectTimeout{options_.connect_timeout_ms},
++                     cpr::Timeout{options_.request_timeout_ms}, cpr::Redirect{false});
++  });
+ 
+   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
+   HttpResponse http_response;
+@@ -254,8 +346,12 @@
+       auto authenticated,
+       AuthenticateRequest(session, HttpMethod::kDelete, std::move(url),
+                           MergeHeaders(default_headers_, headers)));
+-  cpr::Response response = cpr::Delete(cpr::Url{authenticated.url},
+-                                       ToCprHeader(authenticated), *connection_pool_);
++  cpr::Response response = SendWithRetry(options_, false, [&] {
++    return cpr::Delete(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
++                       *connection_pool_,
++                       cpr::ConnectTimeout{options_.connect_timeout_ms},
++                       cpr::Timeout{options_.request_timeout_ms}, cpr::Redirect{false});
++  });
+ 
+   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
+   HttpResponse http_response;
+--- a/src/iceberg/catalog/rest/rest_catalog.cc
++++ b/src/iceberg/catalog/rest/rest_catalog.cc
+@@ -87,7 +87,9 @@
+                                         const RestCatalogProperties& current_config,
+                                         auth::AuthSession& session) {
+   ICEBERG_ASSIGN_OR_RAISE(auto config_path, paths.Config());
+-  HttpClient client(current_config.ExtractHeaders());
++  ICEBERG_ASSIGN_OR_RAISE(auto http_options,
++                          HttpClientOptions::FromProperties(current_config.configs()));
++  HttpClient client(current_config.ExtractHeaders(), http_options);
+ 
+   // Send the client's warehouse location to the service to keep in sync.
+   // This is needed for cases where the warehouse is configured client side, but may
+@@ -399,7 +401,9 @@
+                           config.Get(RestCatalogProperties::kNamespaceSeparator)));
+ 
+   // Create init session for fetching server configuration
+-  auto init_client = std::make_shared<HttpClient>(config.ExtractHeaders());
++  ICEBERG_ASSIGN_OR_RAISE(auto http_options,
++                          HttpClientOptions::FromProperties(config.configs()));
++  auto init_client = std::make_shared<HttpClient>(config.ExtractHeaders(), http_options);
+   ICEBERG_ASSIGN_OR_RAISE(auto init_session,
+                           auth_manager->InitSession(init_client, config.configs()));
+   ICEBERG_ASSIGN_OR_RAISE(auto server_config,
+@@ -430,7 +434,10 @@
+   // Get snapshot loading mode
+   ICEBERG_ASSIGN_OR_RAISE(auto snapshot_mode, final_config.SnapshotLoadingMode());
+ 
+-  auto client = std::make_shared<HttpClient>(final_config.ExtractHeaders());
++  ICEBERG_ASSIGN_OR_RAISE(auto final_http_options,
++                          HttpClientOptions::FromProperties(final_config.configs()));
++  auto client = std::make_shared<HttpClient>(final_config.ExtractHeaders(),
++                                             final_http_options);
+   ICEBERG_ASSIGN_OR_RAISE(auto catalog_session,
+                           auth_manager->CatalogSession(client, final_config.configs()));
+ 
