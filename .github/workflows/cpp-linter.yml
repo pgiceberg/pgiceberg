@@ -18,11 +18,13 @@ on:
     branches:
       - main
     paths:
+      - ".github/workflows/cpp-linter.yml"
       - ".clang-format"
       - ".clang-tidy"
       - "CMakeLists.txt"
       - "cmake_modules/**"
       - "src/**"
+      - "test/**"
 
 permissions:
   contents: read
@@ -49,6 +51,9 @@ jobs:
 
       - name: Install CI dependencies
         run: .github/scripts/install-ci-dependencies.sh
+
+      - name: Install REST catalog dependencies
+        run: sudo apt-get install -y libcurl4-openssl-dev
 
       - name: Restore pgenv PostgreSQL cache
         id: cache-pgenv
@@ -89,6 +94,8 @@ jobs:
           echo "includedir_server=$(pg_config --includedir-server)" >> "${GITHUB_OUTPUT}"
 
       - name: Configure compile database
+        # Optional network tests need their own compile commands and generated
+        # REST headers; clang-tidy cannot infer them from the default build.
         run: |
           export PATH="${HOME}/.pgenv/bin:${HOME}/.pgenv/pgsql/bin:${PATH}"
           cmake -S . -B build/cpp-linter -GNinja \
@@ -96,7 +103,9 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DPG_CONFIG="$(command -v pg_config)"
+            -DPG_CONFIG="$(command -v pg_config)" \
+            -DPGICEBERG_ENABLE_REST_CATALOG=ON \
+            -DPGICEBERG_ENABLE_S3=ON
 
       - name: Build
         run: cmake --build build/cpp-linter
