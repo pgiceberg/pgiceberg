@@ -39,6 +39,11 @@ set(PGICEBERG_ICEBERG_SHA512
 function(resolve_iceberg_dependency out_target)
   prepare_fetchcontent()
 
+  # Arrow's bundled Boost 1.88 groups locale.hpp under a sibling directory.
+  # Fix that group before Boost configures its libraries (CMake 4.5 rejects it).
+  set(CMAKE_PROJECT_Boost_INCLUDE
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PatchBoostLocale.cmake")
+
   set(ICEBERG_ARROW
       ON
       CACHE BOOL "" FORCE)
