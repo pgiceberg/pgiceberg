@@ -12,192 +12,129 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Real-time PostgreSQL-to-Iceberg Mirrors
+# Real-time PostgreSQL-to-Iceberg mirrors
 
-## Status
+The first implementation provides a lock-based consistent initial copy and
+idempotent replay of INSERT batches. UPDATE/DELETE replication, shared streams,
+and sub-second in-memory reads are future work.
 
-This document defines the target architecture for logical mirrors and records
-the intentionally smaller first implementation. The first implementation
-provides a consistent, lock-based initial copy and idempotent replay of INSERT
-batches. Full UPDATE/DELETE replication, shared replication streams, and a
-sub-second in-memory read path are follow-up work.
+Heap remains the source of truth. Logical decoding supplies ordered changes;
+pgiceberg owns replication progress and uses the shared iceberg-cpp engine to
+write files and publish metadata. This CDC path stays separate from FDW and
+Table AM query/storage callbacks.
 
-## Context
+## Current scope
 
-pgiceberg has three separate PostgreSQL integration surfaces:
+- Copy pre-existing rows without gaps or duplicates at the replication handoff.
+- Publish Iceberg durably before acknowledging source WAL.
+- Recognize a batch published before a crash and avoid appending it twice.
+- Persist configuration and progress across PostgreSQL crashes.
 
-- the FDW exposes existing external Iceberg tables;
-- the table access method makes Iceberg the storage for a PostgreSQL relation;
-- logical decoding keeps a downstream Iceberg copy of a PostgreSQL heap table.
+The initial copy blocks source writes for its duration. Each mirror owns one
+logical slot. UPDATE, DELETE, and TRUNCATE disable the mirror instead of silently
+leaving an incorrect target. Visibility follows Iceberg commit boundaries; there
+is no hot Arrow overlay or LSN-bounded union read. INSERT-only mirrors produce
+no v3 deletion vectors, although FDW readers/writers support that separate path.
 
-Logical mirrors must remain a CDC feature. They must not turn the native table
-access method into a marker relation whose queries are executed by another SQL
-engine. Keeping the surfaces separate preserves PostgreSQL planning and
-transaction semantics and lets the FDW, table AM, and logical worker share the
-same iceberg-cpp scan and write primitives.
+## Persistent state
 
-The logical mirror is implemented directly in pgiceberg's existing C++ stack:
-PostgreSQL logical decoding provides the ordered change stream, the pgiceberg
-worker owns replication progress, and the shared engine write path uses
-iceberg-cpp to publish data files and metadata. The first implementation favors
-a small correctness proof over maximum concurrency; later phases can improve
-backfill throughput, change coverage, freshness, and maintenance without
-changing these ownership boundaries.
+The logged `pgiceberg.logical_mirrors` table stores lifecycle state
+(`backfilling`, `ready`, `error`), slot creation LSN, copied-row count, last
+consumed LSN, and batch ID. The output plugin excludes the `pgiceberg` schema
+so progress writes do not feed the same slot. Other non-source changes may be
+decoded and consumed without applying them.
 
-## Goals
+Each Iceberg target belongs to one mirror: its batch property checkpoints one
+ordered stream. External appends are allowed if writers preserve table
+properties, including all `pgiceberg.logical.*` checkpoints.
 
-1. Include rows that existed before a mirror was created without missing or
-   duplicating writes at the transition to logical replication.
-2. Never acknowledge WAL before the corresponding Iceberg commit is durable.
-3. Recognize an Iceberg batch that committed before a crash so replay does not
-   append the same rows again.
-4. Persist mirror configuration and progress across a PostgreSQL crash.
-5. Establish state and metadata contracts that can later support UPDATE,
-   DELETE, parallel backfill, and shared replication streams.
+## Consistent initial copy
 
-## Non-goals of the first implementation
+Mirror creation runs in one PostgreSQL transaction:
 
-- The initial copy does not run concurrently with source writes. Large tables
-  will hold a write-conflicting lock for the duration of the copy.
-- Logical mirrors remain INSERT-only. UPDATE, DELETE, and TRUNCATE disable the
-  mirror rather than silently producing an incorrect target.
-- The worker still owns one logical slot per mirror.
-- Iceberg data becomes visible at Iceberg commit boundaries; there is no hot
-  Arrow overlay or LSN-bounded union read.
-- Logical mirrors do not produce Iceberg v3 deletion vectors because the first
-  implementation is INSERT-only. FDW scans can apply deletion vectors written
-  by other engines, while row-level FDW writes use them for v3 tables.
-
-## First implementation
-
-### Persistent control state
-
-`pgiceberg.logical_mirrors` is a regular logged PostgreSQL table. It stores:
-
-- lifecycle state (`backfilling`, `ready`, or `error`);
-- the LSN at which the slot was created;
-- the number of rows copied during backfill;
-- the last consumed LSN and logical batch identifier.
-
-The output plugin omits relations in the `pgiceberg` schema. This prevents
-mirror progress updates from feeding the same logical slot while allowing the
-configuration to survive crash recovery. Changes for other non-source tables
-may still appear in a slot and are consumed without being applied.
-
-Each configured Iceberg target belongs to one logical mirror. The batch
-property is a single ordered-stream checkpoint, so concurrent logical mirrors
-must not share a target. External writers may append to a mirror target because
-Iceberg table properties are preserved, but operators must not remove or alter
-the `pgiceberg.logical.*` checkpoint properties.
-
-### Correctness-first initial copy
-
-Mirror creation performs the following sequence in one PostgreSQL transaction:
-
-1. Acquire `SHARE ROW EXCLUSIVE` on the source heap table. This conflicts with
-   INSERT, UPDATE, DELETE, and TRUNCATE.
+1. Acquire `SHARE ROW EXCLUSIVE` on the heap source, blocking INSERT, UPDATE,
+   DELETE, and TRUNCATE.
 2. Create the logical slot and record its consistent point.
 3. Create or validate the target Iceberg table.
-4. Under `READ COMMITTED`, acquire a fresh PostgreSQL snapshot after the lock,
-   then scan all source rows and append them to the target in bounded batches.
-5. Mark the mirror `ready` and commit the pending Iceberg append during
-   PostgreSQL `PRE_COMMIT`.
-6. Commit PostgreSQL and release the source-table lock.
+4. Under `READ COMMITTED`, take a fresh snapshot after acquiring the lock and
+   append source rows in bounded batches.
+5. Mark the mirror ready and publish the pending append at PRE_COMMIT.
+6. Commit PostgreSQL and release the source lock.
 
-The lock is the handoff barrier. Every row committed before the lock is visible
-to the backfill snapshot. A writer that starts after the lock waits until the
-mirror transaction commits, and its change is then newer than the already
-created slot. There is therefore neither a missing interval nor an overlap.
+The lock is the handoff barrier. Pre-lock committed rows appear in the copy.
+Blocked writes resume after mirror creation commits and appear after the slot's
+consistent point. There is no gap or overlap.
 
-`REPEATABLE READ` and `SERIALIZABLE` reuse the transaction snapshot and cannot
-provide this post-lock visibility guarantee. Consistent backfill rejects those
-isolation levels; callers can create the mirror in a short `READ COMMITTED`
-transaction.
+Reject `REPEATABLE READ` and `SERIALIZABLE` for consistent backfill: their reused
+transaction snapshot may miss rows committed before the lock. Use a short
+`READ COMMITTED` transaction. With `backfill=false`, preserve from-now behavior.
+An existing target must be empty when backfill is requested.
 
-If `backfill` is false, mirror creation retains the former from-now behavior.
-If the caller supplies an existing target and requests backfill, pgiceberg
-requires that target to be empty.
+A later concurrent backfill can use replication-protocol
+`CREATE_REPLICATION_SLOT ... EXPORT_SNAPSHOT`, imported snapshots, and parallel
+CTID-range readers. It must preserve the same handoff invariants.
 
-This approach prioritizes a small, auditable correctness proof. A later
-implementation should replace the long-held lock with a replication-protocol
-`CREATE_REPLICATION_SLOT ... EXPORT_SNAPSHOT`, parallel readers that import the
-same snapshot, and CTID-range sharding. That changes availability and
-throughput, not the handoff invariants.
+## Idempotent batches
 
-### Idempotent Iceberg batches
+The worker peeks a bounded slot prefix, publishes Iceberg, then consumes exactly
+that prefix. PostgreSQL cannot atomically combine external publication and slot
+consumption.
 
-The worker continues to peek a bounded prefix from the slot, commit Iceberg,
-and consume exactly that prefix. The gap between the external Iceberg commit
-and slot consumption cannot be made atomic by PostgreSQL.
+For a prefix containing source INSERTs, compute a SHA-256 ID over the slot name
+and exact ordered `(LSN, payload)` prefix. Stage append plus these properties in
+one iceberg-cpp transaction, also recording them in the FastAppend summary:
 
-For every batch containing source INSERTs, pgiceberg computes a SHA-256 batch
-identifier over the slot name and the exact ordered `(LSN, payload)` prefix.
-The FastAppend snapshot summary and the resulting table properties contain:
+- `pgiceberg.logical.last-batch-id`
+- `pgiceberg.logical.last-source-lsn`
 
-- `pgiceberg.logical.last-batch-id`;
-- `pgiceberg.logical.last-source-lsn`.
+Before replay, load the target. A matching last-batch property means publication
+already succeeded: consume the prefix and update progress without appending.
+This handles the normal publish-before-consume crash window. LSN alone is not a
+batch identity because several bounded batches from one PostgreSQL transaction
+may share it.
 
-The property update and append are staged in the same iceberg-cpp transaction.
-Before replaying a peeked prefix, the worker loads the target table. If its
-last-batch property matches, the Iceberg commit already succeeded and the
-worker only consumes the slot prefix and updates PostgreSQL progress. This
-makes the normal crash window effectively-once without treating LSN alone as a
-batch identity; a single PostgreSQL transaction may span multiple worker-sized
-batches that share the same LSN.
+The ID proves identity, not order. Consume WAL in slot order; a numerically newer
+target LSN never authorizes skipping a source prefix.
 
-The batch identifier is an idempotency key, not an ordering key. WAL is still
-consumed in slot order, and the slot is never advanced merely because the
-target contains a numerically newer LSN.
-
-## Failure semantics
+## Failure behavior
 
 | Failure point | Result |
 | --- | --- |
-| Before Iceberg commit | PostgreSQL aborts; the slot prefix remains and newly written files are cleaned up best-effort. |
-| Iceberg commit fails | The slot is not advanced. The batch is retried. |
-| Iceberg commit state is unknown | New files are retained. A retry consults the target batch property. |
-| After Iceberg commit, before slot consumption | The retry recognizes the batch property and consumes without appending. |
-| After slot consumption, before PostgreSQL progress commit | Slot semantics decide whether consumption is rolled back; either outcome is safe because the Iceberg batch is identifiable. |
-| Initial copy fails | The creating transaction aborts and a newly created slot is dropped best-effort. External Iceberg catalog changes may require operator cleanup. |
+| Before Iceberg publication | PostgreSQL aborts; slot prefix remains; clean new files best-effort. |
+| Definite Iceberg failure | Keep the slot position and retry. |
+| Unknown Iceberg outcome | Retain files and inspect the target checkpoint on retry. |
+| Iceberg published, prefix not consumed | Match the batch property and consume without reappending. |
+| Prefix consumed, local progress not committed | Slot rollback/durability determines replay; batch identity protects an already published prefix. |
+| Initial copy fails | Abort creation and drop the new slot best-effort; external catalog changes may need operator cleanup. |
 
-## Follow-up phases
+## Follow-up work
 
-### Transaction-aware UPDATE and DELETE
+### UPDATE and DELETE
 
-The output plugin should emit BEGIN/COMMIT boundaries and old/new replica
-identity values. For mirrors with a primary key or suitable replica identity:
+Emit transaction boundaries and old/new replica identity. For a primary key or
+suitable replica identity, represent UPDATE as old-key equality delete plus new
+row append, DELETE as equality delete, and INSERT as append. Iceberg v2 equality
+deletes are the initial target because the pinned reader supports them.
 
-- UPDATE becomes an equality delete of the old key plus an append of the new
-  row;
-- DELETE becomes an equality delete;
-- INSERT remains an append.
-
-Iceberg v2 equality deletes are the appropriate first target because the
-pinned reader supports them. Arbitrary FDW and table-AM UPDATE/DELETE project
-Iceberg `_file` and `_pos`; v3 tables write deletion vectors and commit a
-`RowDelta`, while v2 tables keep the data-file rewrite path.
+FDW row-level writes instead identify rows through `_file` and `_pos`, using v3
+deletion vectors with `RowDelta` or data-file rewrites for v2 tables.
 
 ### Shared replication streams
 
-One slot per mirrored table causes every slot to decode unrelated database WAL.
-The scalable design owns one replication connection and slot per source
-database, routes changes by relation OID, and advances only after every target
-touched by the source transaction has reached a safe state. Cross-table
-Iceberg commits are not atomic, so recovery must retain per-table batch keys
-and hold the shared slot at the minimum safe LSN.
+One slot per table repeatedly decodes unrelated WAL. A shared connection/slot
+per source database can route by relation OID, advancing only when every target
+in a source transaction is safe. Because cross-table Iceberg publication is not
+atomic, keep per-table batch evidence and hold the slot at the minimum safe LSN.
 
-### Sub-second union reads
+### Sub-second reads
 
-Sub-second visibility should not be implemented by producing an Iceberg
-snapshot for every source transaction. A future service can retain committed
-Arrow batches and pending deletes, persist a local recovery WAL, wait until a
-requested LSN is replicated, and return a pinned read state combining Iceberg
-files with hot batches. This is an optional query layer and must not replace
-the native FDW or table-AM execution paths.
+Avoid one Iceberg snapshot per source transaction. A future query layer can keep
+committed Arrow batches and pending deletes, persist a local recovery WAL, wait
+for a requested LSN, and pin a combined Iceberg/hot-batch view. This optional
+layer must preserve native FDW and Table AM execution.
 
-### Maintenance
+### Maintenance and observability
 
-Streaming ingestion eventually requires file-size policy, compaction, delete
-file consolidation, snapshot expiration, and orphan cleanup. Operational SQL
-should expose initial-copy progress, commit and flush LSNs, replication lag,
-file counts, and the last error before automatic optimization is added.
+Define file sizing, compaction, delete consolidation, snapshot expiration, and
+orphan cleanup. Before automatic optimization, expose copy progress, commit/flush
+LSNs, lag, file counts, and the last error.

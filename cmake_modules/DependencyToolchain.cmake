@@ -86,6 +86,19 @@ function(resolve_iceberg_dependency out_target)
   include(ApplyIcebergPatches)
   apply_iceberg_patches("${iceberg_SOURCE_DIR}")
 
+  if(PGICEBERG_ENABLE_S3)
+    # The credential provider uses AWS types directly. Arrow's private SDK
+    # dependency does not propagate its headers to the Iceberg bundle.
+    if(NOT TARGET aws-cpp-sdk-core)
+      find_package(AWSSDK REQUIRED COMPONENTS core)
+    endif()
+    foreach(candidate iceberg_bundle_static iceberg_bundle_shared)
+      if(TARGET ${candidate})
+        target_link_libraries(${candidate} PRIVATE "$<BUILD_INTERFACE:aws-cpp-sdk-core>")
+      endif()
+    endforeach()
+  endif()
+
   set(iceberg_targets)
 
   foreach(candidate iceberg_bundle_static iceberg_bundle_shared)

@@ -33,6 +33,7 @@
 #include <iceberg/snapshot.h>
 #include <iceberg/table.h>
 #include <iceberg/update/snapshot_manager.h>
+#include <iceberg/util/snapshot_util.h>
 
 #include "common/catalog.h"
 #include "common/status.h"
@@ -51,7 +52,7 @@ namespace pgiceberg::engine {
 namespace {
 
 constexpr std::string_view kLogMagic = "pgiceberg-commit-recovery";
-constexpr int kLogVersion = 2;
+constexpr int kLogVersion = 3;
 constexpr const char* kRecoveryDirName = "pg_iceberg";
 constexpr const char* kRecoveryXactDirName = "xact";
 constexpr std::size_t kMaxLogFieldBytes = 1 << 20;
@@ -274,6 +275,7 @@ std::string FormatRecord(const CommitRecoveryRecord& record) {
     out << "credential_server " << EncodeField(table.options.credential_server) << '\n';
     out << "credential_mapping_required " << table.options.credential_mapping_required
         << '\n';
+    out << "foreign_server " << EncodeField(table.options.foreign_server) << '\n';
     out << "base_snapshot_id ";
     if (table.base_snapshot_id.has_value()) {
       out << *table.base_snapshot_id;
@@ -313,8 +315,8 @@ Result<std::optional<int64_t>> ReadOptionalSnapshotId(std::istream& in) {
 Result<CommitRecoveryRecord> ParseRecord(std::istream& in) {
   std::string magic;
   int version = 0;
-  if (!(in >> magic >> version) || magic != kLogMagic ||
-      (version != 1 && version != kLogVersion)) {
+  if (!(in >> magic >> version) || magic != kLogMagic || version < 1 ||
+      version > kLogVersion) {
     return std::unexpected(
         MakeError(ERRCODE_DATA_EXCEPTION, "unsupported pgiceberg commit recovery log"));
   }
@@ -367,6 +369,10 @@ Result<CommitRecoveryRecord> ParseRecord(std::istream& in) {
       }
       table.options.credential_mapping_required = required != 0;
     }
+    if (version >= 3) {
+      PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "foreign_server"));
+      PGICEBERG_RETURN_NOT_OK(DecodeField(in, table.options.foreign_server));
+    }
     PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "base_snapshot_id"));
     PGICEBERG_ASSIGN_OR_RETURN(table.base_snapshot_id, ReadOptionalSnapshotId(in));
     PGICEBERG_RETURN_NOT_OK(ExpectToken(in, "committed_snapshot_id"));
@@ -376,18 +382,6 @@ Result<CommitRecoveryRecord> ParseRecord(std::istream& in) {
     record.tables.push_back(std::move(table));
   }
   return record;
-}
-
-Result<std::optional<int64_t>> LoadCurrentSnapshotId(const iceberg::Table& table) {
-  auto snapshot = table.current_snapshot();
-  if (!snapshot) {
-    if (snapshot.error().kind == iceberg::ErrorKind::kNotFound) {
-      return std::optional<int64_t>{};
-    }
-    return std::unexpected(
-        MakePgError(snapshot.error(), "load current Iceberg snapshot"));
-  }
-  return snapshot.value()->snapshot_id;
 }
 
 bool SnapshotHasCommitId(const iceberg::Snapshot& snapshot, std::string_view commit_id) {
@@ -438,6 +432,8 @@ CatalogOptions CatalogOptionsFromStored(const Options& options) {
   catalog_options.table = options.table;
   catalog_options.credential_server = options.credential_server;
   catalog_options.credential_mapping_required = options.credential_mapping_required;
+  catalog_options.foreign_server = options.foreign_server;
+  catalog_options.properties = options.properties;
   return catalog_options;
 }
 
@@ -461,7 +457,7 @@ Result<SnapshotOwnership> InspectSnapshotOwnership(const CommitRecoveryTable& ta
                              CatalogOptionsForRepair(table.options));
   PGICEBERG_ASSIGN_OR_RETURN(
       auto iceberg_table, LoadIcebergTable(catalog_options, table.options.table.c_str()));
-  PGICEBERG_ASSIGN_OR_RETURN(auto current_id, LoadCurrentSnapshotId(*iceberg_table));
+  PGICEBERG_ASSIGN_OR_RETURN(auto current_id, CurrentSnapshotId(*iceberg_table));
   if (!current_id.has_value()) {
     return SnapshotOwnership::kMissing;
   }
@@ -477,21 +473,6 @@ Result<SnapshotOwnership> InspectSnapshotOwnership(const CommitRecoveryTable& ta
     return SnapshotOwnership::kBase;
   }
   return SnapshotOwnership::kForeign;
-}
-
-bool IsAncestorOf(const iceberg::Table& table, int64_t ancestor_id,
-                  int64_t descendant_id) {
-  auto current = table.SnapshotById(descendant_id);
-  while (current) {
-    if (current.value()->snapshot_id == ancestor_id) {
-      return true;
-    }
-    if (!current.value()->parent_snapshot_id.has_value()) {
-      return false;
-    }
-    current = table.SnapshotById(*current.value()->parent_snapshot_id);
-  }
-  return false;
 }
 
 std::string TableVerdict(const CommitRecoveryTable& table,
@@ -516,8 +497,11 @@ std::string TableVerdict(const CommitRecoveryTable& table,
       snapshot.snapshot_id == *table.base_snapshot_id) {
     return "already_rolled_back";
   }
+  // Keep reconciliation best-effort when snapshot history cannot be resolved.
   if (table.committed_snapshot_id.has_value() &&
-      IsAncestorOf(iceberg_table, *table.committed_snapshot_id, snapshot.snapshot_id)) {
+      iceberg::SnapshotUtil::IsAncestorOf(iceberg_table, snapshot.snapshot_id,
+                                          *table.committed_snapshot_id)
+          .value_or(false)) {
     return "superseded";
   }
   return "diverged";
@@ -739,7 +723,7 @@ Status RollbackIcebergSnapshot(const Options& options, int64_t snapshot_id) {
   PGICEBERG_ASSIGN_OR_RETURN(auto catalog_options, CatalogOptionsForRepair(options));
   PGICEBERG_ASSIGN_OR_RETURN(auto table,
                              LoadIcebergTable(catalog_options, options.table.c_str()));
-  PGICEBERG_ASSIGN_OR_RETURN(auto current_id, LoadCurrentSnapshotId(*table));
+  PGICEBERG_ASSIGN_OR_RETURN(auto current_id, CurrentSnapshotId(*table));
   if (current_id.has_value() && *current_id == snapshot_id) {
     return Ok();
   }

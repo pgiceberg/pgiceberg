@@ -38,6 +38,8 @@ class State:
         self.requests = collections.Counter()
         self.refreshes = collections.Counter()
         self.s3_requests = []
+        self.recovery_dir = None
+        self.recovery_records = []
 
     def credential(self, lifetime):
         n = len(self.storage_tokens) + 1
@@ -179,6 +181,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     state.refreshes[mode] += 1
                     self.reply(200, {"storage-credentials": [state.credential(5000)]})
                 elif path.endswith("/tables/events"):
+                    if self.command == "POST":
+                        # Capture the durable intent before an ambiguous commit
+                        # failure, so recovery tests use the writer's real log.
+                        if state.recovery_dir is not None:
+                            state.recovery_records.extend(
+                                path.read_text() for path in state.recovery_dir.glob("*.log"))
+                        self.error(503)
+                        return
                     metadata_key = next(key for key in reversed(state.objects) if key.startswith("/bucket/default/events/") and key.endswith(".metadata.json"))
                     self.reply(200, {"metadata-location": "s3:/" + metadata_key,
                         "metadata": json.loads(state.objects[metadata_key]),
@@ -263,7 +273,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     do_DELETE = handle_request
 
 
-def check_postgres(bindir, extension_path, endpoint, temp):
+def check_postgres(bindir, extension_path, endpoint, temp, state):
     """Exercise the extension factory and mappings against the same wire fixture."""
     import pathlib
     import socket
@@ -405,6 +415,95 @@ def check_postgres(bindir, extension_path, endpoint, temp):
         """)
         assert "rolled back" in sql(f"SET ROLE network_reader; SELECT pgiceberg.repair_commit('{commit_id}', 'rollback');")
         assert not recovery.exists(), "successful repair retained the recovery log"
+
+        # Keep public properties on the data server and secrets on a separate
+        # credential server. An actual failed write must preserve both sources.
+        sql(f"""
+            CREATE SERVER split_credentials FOREIGN DATA WRAPPER pgiceberg;
+            CREATE USER MAPPING FOR CURRENT_USER SERVER split_credentials
+                OPTIONS (rest_username 'reader', rest_password 'test-password');
+            CREATE USER MAPPING FOR network_reader SERVER split_credentials
+                OPTIONS (rest_username 'reader', rest_password 'wrong-password');
+            GRANT USAGE ON FOREIGN SERVER split_credentials TO network_reader;
+            CREATE SERVER split_data FOREIGN DATA WRAPPER pgiceberg OPTIONS (
+                catalog_type 'rest', catalog_uri {literal(endpoint + '/basic')},
+                warehouse 's3://bucket', credential_server 'split_credentials',
+                rest_auth_type 'basic', s3_endpoint {literal(endpoint)},
+                s3_region 'us-east-1', s3_path_style_access 'true');
+            CREATE FOREIGN TABLE split_events (id bigint) SERVER split_data
+                OPTIONS (table 'events');
+        """)
+        assert sql("SELECT count(*) FROM split_events;") == "0"
+        state.recovery_dir = recovery.parent
+        try:
+            sql("INSERT INTO split_events VALUES (42);")
+            raise AssertionError("ambiguous REST commit succeeded")
+        except AssertionError as error:
+            assert "Service Unavailable" in str(error), str(error)
+        assert len(state.recovery_records) == 1, state.recovery_records
+        record = state.recovery_records[0]
+        assert record.startswith("pgiceberg-commit-recovery 3\n"), record
+        assert "foreign_server 10 split_data\n" in record, record
+        assert "test-password" not in record and "vended-secret" not in record
+        split_commit = record.splitlines()[1].split()[-1]
+        recovery = recovery.parent / (split_commit + ".log")
+        recovery.write_text(record)
+        sql(f"""
+            SET ROLE network_reader;
+            DO $$ BEGIN
+                BEGIN
+                    PERFORM pgiceberg.repair_commit('{split_commit}', 'rollback');
+                    RAISE EXCEPTION 'repair ignored the data server permission';
+                EXCEPTION WHEN insufficient_privilege THEN NULL;
+                END;
+            END $$;
+        """)
+        sql("GRANT USAGE ON FOREIGN SERVER split_data TO network_reader;")
+        sql(f"""
+            SET ROLE network_reader;
+            DO $$ BEGIN
+                BEGIN
+                    PERFORM pgiceberg.repair_commit('{split_commit}', 'rollback');
+                    RAISE EXCEPTION 'repair used the owner credential mapping';
+                EXCEPTION WHEN SQLSTATE 'HV000' THEN NULL;
+                END;
+            END $$;
+        """)
+        assert recovery.exists(), "failed repair removed its log"
+        sql("ALTER USER MAPPING FOR network_reader SERVER split_credentials "
+            "OPTIONS (SET rest_password 'test-password');")
+        assert "rolled back" in sql(
+            f"SET ROLE network_reader; SELECT pgiceberg.repair_commit('{split_commit}', 'rollback');")
+        assert not recovery.exists(), "successful repair retained its log"
+
+        # A mapping owner can change their own remote username and password.
+        # With trust auth, a bogus password must not authorize a normal caller
+        # to connect as the catalog superuser. Superusers retain this ability.
+        hba = data / "pg_hba.conf"
+        hba.write_text("host all network_admin 127.0.0.1/32 trust\n" + hba.read_text())
+        subprocess.run(control + ["reload"], check=True,
+                       stdout=subprocess.DEVNULL, timeout=30)
+        # Wait for a fresh TCP connection to observe the new authentication rule.
+        deadline = time.monotonic() + 5
+        while subprocess.run(psql + ["-h", "127.0.0.1", "-w", "-c", "SELECT 1"],
+                             capture_output=True, timeout=5).returncode:
+            assert time.monotonic() < deadline, "HBA reload timed out"
+            time.sleep(0.05)
+        sql("ALTER USER MAPPING FOR CURRENT_USER SERVER credentials_sql "
+            "OPTIONS (SET catalog_user 'network_admin', SET catalog_password 'wrong-password');")
+        assert sql("SELECT pgiceberg.table_format_version('network_sql', 'default', 'events');") == "3"
+        sql("""
+            SET ROLE network_reader;
+            ALTER USER MAPPING FOR CURRENT_USER SERVER credentials_sql
+                OPTIONS (SET catalog_user 'network_admin', SET catalog_password 'wrong-password');
+            DO $$ BEGIN
+                BEGIN
+                    PERFORM pgiceberg.table_format_version('network_sql', 'default', 'events');
+                    RAISE EXCEPTION 'non-superuser accessed the SQL catalog through trust';
+                EXCEPTION WHEN SQLSTATE '58030' THEN NULL;
+                END;
+            END $$;
+        """)
     except Exception:
         print(log.read_text(), file=sys.stderr)
         raise
@@ -426,8 +525,6 @@ def main():
         try:
             endpoint = f"http://127.0.0.1:{server.server_port}"
             subprocess.run([sys.argv[1], endpoint, temp + "/catalog.sqlite"], check=True, timeout=90)
-            if len(sys.argv) == 4:
-                check_postgres(sys.argv[2], sys.argv[3], endpoint, temp)
             state = server.state
             assert state.requests[("GET", "/retry")] == 3
             assert state.requests[("GET", "/forbidden")] == 1
@@ -442,6 +539,8 @@ def main():
             assert siblings and all(key == "pgiceberg-unconfigured" for key in siblings)
             assert state.objects["/bucket/default/events/data/renewed-basic"] == b"renewed"
             assert state.objects["/bucket/default/events/data/renewed-oauth"] == b"renewed"
+            if len(sys.argv) == 4:
+                check_postgres(sys.argv[2], sys.argv[3], endpoint, temp, state)
         finally:
             server.shutdown()
             server.server_close()

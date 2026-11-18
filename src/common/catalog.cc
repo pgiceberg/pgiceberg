@@ -35,6 +35,8 @@
 #include <iceberg/table_properties.h>
 #include <iceberg/transaction.h>
 #include <iceberg/update/update_properties.h>
+#include <iceberg/util/content_file_util.h>
+#include <iceberg/util/snapshot_util.h>
 
 #ifdef PGICEBERG_ENABLE_S3
 #  include <iceberg/arrow/arrow_io_util.h>
@@ -140,6 +142,10 @@ Result<std::shared_ptr<iceberg::sql::SqlCatalog>> CreateSqlCatalog(
 
   if (options.catalog_type == "sql") {
     PGICEBERG_RETURN_NOT_OK(ValidateSqlCatalogOptions(options, "SQL", require_warehouse));
+    // Supplying a password is insufficient if libpq authenticates with trust,
+    // peer, or a client certificate instead. Enforce the actual handshake.
+    config.props["password-required"] =
+        superuser_arg(GetOuterUserId()) ? "false" : "true";
     for (const auto& [property, keyword] :
          {std::pair{"pgiceberg.catalog-user", "user"},
           std::pair{"pgiceberg.catalog-password", "password"},
@@ -366,6 +372,17 @@ Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& o
                            "load Iceberg table");
 }
 
+Result<std::optional<int64_t>> CurrentSnapshotId(const iceberg::Table& table) {
+  PGICEBERG_ASSIGN_OR_RETURN(
+      auto snapshot, FromIcebergResult(iceberg::SnapshotUtil::OptionalLatestSnapshot(
+                                           *table.metadata(), ""),
+                                       "load current Iceberg snapshot"));
+  if (snapshot == nullptr) {
+    return std::nullopt;
+  }
+  return snapshot->snapshot_id;
+}
+
 Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& options,
                                                          const char* relation_name) {
   PGICEBERG_ASSIGN_OR_RETURN(auto table, LoadIcebergTable(options, relation_name));
@@ -400,13 +417,10 @@ Result<TableFilesSummary> LoadIcebergTableFilesSummary(
     return summary;
   }
 
-  PGICEBERG_ASSIGN_OR_RETURN(auto manifest_list_reader,
-                             FromIcebergResult(iceberg::ManifestListReader::Make(
-                                                   snapshot->manifest_list, table->io()),
-                                               "open Iceberg manifest list"));
-  PGICEBERG_ASSIGN_OR_RETURN(
-      auto manifests,
-      FromIcebergResult(manifest_list_reader->Files(), "read Iceberg manifest list"));
+  iceberg::SnapshotReader snapshot_reader(snapshot.get());
+  PGICEBERG_ASSIGN_OR_RETURN(auto manifests,
+                             FromIcebergResult(snapshot_reader.Manifests(table->io()),
+                                               "read Iceberg manifest list"));
   PGICEBERG_ASSIGN_OR_RETURN(auto schema,
                              FromIcebergResult(table->schema(), "load table schema"));
   PGICEBERG_ASSIGN_OR_RETURN(auto specs_by_id,
@@ -443,8 +457,7 @@ Result<TableFilesSummary> LoadIcebergTableFilesSummary(
           summary.delete_file_count++;
           summary.position_delete_file_count++;
           summary.delete_file_size_in_bytes += file.file_size_in_bytes;
-          if (file.referenced_data_file.has_value() && file.content_offset.has_value() &&
-              file.content_size_in_bytes.has_value()) {
+          if (iceberg::ContentFileUtil::IsDV(file)) {
             summary.deletion_vector_file_count++;
           }
           break;

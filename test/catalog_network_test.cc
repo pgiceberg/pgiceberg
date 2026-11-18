@@ -120,7 +120,8 @@ void Run(const std::string& endpoint, const std::string& sqlite_path) {
       iceberg::SchemaField::MakeRequired(1, "id", iceberg::int64())});
   auto table = Require(
       sql->CreateTable(identifier, schema, iceberg::PartitionSpec::Unpartitioned(),
-                       iceberg::SortOrder::Unsorted(), "s3://bucket/default/events", {}));
+                       iceberg::SortOrder::Unsorted(), "s3://bucket/default/events",
+                       {{"write.parquet.compression-codec", "uncompressed"}}));
   auto loaded = Require(sql->LoadTable(identifier));
   Check(loaded->metadata_file_location() == table->metadata_file_location(),
         "SQLite S3 catalog did not reload its metadata");
@@ -185,7 +186,9 @@ void Run(const std::string& endpoint, const std::string& sqlite_path) {
 
   for (const std::string mode : {"basic", "oauth"}) {
     Properties properties = storage;
-    properties["uri"] = endpoint + "/" + mode;
+    properties["uri"] = endpoint;
+    properties["uri"] += '/';
+    properties["uri"] += mode;
     properties["warehouse"] = "s3://bucket";
     properties["s3.access-key-id"] = "pgiceberg-unconfigured";
     properties["s3.secret-access-key"] = "pgiceberg-unconfigured";
@@ -215,6 +218,7 @@ void Run(const std::string& endpoint, const std::string& sqlite_path) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1600));
     std::atomic<bool> parallel_ok{true};
     std::vector<std::thread> readers;
+    readers.reserve(8);
     for (int i = 0; i < 8; ++i) {
       readers.emplace_back([&] {
         auto read = table_io->ReadFile(blob, std::nullopt);

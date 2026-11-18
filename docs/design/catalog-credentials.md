@@ -68,12 +68,18 @@ vend table credentials; its initial S3 client has deliberately unusable credenti
 until configured credentials or a table-specific credential response replace them.
 SQL/SQLite S3 access requires mapped credentials. Non-superuser SQL access requires
 both a mapped database user and password, preventing libpq environment/password-file
-fallback. Superusers retain the existing SQL connection configuration behavior.
+fallback. The SQL connector also verifies that each connection actually used password
+authentication before issuing catalog SQL. A supplied password cannot bypass this
+check when the server uses trust, peer, or certificate authentication. Superusers
+retain the existing SQL connection configuration behavior.
 
-Recovery log version 2 stores the credential-server reference and whether a mapping
-is required, never the resolved properties. Version 1 remains readable. Repair
-resolves current mappings under the
-repair caller's identity, so credentials can rotate without rewriting recovery logs.
+Recovery log version 3 stores the data-server and credential-server references and
+whether a mapping is required, never the resolved secrets. Versions 1 and 2 remain
+readable. Repair rereads public data-server properties before credential-server
+properties, and checks USAGE on both servers under the repair caller's identity.
+It resolves the caller's current mapping, so credentials can rotate without rewriting
+recovery logs. Connection settings on a separate data server therefore survive
+backend exit without being confused with the credential mapping source.
 The small maintained SQL connector patch passes credentials as separate connection
 properties, quotes libpq values (including spaces, quotes, and backslashes),
 and suppresses connection exception text. Patch application is idempotent
@@ -162,7 +168,10 @@ fixture and covers retries, timeouts, redirects, redaction, Basic/OAuth2,
 concurrent credential renewal, open streams, prefix isolation, and expiry.
 On PostgreSQL 18 it also starts a temporary cluster for SQL/SQLite S3 DML,
 passwords containing special characters, caller-specific REST authentication,
-and recovery using current caller mappings.
+and recovery using current caller mappings. Recovery coverage includes a durable
+intent captured during a failed REST write with separate connection and credential
+servers, permission revocation, and mapping rotation. SQL coverage rejects ordinary
+callers using a trust-authenticated superuser mapping even with a supplied password.
 
 ```sh
 ctest --test-dir build/catalog-0.4.0 --output-on-failure -R '^catalog_network(_policy)?$'

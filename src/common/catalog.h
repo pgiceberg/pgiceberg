@@ -33,6 +33,8 @@ struct CatalogOptions {
   std::string table;
   // A reference only: secrets are resolved for the calling role at catalog open.
   std::string credential_server;
+  // Public connection properties may come from a separate data server.
+  std::string foreign_server;
   bool credential_mapping_required = false;
   std::unordered_map<std::string, std::string> properties;
 };
@@ -62,6 +64,8 @@ Result<std::shared_ptr<iceberg::Catalog>> CreateCatalog(const CatalogOptions& op
 
 Result<std::shared_ptr<iceberg::Table>> LoadIcebergTable(const CatalogOptions& options,
                                                          const char* relation_name);
+// Returns nullopt when the table has no current snapshot.
+Result<std::optional<int64_t>> CurrentSnapshotId(const iceberg::Table& table);
 Result<std::string> LoadIcebergTableMetadataFileLocation(const CatalogOptions& options,
                                                          const char* relation_name);
 Result<TableFilesSummary> LoadIcebergTableFilesSummary(

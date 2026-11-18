@@ -88,6 +88,23 @@ Status InvalidProperty(std::string_view name) {
                 "invalid pgiceberg option \"" + std::string(name) + "\" value"));
 }
 
+Result<ForeignServer*> ServerForCaller(const std::string& name, const char* kind) {
+  auto* server = GetForeignServerByName(name.c_str(), false);
+  if (object_aclcheck(ForeignServerRelationId, server->serverid, GetOuterUserId(),
+                      ACL_USAGE) != ACLCHECK_OK) {
+    return std::unexpected(
+        MakeError(ERRCODE_INSUFFICIENT_PRIVILEGE,
+                  std::string("permission denied for pgiceberg ") + kind + " server"));
+  }
+  const auto* wrapper = GetForeignDataWrapper(server->fdwid);
+  if (std::string_view(wrapper->fdwname) != "pgiceberg") {
+    return std::unexpected(MakeError(
+        ERRCODE_FDW_INVALID_OPTION_NAME,
+        std::string(kind) + " server must use the pgiceberg foreign data wrapper"));
+  }
+  return server;
+}
+
 }  // namespace
 
 bool IsCatalogProperty(std::string_view name, bool secret) {
@@ -207,24 +224,18 @@ Result<CatalogOptions> ResolveCatalogCredentials(const CatalogOptions& source) {
   CatalogOptions options = source;
   PGICEBERG_RETURN_NOT_OK(ValidateCatalogUri(options.catalog_uri));
   PGICEBERG_RETURN_NOT_OK(ValidateCatalogUri(options.warehouse));
+  if (!options.foreign_server.empty() &&
+      options.foreign_server != options.credential_server) {
+    PGICEBERG_ASSIGN_OR_RETURN(auto server,
+                               ServerForCaller(options.foreign_server, "connection"));
+    PGICEBERG_RETURN_NOT_OK(ApplyCatalogProperties(options, server->options, false));
+  }
   if (!options.credential_server.empty()) {
-    ForeignServer* server =
-        GetForeignServerByName(options.credential_server.c_str(), false);
+    PGICEBERG_ASSIGN_OR_RETURN(auto server,
+                               ServerForCaller(options.credential_server, "credential"));
     // GetOuterUserId honors SET ROLE, including calls through SECURITY DEFINER
     // helpers. Using the extension owner's mapping would cross a trust boundary.
     const Oid user = GetOuterUserId();
-    if (object_aclcheck(ForeignServerRelationId, server->serverid, user, ACL_USAGE) !=
-        ACLCHECK_OK) {
-      return std::unexpected(
-          MakeError(ERRCODE_INSUFFICIENT_PRIVILEGE,
-                    "permission denied for pgiceberg credential server"));
-    }
-    const auto* wrapper = GetForeignDataWrapper(server->fdwid);
-    if (std::string_view(wrapper->fdwname) != "pgiceberg") {
-      return std::unexpected(
-          MakeError(ERRCODE_FDW_INVALID_OPTION_NAME,
-                    "credential server must use the pgiceberg foreign data wrapper"));
-    }
     PGICEBERG_RETURN_NOT_OK(ApplyCatalogProperties(options, server->options, false));
     // PostgreSQL's normal per-user / PUBLIC fallback. No process-wide cache.
     const bool mapped =

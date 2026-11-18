@@ -200,6 +200,7 @@ pgiceberg::Result<pgiceberg::CatalogOptions> ToCatalogOptions(const Options& opt
   }
   catalog_options.name_space = options.name_space;
   catalog_options.table = options.table;
+  catalog_options.foreign_server = options.foreign_server;
   if (!options.credential_server.empty()) {
     catalog_options.credential_server = options.credential_server;
     catalog_options.credential_mapping_required = true;
